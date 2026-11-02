@@ -1,0 +1,15 @@
+execute_process(COMMAND "${CLI}" --seed 42 --sample 45 30
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "CLI returned ${result}: ${error}")
+endif()
+string(JSON pressure GET "${output}" pressure_Pa)
+string(JSON seed GET "${output}" seed)
+if(NOT seed EQUAL 42 OR pressure LESS_EQUAL 0 OR pressure GREATER 200000)
+    message(FATAL_ERROR "Invalid scientific sample: ${output}")
+endif()
+execute_process(COMMAND "${CLI}" --sample 91 0
+    RESULT_VARIABLE invalid_result OUTPUT_VARIABLE invalid_output ERROR_VARIABLE invalid_error)
+if(NOT invalid_result EQUAL 1 OR NOT invalid_output STREQUAL "")
+    message(FATAL_ERROR "CLI did not reject an invalid latitude")
+endif()

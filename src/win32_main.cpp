@@ -12,6 +12,7 @@ struct Options {
     Config config;
     int frames=0;
     bool globe=false;
+    SurfaceStyle surfaceStyle=SurfaceStyle::Grid;
     std::filesystem::path capture, report;
 };
 Options parseOptions() {
@@ -38,6 +39,13 @@ Options parseOptions() {
             } else if(arg==L"--capture") options.capture=next();
             else if(arg==L"--report") options.report=next();
             else if(arg==L"--globe") options.globe=true;
+            else if(arg==L"--surface-style") {
+                const auto value=next();
+                if(value==L"natural") options.surfaceStyle=SurfaceStyle::Natural;
+                else if(value==L"grid") options.surfaceStyle=SurfaceStyle::Grid;
+                else if(value==L"wireframe") options.surfaceStyle=SurfaceStyle::Wireframe;
+                else throw std::invalid_argument("Surface style must be natural, grid or wireframe");
+            }
             else throw std::invalid_argument("Unknown command-line option");
         }
     } catch(...) { LocalFree(argv); throw; }
@@ -48,7 +56,8 @@ Options parseOptions() {
 class Application {
 public:
     explicit Application(Options options) : options_(std::move(options)), world_(options_.config), explorer_(world_) {
-        view_.globe=options_.globe; orientLanding(); noon();
+        view_.globe=options_.globe; view_.surfaceStyle=options_.surfaceStyle;
+        orientLanding(); noon();
     }
     ~Application() {
         captureMouse(false); renderer_.reset();
@@ -125,7 +134,8 @@ public:
                 << "\nseed=" << world_.config().seed << "\nlatitude=" << degrees(latitude(explorer_.up()))
                 << "\nlongitude=" << degrees(longitude(explorer_.up())) << "\naltitude_m=" << explorer_.altitude()
                 << "\nheading_deg=" << degrees(explorer_.heading()) << "\npitch_deg=" << degrees(explorer_.pitch())
-                << "\nflight=" << explorer_.flying << "\nglobe=" << view_.globe << '\n';
+                << "\nflight=" << explorer_.flying << "\nglobe=" << view_.globe
+                << "\nsurface_style=" << surfaceStyleName(view_.surfaceStyle) << '\n';
             for(unsigned i=0;i<5;++i) out << moduleNames[i] << '=' << world_.modules().enabled(static_cast<Module>(i)) << '\n';
             if(!out) throw std::runtime_error("Cannot write smoke report");
         }
@@ -175,6 +185,13 @@ private:
         else if(key=='F') explorer_.flying=!explorer_.flying;
         else if(key==VK_TAB) view_.globe=!view_.globe;
         else if(key=='H') view_.help=!view_.help;
+        else if(key=='G') {
+            switch(view_.surfaceStyle) {
+                case SurfaceStyle::Grid: view_.surfaceStyle=SurfaceStyle::Wireframe; break;
+                case SurfaceStyle::Wireframe: view_.surfaceStyle=SurfaceStyle::Natural; break;
+                default: view_.surfaceStyle=SurfaceStyle::Grid; break;
+            }
+        }
         else if(key=='P') view_.paused=!view_.paused;
         else if(key=='T') noon();
         else if(key==VK_OEM_PLUS || key==VK_ADD) view_.timeScale=std::min(86400.0,view_.timeScale*2);

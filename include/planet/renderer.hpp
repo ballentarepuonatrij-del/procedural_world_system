@@ -6,10 +6,19 @@
 #include <string>
 
 namespace planet {
+enum class SurfaceStyle { Natural, Grid, Wireframe };
+inline const char* surfaceStyleName(SurfaceStyle style) {
+    switch(style) {
+        case SurfaceStyle::Grid: return "grid";
+        case SurfaceStyle::Wireframe: return "wireframe";
+        default: return "natural";
+    }
+}
 struct ViewState {
     int width=1280, height=800;
     double seconds=79*86400.0, timeScale=60, fps=0;
     bool globe=false, help=true, captured=false, paused=false;
+    SurfaceStyle surfaceStyle=SurfaceStyle::Grid;
 };
 class Renderer {
 public:
@@ -26,9 +35,10 @@ private:
     void buildGlobe(const World& world,double seconds);
     void drawHud(const World& world,const Explorer& explorer,const ViewState& view);
     void text(float x,float y,const std::string& value,Color color,bool large=false);
-    GLuint terrain_=0, globe_=0, font_=0, headingFont_=0, detailTexture_=0;
+    GLuint terrain_=0, terrainGrid_=0, globe_=0, font_=0, headingFont_=0, detailTexture_=0;
     Vec3 anchor_{1,0,0}, east_{0,0,1}, north_{0,1,0};
     double lastTerrainTime_=-1e30, lastGlobeTime_=-1e30;
+    double terrainStep_=8, terrainEyeHeight_=0;
     bool dirty_=true, globeDirty_=true;
 };
 } // namespace planet

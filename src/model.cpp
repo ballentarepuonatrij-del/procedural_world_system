@@ -41,6 +41,8 @@ bool Modules::enabled(Module m) const {
     if (m == Module::SurfaceDetail) return enabled(Module::Terrain);
     if (m == Module::Wind) return enabled(Module::Atmosphere);
     if (m == Module::Clouds) return enabled(Module::Climate) && enabled(Module::Wind);
+    if (m == Module::Hydrology) return enabled(Module::Terrain);
+    if (m == Module::Erosion) return enabled(Module::Hydrology);
     return true;
 }
 void Modules::set(Module m, bool enabled) {

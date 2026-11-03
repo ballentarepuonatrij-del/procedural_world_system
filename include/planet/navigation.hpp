@@ -2,13 +2,14 @@
 #include "planet/surface_detail.hpp"
 
 namespace planet {
+class Hydrology;
 struct Input { double forward{}, right{}, vertical{}; bool sprint{}, jump{}; };
 class Explorer {
 public:
     explicit Explorer(const World& world);
-    void update(const World& world, const Input& input, double dt);
+    void update(const World& world, const Input& input, double dt,const Hydrology* water=nullptr);
     void look(double horizontal, double vertical);
-    void teleport(const World& world, Vec3 direction);
+    void teleport(const World& world, Vec3 direction,const Hydrology* water=nullptr);
     Vec3 up() const { return up_; }
     Vec3 forward() const { return heading_*std::cos(pitch_) + up_*std::sin(pitch_); }
     Vec3 horizontalForward() const { return heading_; }
@@ -21,8 +22,8 @@ public:
     double flightSpeed = 250.0;
     static constexpr double eyeHeight = 1.75;
 private:
-    void step(const World& world, const Input& input, double dt);
-    void refreshObstacles(const World& world);
+    void step(const World& world, const Input& input, double dt,const Hydrology* water);
+    void refreshObstacles(const World& world,const Hydrology* water);
     std::vector<SurfaceObject> obstacles_;
     Vec3 obstacleAnchor_{};
     std::uint64_t obstacleSeed_=0;

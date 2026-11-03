@@ -1,5 +1,6 @@
 #include "planet/navigation.hpp"
 #include "planet/weather.hpp"
+#include "planet/hydrology.hpp"
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -501,6 +502,157 @@ void registerTests() {
         near(after.cloudWater,before.cloudWater,0.02,"Cloud field survives local-domain movement");
         require(weather.steps()==steps,"Moving the domain does not integrate hidden time");
         require(std::abs(budget.residualKg())<budget.initialKg*1e-10,"New and leaving domain water is accounted for");
+    });
+    test("hydrology","Lake at rest over uneven bed stays exactly still",[] {
+        RunoffGrid grid(10,4); std::vector<double> rain(grid.cells.size());
+        for(std::size_t i=0;i<grid.cells.size();++i) {
+            auto& c=grid.cells[i]; c.rock=0.3*std::sin(static_cast<double>(i)); c.water=2-c.bed(); c.conductivity=0;
+        }
+        const auto initial=grid.cells; const double volume=grid.waterVolume();
+        grid.advance(30,rain,0,false,false,false,0);
+        near(grid.waterVolume(),volume,1e-9,"Closed lake mass");
+        for(std::size_t i=0;i<initial.size();++i) near(grid.cells[i].water,initial[i].water,1e-12,"Lake level");
+        for(double q:grid.eastFlow) near(q,0,1e-13,"No spurious east current");
+        for(double q:grid.northFlow) near(q,0,1e-13,"No spurious north current");
+    });
+    test("hydrology","Manning uniform flow and dry barrier",[] {
+        const double h=0.1,n=0.04,slope=0.01,dx=4;
+        const double q=std::pow(h,5.0/3)*std::sqrt(slope)/n;
+        near(inertialDischarge(q,10,10-slope*dx,h,h,n,dx,0.25),q,1e-12,"Steady Manning balance");
+        near(inertialDischarge(0,0,2,1,0,n,dx,0.25),0,0,"Dry sill above the free surface blocks water");
+    });
+    test("hydrology","Wet front remains nonnegative and conserves volume",[] {
+        RunoffGrid grid(16,2); std::vector<double> rain(grid.cells.size());
+        for(int z=0;z<16;++z) for(int x=0;x<16;++x) {
+            auto& c=grid.cells[static_cast<std::size_t>(z*16+x)]; c.water=x<5 ? 0.4 : 0; c.conductivity=0;
+        }
+        const double initial=grid.waterVolume(); grid.advance(20,rain,0,false,false,false,0);
+        near(grid.waterVolume(),initial,1e-9,"Wet/dry mass");
+        require(grid.cells[8*16+7].water>0,"Water enters the dry downstream reach");
+        for(const auto& c:grid.cells) require(c.water>=0 && std::isfinite(c.water),"No negative depth at the front");
+    });
+    test("hydrology","Rain infiltration drainage and evaporation close the ledger",[] {
+        RunoffGrid grid(6,4); std::vector<double> rain(grid.cells.size(),30/3.6e6);
+        for(auto& c:grid.cells) { c.soilWater=0.1; c.conductivity=3e-6; }
+        const double initial=grid.waterVolume();
+        const auto b=grid.advance(120,rain,2e-8,false,false,false,0);
+        near(b.rainM3,6*6*16*30/3.6e6*120,1e-10,"Rain in SI units");
+        near(grid.waterVolume()+b.evaporatedM3+b.drainedM3-initial-b.rainM3,0,1e-9,"Full water ledger");
+        require(b.evaporatedM3>0 && b.drainedM3>0 && grid.cells[0].soilWater>0.1,"Finite infiltration and sinks");
+    });
+    test("hydrology","Suspended soil uses the same conservative water flux",[] {
+        RunoffGrid grid(12,2); std::vector<double> rain(grid.cells.size());
+        for(int z=0;z<12;++z) for(int x=0;x<12;++x) {
+            auto& c=grid.cells[static_cast<std::size_t>(z*12+x)]; c.conductivity=0;
+            c.rock=-0.02*x; c.water=x<4 ? 0.2 : 0; c.sediment=c.water*10;
+        }
+        const double water=grid.waterVolume(),solid=grid.solidMass();
+        grid.advance(30,rain,0,false,false,false,0);
+        near(grid.waterVolume(),water,1e-9,"Transported water"); near(grid.solidMass(),solid,1e-6,"Transported solids");
+        require(grid.cells[6*12+6].sediment>0,"Sediment travels with the wet front");
+        for(const auto& c:grid.cells) require(c.sediment>=0 && c.soil==1,"Positive suspension with bed exchange disabled");
+    });
+    test("hydrology","Erosion deposition and bedrock conserve solid mass",[] {
+        RunoffGrid grid(12,2); std::vector<double> rain(grid.cells.size());
+        for(int z=0;z<12;++z) for(int x=0;x<12;++x) {
+            auto& c=grid.cells[static_cast<std::size_t>(z*12+x)]; c.rock=-0.04*x;
+            c.soil=c.initialSoil=1e-5; c.water=0.15; c.conductivity=0;
+        }
+        const double mass=grid.solidMass(); const auto b=grid.advance(30,rain,0,true,false,false,0);
+        require(b.erodedKg>0,"Flow detaches soil above the critical shear");
+        near(grid.solidMass(),mass,1e-7,"Eroded solids are carried or redeposited");
+        for(const auto& c:grid.cells) require(c.soil>=0 && c.bed()>=c.rock,"Bedrock is not eroded");
+        RunoffGrid dry(2,1); std::vector<double> none(4);
+        dry.cells[0].sediment=0.8; const auto old=dry.solidMass();
+        const auto settled=dry.advance(1,none,0,true,false,false,0);
+        near(settled.depositedKg,0.8,1e-12,"Dry suspended load settles onto bed");
+        near(dry.cells[0].soil,1+0.8/RunoffGrid::soilDensity,1e-12,"Deposit raises terrain in metres");
+        near(dry.solidMass(),old,1e-9,"Dry settling conserves solids");
+    });
+    test("hydrology","Open and sea boundaries account for exported mass",[] {
+        RunoffGrid grid(8,2); std::vector<double> rain(grid.cells.size());
+        for(auto& c:grid.cells) { c.water=0.1; c.sediment=1; c.conductivity=0; }
+        const double water=grid.waterVolume(),solid=grid.solidMass();
+        const auto b=grid.advance(10,rain,0,false,true,false,0);
+        require(b.boundaryM3>0 && b.sedimentOutKg>0,"Open edges export water and sediment");
+        near(grid.waterVolume()+b.boundaryM3,water,1e-9,"Open water ledger");
+        near(grid.solidMass()+b.sedimentOutKg,solid,1e-6,"Open sediment ledger");
+        RunoffGrid coast(4,2); std::vector<double> dry(16);
+        for(auto& c:coast.cells) { c.rock=-2; c.conductivity=0; }
+        for(int z=0;z<4;++z) coast.cells[static_cast<std::size_t>(z*4)].sea=true;
+        const auto fill=coast.advance(10,dry,0,false,false,true,0);
+        require(fill.boundaryM3<0,"Sea reservoir supplies a below-sea-level basin");
+        near(coast.waterVolume()+fill.boundaryM3,0,1e-8,"Sea input is explicitly measured");
+    });
+    test("hydrology","Fixed coupling clock is frame independent and pause retains fields",[] {
+        World w; w.modules().set(Module::Wind,false); const auto p=w.findLand();
+        Simulation a(w,p,0),b(w,p,0); a.setRainExperiment(30); b.setRainExperiment(30);
+        a.advance(w,p,20); for(int i=0;i<80;++i) b.advance(w,p,0.25);
+        for(std::size_t i=0;i<a.water.grid().cells.size();++i) {
+            near(a.water.grid().cells[i].water,b.water.grid().cells[i].water,0,"Frame-independent ground water");
+            near(a.water.grid().cells[i].soil,b.water.grid().cells[i].soil,0,"Frame-independent erosion");
+        }
+        const auto before=a.water.budget(); a.advance(w,p,0);
+        near(a.water.budget().storedWaterM3,before.storedWaterM3,0,"Paused water");
+        w.modules().set(Module::Hydrology,false); a.advance(w,p,60);
+        require(!a.water.enabled() && !a.water.erosionEnabled(),"Water disables dependent erosion");
+        near(a.water.budget().storedWaterM3,before.storedWaterM3,0,"Disabled fields retain state");
+        w.modules().set(Module::Hydrology,true); a.advance(w,p,0);
+        require(a.water.enabled() && a.water.erosionEnabled(),"Modules restore");
+        w.modules().set(Module::Terrain,false); a.advance(w,p,0);
+        require(!a.water.enabled(),"Water depends on terrain");
+        require(std::abs(before.waterResidual())<1e-7 && std::abs(before.solidResidual())<1e-4,"Coupled ledgers");
+    });
+    test("hydrology","Moving local domain retains overlapping and cached soil",[] {
+        World w; w.modules().set(Module::Wind,false); const auto p=w.findLand(); Simulation sim(w,p,0);
+        sim.setRainExperiment(80); sim.advance(w,p,60); const auto before=sim.water.sample(p);
+        sim.advance(w,normalized(p+east(p)*(80/w.config().radius)),0);
+        const auto overlap=sim.water.sample(p);
+        near(overlap.depth,before.depth,1e-10,"Exact overlap on the fixed lattice");
+        sim.advance(w,normalized(p+east(p)*(400/w.config().radius)),0); sim.advance(w,p,0);
+        const auto restored=sim.water.sample(p); near(restored.depth,before.depth,1e-10,"Cached water returns");
+        near(restored.bedChange,before.bedChange,1e-10,"Cached soil returns");
+        const auto b=sim.water.budget(); require(std::abs(b.waterResidual())<1e-6 && std::abs(b.solidResidual())<1e-4,"Domain ledger includes entering/leaving cells");
+    });
+    test("hydrology","Weather precipitation reaches the ground once",[] {
+        World w; const auto p=w.findLand(); Weather weather(w,p,79*86400); weather.advance(w,p,2);
+        Vec3 wet=p; double maximum=0;
+        for(int z=0;z<Weather::resolution;++z) for(int x=0;x<Weather::resolution;++x) {
+            const auto q=weather.directionAt((x+0.5)*Weather::spacing-Weather::extent/2,(z+0.5)*Weather::spacing-Weather::extent/2);
+            const double rain=weather.sample(q).rainRate;
+            if(rain>maximum && w.elevation(q)>0) { wet=q; maximum=rain; }
+        }
+        require(maximum>0,"Test location has actual cloud precipitation");
+        Hydrology water(w,wet); double expected=0;
+        for(int z=0;z<Hydrology::resolution;++z) for(int x=0;x<Hydrology::resolution;++x)
+            if(!water.grid().cells[static_cast<std::size_t>(z*Hydrology::resolution+x)].sea)
+                expected+=weather.sample(water.directionAt(water.cellX(x),water.cellZ(z))).rainRate/1000*2*Hydrology::spacing*Hydrology::spacing;
+        water.step(w,weather,2);
+        near(water.budget().rainM3,expected,1e-9,"Precipitation kg/m2 converted to metres exactly once");
+        require(expected>0,"Ground receives weather-driven rainfall");
+    });
+    test("hydrology","Poles large relocations and invalid inputs are bounded",[] {
+        World w; w.modules().set(Module::Wind,false);
+        Simulation sim(w,{0,1,0},0); sim.setRainExperiment(10); sim.advance(w,{0,1,0},2);
+        sim.advance(w,{0,-1,0},2); sim.advance(w,{-1,0,0},2);
+        const auto budget=sim.water.budget(); require(std::isfinite(budget.storedWaterM3),"Finite polar/antipodal state");
+        require(std::abs(budget.waterResidual())<1e-6 && std::abs(budget.solidResidual())<1e-4,"Relocation ledger");
+        for(double dt:{-1.0,121.0,std::numeric_limits<double>::quiet_NaN()}) {
+            bool rejected=false; try { sim.advance(w,{-1,0,0},dt); } catch(const std::invalid_argument&) { rejected=true; }
+            require(rejected,"Invalid coupled timestep rejected");
+        }
+        bool rejected=false; try { sim.setRainExperiment(201); } catch(const std::invalid_argument&) { rejected=true; }
+        require(rejected,"Unbounded experiment forcing rejected");
+    });
+    test("hydrology","Walking uses the same ground height as the runoff mesh",[] {
+        World w; w.modules().set(Module::SurfaceDetail,false);
+        Explorer explorer(w); Hydrology water(w,explorer.up());
+        explorer.teleport(w,explorer.up(),&water); explorer.update(w,{},1,&water);
+        near(explorer.altitude(),water.ground(w,explorer.up())+Explorer::eyeHeight,1e-9,"Standing on the local mesh");
+        explorer.update(w,{1,0,0,false,false},1,&water);
+        require(explorer.altitude()>=water.ground(w,explorer.up())+Explorer::eyeHeight-1e-6,"No walking through ground");
+        w.modules().set(Module::Hydrology,false); water.synchronize(w,explorer.up());
+        near(water.ground(w,explorer.up()),w.surface(explorer.up()),0,"Disabled hydrology restores procedural collision surface");
     });
     test("weather","Poles pause and invalid timesteps are handled",[] {
         World world;

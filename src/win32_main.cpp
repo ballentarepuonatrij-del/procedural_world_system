@@ -11,8 +11,8 @@ using namespace planet;
 struct Options {
     Config config;
     int frames=0;
-    bool globe=false, detail=true, wind=true, clouds=true, paused=false, windTracers=false;
-    double weatherSeconds=0;
+    bool globe=false, detail=true, wind=true, clouds=true, water=true, erosion=true, paused=false, windTracers=false;
+    double weatherSeconds=0, rainMmH=0;
     SurfaceStyle surfaceStyle=SurfaceStyle::Grid;
     std::filesystem::path capture, report;
 };
@@ -43,9 +43,16 @@ Options parseOptions() {
             else if(arg==L"--no-detail") options.detail=false;
             else if(arg==L"--no-weather") options.wind=false;
             else if(arg==L"--no-clouds") options.clouds=false;
+            else if(arg==L"--no-water") options.water=false;
+            else if(arg==L"--no-erosion") options.erosion=false;
             else if(arg==L"--paused") options.paused=true;
             else if(arg==L"--wind-tracers") options.windTracers=true;
-            else if(arg==L"--weather-seconds") {
+            else if(arg==L"--rain-mm-h") {
+                const auto value=next(); std::size_t used=0; options.rainMmH=std::stod(value,&used);
+                if(used!=value.size() || !std::isfinite(options.rainMmH) || options.rainMmH<0 || options.rainMmH>200)
+                    throw std::invalid_argument("Rain experiment must be in [0,200] mm/h");
+            }
+            else if(arg==L"--weather-seconds" || arg==L"--simulate-seconds") {
                 const auto value=next(); std::size_t used=0;
                 options.weatherSeconds=std::stod(value,&used);
                 if(used!=value.size() || !std::isfinite(options.weatherSeconds) || options.weatherSeconds<0 || options.weatherSeconds>3600)
@@ -67,16 +74,20 @@ Options parseOptions() {
 }
 class Application {
 public:
-    explicit Application(Options options) : options_(std::move(options)), world_(options_.config), explorer_(world_), weather_(world_,explorer_.up(),view_.seconds) {
+    explicit Application(Options options) : options_(std::move(options)), world_(options_.config), explorer_(world_), simulation_(world_,explorer_.up(),view_.seconds) {
         view_.globe=options_.globe; view_.surfaceStyle=options_.surfaceStyle;
         view_.paused=options_.paused; view_.windTracers=options_.windTracers;
         world_.modules().set(Module::SurfaceDetail,options_.detail);
         world_.modules().set(Module::Wind,options_.wind); world_.modules().set(Module::Clouds,options_.clouds);
+        world_.modules().set(Module::Hydrology,options_.water); world_.modules().set(Module::Erosion,options_.erosion);
+        simulation_.setRainExperiment(options_.rainMmH);
+        simulation_.advance(world_,explorer_.up(),0);
+        explorer_.teleport(world_,explorer_.up(),&simulation_.water);
         orientLanding(); noon();
-        weather_.advance(world_,explorer_.up(),0);
+        simulation_.advance(world_,explorer_.up(),0);
         for(double remaining=options_.weatherSeconds;remaining>1e-9;) {
             const double step=std::min(60.0,remaining);
-            weather_.advance(world_,explorer_.up(),step); view_.seconds+=step; remaining-=step;
+            simulation_.advance(world_,explorer_.up(),step); view_.seconds+=step; remaining-=step;
         }
     }
     ~Application() {
@@ -127,7 +138,7 @@ public:
             last=now;
             const double dt=clamp(elapsed,0.0,0.1);
             view_.fps=mix(view_.fps,1/std::max(elapsed,0.001),0.04);
-            if(world_.modules().enabled(Module::Wind)) view_.timeScale=std::min(view_.timeScale,Weather::maximumTimeScale);
+            view_.timeScale=std::min(view_.timeScale,maximumTimeScale());
             const double modelDt=view_.paused ? 0 : dt*view_.timeScale;
             view_.seconds+=modelDt;
             Input input;
@@ -138,10 +149,10 @@ public:
                 input.vertical=static_cast<double>(down(VK_SPACE))-static_cast<double>(down(VK_CONTROL));
                 input.sprint=down(VK_SHIFT); input.jump=down(VK_SPACE);
             }
-            explorer_.update(world_,input,dt);
-            weather_.advance(world_,explorer_.up(),modelDt);
+            explorer_.update(world_,input,dt,&simulation_.water);
+            simulation_.advance(world_,explorer_.up(),modelDt);
             const auto renderStart=Clock::now();
-            renderer_->draw(world_,explorer_,weather_,view_);
+            renderer_->draw(world_,explorer_,simulation_,view_);
             const double renderMs=std::chrono::duration<double,std::milli>(Clock::now()-renderStart).count();
             renderTime+=renderMs; longestRender=std::max(longestRender,renderMs);
             ++frames;
@@ -164,20 +175,37 @@ public:
                 << "\nflight=" << explorer_.flying << "\nglobe=" << view_.globe
                 << "\nsurface_style=" << surfaceStyleName(view_.surfaceStyle)
                 << "\ndetail_objects=" << renderer_->detailCount()
-                << "\ncloud_sprites=" << renderer_->cloudCount() << "\nweather_steps=" << weather_.steps()
+                << "\ncloud_sprites=" << renderer_->cloudCount() << "\nweather_steps=" << simulation_.weather.steps()
                 << "\nwind_tracers=" << view_.windTracers << "\npaused=" << view_.paused
                 << "\nrender_mean_ms=" << renderTime/std::max(1,frames) << "\nrender_max_ms=" << longestRender << '\n';
-            const auto air=weather_.sample(explorer_.up()); const auto water=weather_.budget();
-            out << "weather_time_s=" << weather_.seconds() << "\nwind_m_s=" << length(air.velocity)
+            const auto air=simulation_.weather.sample(explorer_.up()); const auto water=simulation_.weather.budget();
+            out << "weather_time_s=" << simulation_.weather.seconds() << "\nwind_m_s=" << length(air.velocity)
                 << "\nwind_east_m_s=" << air.wind.east << "\nwind_north_m_s=" << air.wind.north
                 << "\nrelative_humidity=" << air.humidity << "\ncloud_water_kg_m2=" << air.cloudWater
                 << "\nwater_stored_kg=" << water.storedKg << "\nwater_budget_error_kg=" << water.residualKg() << '\n';
+            const auto runoff=simulation_.water.budget(); const auto ground=simulation_.water.sample(explorer_.up());
+            double maximumDepth=0,maximumChange=0; std::size_t wetCells=0;
+            for(const auto& c:simulation_.water.grid().cells) if(!c.sea) {
+                maximumDepth=std::max(maximumDepth,c.water); maximumChange=std::max(maximumChange,std::abs(c.soil-c.initialSoil));
+                if(c.water>0.001) ++wetCells;
+            }
+            out << "runoff_steps=" << simulation_.water.steps() << "\nexperiment_rain_mm_h=" << simulation_.rainExperiment()
+                << "\nwater_triangles=" << renderer_->waterCount() << "\nwater_tracers=" << view_.waterTracers
+                << "\nwater_depth_m=" << ground.depth << "\nmaximum_depth_m=" << maximumDepth << "\nwet_cells=" << wetCells
+                << "\nmaximum_bed_change_m=" << maximumChange << "\nrunoff_rain_m3=" << runoff.rainM3
+                << "\nrunoff_stored_m3=" << runoff.storedWaterM3 << "\nrunoff_boundary_m3=" << runoff.boundaryM3
+                << "\nrunoff_water_error_m3=" << runoff.waterResidual() << "\nrunoff_solid_error_kg=" << runoff.solidResidual()
+                << "\neroded_kg=" << runoff.erodedKg << "\ndeposited_kg=" << runoff.depositedKg << '\n';
             for(unsigned i=0;i<moduleCount;++i) out << moduleNames[i] << '=' << world_.modules().enabled(static_cast<Module>(i)) << '\n';
             if(!out) throw std::runtime_error("Cannot write smoke report");
         }
         return 0;
     }
 private:
+    double maximumTimeScale() const {
+        if(world_.modules().enabled(Module::Hydrology)) return Hydrology::maximumTimeScale;
+        return world_.modules().enabled(Module::Wind) ? Weather::maximumTimeScale : 86400.0;
+    }
     void orientLanding() {
         const Vec3 up=explorer_.up();
         double best=1e20,bearing=0;
@@ -202,7 +230,7 @@ private:
             if(elevation>best) { best=elevation; bestTime=time; }
         }
         view_.seconds=bestTime;
-        weather_.setClock(bestTime);
+        simulation_.setClock(bestTime);
         if(renderer_) renderer_->invalidate();
     }
     void captureMouse(bool captured) {
@@ -223,6 +251,8 @@ private:
         else if(key==VK_TAB) view_.globe=!view_.globe;
         else if(key=='H') view_.help=!view_.help;
         else if(key=='V') view_.windTracers=!view_.windTracers;
+        else if(key=='U') view_.waterTracers=!view_.waterTracers;
+        else if(key=='B') simulation_.setRainExperiment(simulation_.rainExperiment()<1 ? 30 : (simulation_.rainExperiment()<60 ? 80 : 0));
         else if(key=='G') {
             switch(view_.surfaceStyle) {
                 case SurfaceStyle::Grid: view_.surfaceStyle=SurfaceStyle::Wireframe; break;
@@ -232,19 +262,21 @@ private:
         }
         else if(key=='P') view_.paused=!view_.paused;
         else if(key=='T') noon();
-        else if(key==VK_OEM_PLUS || key==VK_ADD) view_.timeScale=std::min(world_.modules().enabled(Module::Wind) ? Weather::maximumTimeScale : 86400.0,view_.timeScale*2);
+        else if(key==VK_OEM_PLUS || key==VK_ADD) view_.timeScale=std::min(maximumTimeScale(),view_.timeScale*2);
         else if(key==VK_OEM_MINUS || key==VK_SUBTRACT) view_.timeScale=std::max(1.0,view_.timeScale/2);
-        else if(key==VK_HOME) { explorer_.teleport(world_,world_.findLand()); orientLanding(); }
+        else if(key==VK_HOME) { explorer_.teleport(world_,world_.findLand()); simulation_.advance(world_,explorer_.up(),0); explorer_.teleport(world_,explorer_.up(),&simulation_.water); orientLanding(); }
         else if(key=='R') {
             auto config=world_.config(); ++config.seed;
             const auto modules=world_.modules();
             world_=World(config); world_.modules()=modules;
-            explorer_=Explorer(world_); orientLanding(); noon(); renderer_->invalidate();
-            weather_=Weather(world_,explorer_.up(),view_.seconds);
-        } else if(key>='1' && key<'1'+moduleCount) {
-            const auto module=static_cast<Module>(key-'1');
+            explorer_=Explorer(world_);
+            const double rain=simulation_.rainExperiment();
+            simulation_=Simulation(world_,explorer_.up(),view_.seconds); simulation_.setRainExperiment(rain);
+            explorer_.teleport(world_,explorer_.up(),&simulation_.water); orientLanding(); noon(); renderer_->invalidate();
+        } else if((key>='1' && key<='9') || key=='0') {
+            const auto module=static_cast<Module>(key=='0' ? 9 : key-'1');
             world_.modules().toggle(module);
-            if(module<Module::Wind) renderer_->invalidate();
+            if(module<Module::Wind || module==Module::Hydrology) renderer_->invalidate();
         }
     }
     static LRESULT CALLBACK procedure(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
@@ -287,7 +319,7 @@ private:
     World world_;
     Explorer explorer_;
     ViewState view_;
-    Weather weather_;
+    Simulation simulation_;
     HWND window_=nullptr;
     HDC dc_=nullptr;
     HGLRC context_=nullptr;

@@ -1,11 +1,12 @@
 #include "planet/navigation.hpp"
+#include "planet/hydrology.hpp"
 #include <stdexcept>
 
 namespace planet {
 Explorer::Explorer(const World& world) { teleport(world,world.findLand()); }
-void Explorer::teleport(const World& world, Vec3 position) {
+void Explorer::teleport(const World& world, Vec3 position,const Hydrology* water) {
     up_ = normalized(position); heading_ = north(up_); pitch_ = 0;
-    altitude_ = world.surface(up_) + eyeHeight;
+    altitude_ = (water ? water->ground(world,up_) : world.surface(up_)) + eyeHeight;
     verticalSpeed_ = 0; grounded_ = true; jumpHeld_ = false;
     obstacleAnchor_={};
 }
@@ -13,7 +14,7 @@ void Explorer::look(double horizontal, double vertical) {
     heading_ = normalized(rotate(heading_,up_,-horizontal));
     pitch_ = clamp(pitch_+vertical,-radians(88),radians(88));
 }
-void Explorer::update(const World& world, const Input& input, double dt) {
+void Explorer::update(const World& world, const Input& input, double dt,const Hydrology* water) {
     if (!std::isfinite(dt) || dt < 0 || dt > 10) throw std::invalid_argument("Invalid navigation timestep");
     unsigned modules=0;
     for(unsigned i=0;i<moduleCount;++i)
@@ -24,21 +25,23 @@ void Explorer::update(const World& world, const Input& input, double dt) {
     // Physics stays stable after slow frames. The desktop caps elapsed time at 0.1 s.
     while (dt > 1e-10) {
         const double slice = std::min(dt,1.0/120.0);
-        step(world,input,slice); dt -= slice;
+        step(world,input,slice,water); dt -= slice;
     }
     jumpHeld_ = input.jump;
 }
-void Explorer::refreshObstacles(const World& world) {
+void Explorer::refreshObstacles(const World& world,const Hydrology* water) {
     if(length(up_-obstacleAnchor_)*world.config().radius<12) return;
     obstacles_=surfaceObjects(world,up_,32,false);
+    if(water) for(auto& object:obstacles_) object.elevation=water->ground(world,object.up);
     obstacleAnchor_=up_;
 }
-void Explorer::step(const World& world, const Input& input, double dt) {
-    if(!flying) refreshObstacles(world);
+void Explorer::step(const World& world, const Input& input, double dt,const Hydrology* water) {
+    if(!flying) refreshObstacles(world,water);
     Vec3 tangent = heading_*input.forward + right()*input.right;
     const double magnitude = length(tangent);
     if (magnitude > 1) tangent = tangent/magnitude;
-    const double speed = flying ? flightSpeed*(input.sprint ? 8 : 1) : (input.sprint ? 8.0 : 2.5);
+    const double depth=water ? water->sample(up_).depth : 0;
+    const double speed = flying ? flightSpeed*(input.sprint ? 8 : 1) : (input.sprint ? 8.0 : 2.5)/std::max(1.0,1+2*depth);
     const Vec3 previous = up_;
     const Vec3 previousHeading = heading_;
     const double angle = length(tangent)*speed*dt/(world.config().radius+altitude_);
@@ -61,11 +64,12 @@ void Explorer::step(const World& world, const Input& input, double dt) {
             }
         }
     }
-    double floor = world.surface(up_)+eyeHeight;
+    const auto ground=[&] { return water ? water->ground(world,up_) : world.surface(up_); };
+    double floor = ground()+eyeHeight;
     // Prevent walking up cliffs; airborne collisions still resolve against the new surface.
     if (!flying && grounded_ && floor-altitude_ > speed*dt*1.1+0.08) {
         up_ = previous; heading_ = previousHeading;
-        floor = world.surface(up_)+eyeHeight;
+        floor = ground()+eyeHeight;
     }
     if (flying) {
         altitude_ += input.vertical*speed*dt;

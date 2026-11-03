@@ -15,6 +15,8 @@ struct Options {
     double weatherSeconds=0, rainMmH=0,walkSeconds=0;
     bool landforms=true,caves=true,headlamp=true;
     std::optional<Landform> landmark;
+    std::optional<double> waterWind,diveDepth;
+    bool coast=false,waterMotion=true;
     SurfaceStyle surfaceStyle=SurfaceStyle::Grid;
     std::filesystem::path capture, report;
 };
@@ -50,6 +52,14 @@ Options parseOptions() {
             else if(arg==L"--no-landforms") options.landforms=false;
             else if(arg==L"--no-caves") options.caves=false;
             else if(arg==L"--no-headlamp") options.headlamp=false;
+            else if(arg==L"--coast") options.coast=true;
+            else if(arg==L"--no-water-motion") options.waterMotion=false;
+            else if(arg==L"--wind-m-s" || arg==L"--dive-depth") {
+                const auto value=next(); std::size_t used=0; const double number=std::stod(value,&used);
+                if(used!=value.size() || !std::isfinite(number) || number<0 || number>(arg==L"--wind-m-s" ? 40 : 200))
+                    throw std::invalid_argument("Water wind must be 0..40 m/s; dive depth 0..200 m");
+                if(arg==L"--wind-m-s") options.waterWind=number; else options.diveDepth=number;
+            }
             else if(arg==L"--landmark") {
                 const auto value=next(); options.landmark=landmarkType(std::string(value.begin(),value.end()));
                 if(!options.landmark) throw std::invalid_argument("Landmark must be cave, canyon, mountains or gorge");
@@ -88,25 +98,32 @@ Options parseOptions() {
 }
 class Application {
 public:
-    explicit Application(Options options) : options_(std::move(options)), world_(options_.config), explorer_(world_), simulation_(world_,explorer_.up(),view_.seconds) {
+    explicit Application(Options options) : options_(std::move(options)), world_(options_.config), explorer_(world_), simulation_(world_,explorer_.up(),view_.seconds,options_.waterWind) {
         view_.globe=options_.globe; view_.surfaceStyle=options_.surfaceStyle;
         view_.paused=options_.paused; view_.windTracers=options_.windTracers; view_.headlamp=options_.headlamp;
         world_.modules().set(Module::SurfaceDetail,options_.detail);
         world_.modules().set(Module::Wind,options_.wind); world_.modules().set(Module::Clouds,options_.clouds);
         world_.modules().set(Module::Hydrology,options_.water); world_.modules().set(Module::Erosion,options_.erosion);
         world_.modules().set(Module::Landforms,options_.landforms); world_.modules().set(Module::Caves,options_.caves);
+        world_.modules().set(Module::WaterMotion,options_.waterMotion);
         simulation_.setRainExperiment(options_.rainMmH);
         simulation_.advance(world_,explorer_.up(),0);
         explorer_.teleport(world_,explorer_.up(),&simulation_.water);
         orientLanding(); noon();
         if(options_.landmark) visitLandmark(*options_.landmark);
+        if(options_.coast || options_.diveDepth) visitCoast(options_.diveDepth.has_value());
         simulation_.advance(world_,explorer_.up(),0);
         for(double remaining=options_.weatherSeconds;remaining>1e-9;) {
             const double step=std::min(60.0,remaining);
             simulation_.advance(world_,explorer_.up(),step); view_.seconds+=step; remaining-=step;
         }
+        if(options_.diveDepth) {
+            const double heading=explorer_.heading();
+            explorer_.dive(world_,explorer_.up(),*options_.diveDepth,&simulation_.water,&simulation_.motion);
+            explorer_.look(heading,radians(-18));
+        }
         for(double left=options_.walkSeconds;left>1e-9;) {
-            const double dt=std::min(left,0.1); explorer_.update(world_,{1,0,0,false,false},dt,&simulation_.water);
+            const double dt=std::min(left,0.1); explorer_.update(world_,{1,0,0,false,false},dt,&simulation_.water,&simulation_.motion);
             simulation_.advance(world_,explorer_.up(),0); left-=dt;
         }
     }
@@ -169,7 +186,7 @@ public:
                 input.vertical=static_cast<double>(down(VK_SPACE))-static_cast<double>(down(VK_CONTROL));
                 input.sprint=down(VK_SHIFT); input.jump=down(VK_SPACE);
             }
-            explorer_.update(world_,input,dt,&simulation_.water);
+            explorer_.update(world_,input,dt,&simulation_.water,&simulation_.motion);
             simulation_.advance(world_,explorer_.up(),modelDt);
             const auto renderStart=Clock::now();
             renderer_->draw(world_,explorer_,simulation_,view_);
@@ -206,6 +223,16 @@ public:
                 << "\nrelative_humidity=" << air.humidity << "\ncloud_water_kg_m2=" << air.cloudWater
                 << "\nwater_stored_kg=" << water.storedKg << "\nwater_budget_error_kg=" << water.residualKg() << '\n';
             const auto runoff=simulation_.water.budget(); const auto ground=simulation_.water.sample(explorer_.up());
+            const auto liquid=liquidAt(world_,&simulation_.water,&simulation_.motion,explorer_.up());
+            const double diveDepth=liquid.present ? std::max(0.0,liquid.level-explorer_.altitude()) : 0;
+            out << "swimming=" << explorer_.swimming() << "\nunderwater=" << explorer_.underwater()
+                << "\nwater_surface_m=" << liquid.level << "\nliquid_depth_m=" << liquid.depth << "\neye_depth_m=" << diveDepth
+                << "\nwater_pressure_Pa=" << waterPressure(world_.sample(explorer_.up(),view_.seconds).pressure,diveDepth,liquid.ocean,world_.config().gravity)
+                << "\nwave_hs_m=" << simulation_.motion.significantHeight() << "\nwave_time_s=" << simulation_.motion.seconds()
+                << "\nwater_wind_m_s=" << length(simulation_.motion.forcingWind())
+                << "\nwater_wind_experiment_m_s=" << simulation_.motion.windExperiment().value_or(-1)
+                << "\ncurrent_east_m_s=" << dot(liquid.current,east(explorer_.up()))
+                << "\ncurrent_north_m_s=" << dot(liquid.current,north(explorer_.up())) << '\n';
             double maximumDepth=0,maximumChange=0; std::size_t wetCells=0;
             for(const auto& c:simulation_.water.grid().cells) if(!c.sea && !c.masked) {
                 maximumDepth=std::max(maximumDepth,c.water); maximumChange=std::max(maximumChange,std::abs(c.soil-c.initialSoil));
@@ -225,8 +252,17 @@ public:
     }
 private:
     double maximumTimeScale() const {
+        if(explorer_.swimming()) return 1;
+        if(world_.modules().enabled(Module::WaterMotion)) return 120;
         if(world_.modules().enabled(Module::Hydrology)) return Hydrology::maximumTimeScale;
         return world_.modules().enabled(Module::Wind) ? Weather::maximumTimeScale : 86400.0;
+    }
+    void visitCoast(bool offshore=false) {
+        const auto place=world_.findCoast(); const auto p=offshore ? place.lookToward : place.position;
+        explorer_.teleport(world_,p); simulation_.advance(world_,p,0); explorer_.teleport(world_,p,&simulation_.water);
+        const auto look=normalized(place.lookToward-place.position);
+        explorer_.look(std::atan2(dot(look,east(p)),dot(look,north(p))),radians(-5));
+        view_.globe=false; noon(); if(renderer_) renderer_->invalidate();
     }
     void visitLandmark(Landform type) {
         const auto place=world_.findLandmark(type,world_.findLand());
@@ -287,12 +323,17 @@ private:
         else if(key=='V') view_.windTracers=!view_.windTracers;
         else if(key=='U') view_.waterTracers=!view_.waterTracers;
         else if(key=='L') view_.headlamp=!view_.headlamp;
+        else if(key=='O') visitCoast();
+        else if(key=='N') {
+            const auto wind=simulation_.motion.windExperiment();
+            simulation_.motion.setWindExperiment(!wind ? std::optional<double>{8} : (*wind<12 ? std::optional<double>{16} : std::nullopt));
+        }
         else if(key=='J') {
             constexpr std::array<Landform,4> tour{Landform::Karst,Landform::Canyon,Landform::Mountains,Landform::Gorge};
             visitLandmark(tour[landmarkIndex_++%tour.size()]);
         }
-        else if(key=='M' || key=='C') {
-            world_.modules().toggle(key=='M' ? Module::Landforms : Module::Caves); renderer_->invalidate();
+        else if(key=='M' || key=='C' || key=='K') {
+            world_.modules().toggle(key=='M' ? Module::Landforms : (key=='C' ? Module::Caves : Module::WaterMotion)); renderer_->invalidate();
         }
         else if(key=='B') simulation_.setRainExperiment(simulation_.rainExperiment()<1 ? 30 : (simulation_.rainExperiment()<60 ? 80 : 0));
         else if(key=='G') {
@@ -312,8 +353,8 @@ private:
             const auto modules=world_.modules();
             world_=World(config); world_.modules()=modules;
             explorer_=Explorer(world_);
-            const double rain=simulation_.rainExperiment();
-            simulation_=Simulation(world_,explorer_.up(),view_.seconds); simulation_.setRainExperiment(rain);
+            const double rain=simulation_.rainExperiment(); const auto wind=simulation_.motion.windExperiment();
+            simulation_=Simulation(world_,explorer_.up(),view_.seconds,wind); simulation_.setRainExperiment(rain);
             explorer_.teleport(world_,explorer_.up(),&simulation_.water); orientLanding(); noon(); renderer_->invalidate();
         } else if((key>='1' && key<='9') || key=='0') {
             const auto module=static_cast<Module>(key=='0' ? 9 : key-'1');

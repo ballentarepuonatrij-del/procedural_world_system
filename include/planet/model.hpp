@@ -9,9 +9,9 @@ constexpr double stefanBoltzmann = 5.670374419e-8;
 constexpr double gasConstantAir = 287.05287;
 constexpr double standardGravity = 9.80665;
 
-enum class Module : unsigned { Terrain, Ocean, Atmosphere, Climate, Biomes, SurfaceDetail, Wind, Clouds, Hydrology, Erosion, Landforms, Caves, Count };
+enum class Module : unsigned { Terrain, Ocean, Atmosphere, Climate, Biomes, SurfaceDetail, Wind, Clouds, Hydrology, Erosion, Landforms, Caves, WaterMotion, Count };
 constexpr auto moduleCount = static_cast<unsigned>(Module::Count);
-constexpr std::array<std::string_view, moduleCount> moduleNames{"Terrain", "Ocean", "Atmosphere", "Climate", "Biomes", "Surface detail", "Wind", "Clouds", "Surface water", "Erosion", "Landforms", "Caves"};
+constexpr std::array<std::string_view, moduleCount> moduleNames{"Terrain", "Ocean", "Atmosphere", "Climate", "Biomes", "Surface detail", "Wind", "Clouds", "Surface water", "Erosion", "Landforms", "Caves", "Water motion"};
 class Modules {
 public:
     bool requested(Module module) const;
@@ -80,6 +80,7 @@ public:
     Relief relief(Vec3 unit) const;
     std::optional<CaveSite> caveSite(Vec3 unit,double reach=650,bool requireEnabled=true) const;
     Landmark findLandmark(Landform type,Vec3 around) const;
+    Landmark findCoast() const;
     double annualInsolation(double latitudeRadians) const;
     Sample sample(Vec3 unit, double seconds) const;
     Sample climatology(Vec3 unit) const; // Annual energy-balance habitat, independent of view time.

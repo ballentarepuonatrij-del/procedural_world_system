@@ -1,5 +1,6 @@
 #pragma once
 #include "planet/weather.hpp"
+#include "planet/water_motion.hpp"
 #include <map>
 #include <deque>
 
@@ -20,14 +21,14 @@ struct RunoffExchange {
 // Local-inertial shallow-water discharge per unit face width (m2/s).
 // Hydrostatic reconstruction preserves a lake at rest and dry topographic barriers.
 double inertialDischarge(double old,double bedA,double bedB,double waterA,double waterB,
-                         double roughness,double spacing,double dt,double gravity=standardGravity);
+                         double roughness,double spacing,double dt,double gravity=standardGravity,double stress=0);
 class RunoffGrid {
 public:
     static constexpr double soilDensity=1600, porosity=0.4;
     RunoffGrid(int size,double spacing,double gravity=standardGravity);
     RunoffExchange advance(double seconds,std::span<const double> rainMetresPerSecond,
                            double evaporationRate,bool erosion,bool openBoundary,
-                           bool ocean,double seaLevel);
+                           bool ocean,double seaLevel,std::span<const Wind2> stress={});
     double waterVolume() const;
     double solidMass() const;
     Wind2 velocity(int x,int z) const;
@@ -57,7 +58,7 @@ public:
     static constexpr double spacing=4, extent=resolution*spacing, maximumTimeScale=120;
     Hydrology(const World& world,Vec3 observer);
     void synchronize(const World& world,Vec3 observer);
-    void step(const World& world,const Weather& weather,double seconds,double experimentRainMmH=0);
+    void step(const World& world,const Weather& weather,double seconds,double experimentRainMmH=0,const WaterMotion* motion=nullptr);
     GroundSample sample(Vec3 unit) const;
     GroundSample sampleLocal(double x,double z) const;
     double ground(const World& world,Vec3 unit) const;
@@ -94,13 +95,14 @@ private:
 // This avoids frame-rate-dependent rain when the renderer runs at different FPS.
 class Simulation {
 public:
-    Simulation(const World& world,Vec3 observer,double seconds);
+    Simulation(const World& world,Vec3 observer,double seconds,std::optional<double> waterWind={});
     void advance(const World& world,Vec3 observer,double modelSeconds);
     void setClock(double seconds);
     void setRainExperiment(double mmPerHour);
     double rainExperiment() const { return experimentRain_; }
     Weather weather;
     Hydrology water;
+    WaterMotion motion;
 private:
     double pending_=0,experimentRain_=0;
 };

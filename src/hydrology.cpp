@@ -4,11 +4,11 @@
 
 namespace planet {
 double inertialDischarge(double old,double bedA,double bedB,double waterA,double waterB,
-                         double roughness,double spacing,double dt,double gravity) {
+                         double roughness,double spacing,double dt,double gravity,double stress) {
     const double headA=bedA+waterA,headB=bedB+waterB;
     const double depth=std::max(headA,headB)-std::max(bedA,bedB);
     if(depth<1e-7) return 0;
-    const double q=(old-gravity*depth*dt*(headB-headA)/spacing)/
+    const double q=(old-gravity*depth*dt*(headB-headA)/spacing+dt*stress/1000)/
                    (1+gravity*dt*roughness*roughness*std::abs(old)/std::pow(depth,7.0/3));
     // The local-inertial approximation neglects advective momentum. Bound it to
     // subcritical flow; waterfalls and hydraulic jumps require a full SWE solver.
@@ -40,9 +40,9 @@ Wind2 RunoffGrid::velocity(int x,int z) const {
     return v;
 }
 RunoffExchange RunoffGrid::advance(double seconds,std::span<const double> rain,double evaporation,
-                                  bool erosion,bool openBoundary,bool ocean,double seaLevel) {
+                                  bool erosion,bool openBoundary,bool ocean,double seaLevel,std::span<const Wind2> stress) {
     if(!std::isfinite(seconds) || seconds<0 || seconds>120 || rain.size()!=cells.size() ||
-       !std::isfinite(evaporation) || evaporation<0 || !std::isfinite(seaLevel))
+       !std::isfinite(evaporation) || evaporation<0 || !std::isfinite(seaLevel) || (!stress.empty() && stress.size()!=cells.size()))
         throw std::invalid_argument("Invalid runoff forcing or timestep");
     for(std::size_t i=0;i<cells.size();++i) {
         const auto& c=cells[i];
@@ -55,15 +55,25 @@ RunoffExchange RunoffGrid::advance(double seconds,std::span<const double> rain,d
     }
     for(double q:eastFlow) if(!std::isfinite(q)) throw std::invalid_argument("Nonfinite discharge");
     for(double q:northFlow) if(!std::isfinite(q)) throw std::invalid_argument("Nonfinite discharge");
+    for(const auto t:stress) if(!std::isfinite(t.east) || !std::isfinite(t.north)) throw std::invalid_argument("Nonfinite wind stress");
     RunoffExchange result;
     const double area=spacing_*spacing_;
     std::vector<double> outgoing(cells.size()),factor(cells.size()),waterDelta(cells.size()),solidDelta(cells.size());
     const auto active=[&](int i) { return i>=0 && !cells[static_cast<std::size_t>(i)].sea && !cells[static_cast<std::size_t>(i)].masked; };
     const auto faces=[&](auto&& action) {
-        for(int z=0;z<size_;++z) for(int x=0;x<=size_;++x)
-            action(x>0 ? z*size_+x-1 : -1,x<size_ ? z*size_+x : -1,eastFlow[static_cast<std::size_t>(z*(size_+1)+x)]);
-        for(int z=0;z<=size_;++z) for(int x=0;x<size_;++x)
-            action(z>0 ? (z-1)*size_+x : -1,z<size_ ? z*size_+x : -1,northFlow[static_cast<std::size_t>(z*size_+x)]);
+        const auto forcing=[&](int a,int b,bool east) {
+            if(stress.empty()) return 0.0;
+            const auto u=stress[static_cast<std::size_t>(a>=0 ? a : b)],v=stress[static_cast<std::size_t>(b>=0 ? b : a)];
+            return east ? (u.east+v.east)/2 : (u.north+v.north)/2;
+        };
+        for(int z=0;z<size_;++z) for(int x=0;x<=size_;++x) {
+            const int a=x>0 ? z*size_+x-1 : -1,b=x<size_ ? z*size_+x : -1;
+            action(a,b,eastFlow[static_cast<std::size_t>(z*(size_+1)+x)],forcing(a,b,true));
+        }
+        for(int z=0;z<=size_;++z) for(int x=0;x<size_;++x) {
+            const int a=z>0 ? (z-1)*size_+x : -1,b=z<size_ ? z*size_+x : -1;
+            action(a,b,northFlow[static_cast<std::size_t>(z*size_+x)],forcing(a,b,false));
+        }
     };
     for(double remaining=seconds;remaining>1e-10;) {
         double deepest=0;
@@ -83,7 +93,7 @@ RunoffExchange RunoffGrid::advance(double seconds,std::span<const double> rain,d
             const double soilEvap=std::min(c.soilWater,(evaporation*dt-surfaceEvap)*saturation);
             c.soilWater-=soilEvap; result.evaporatedM3+=(surfaceEvap+soilEvap)*area;
         }
-        faces([&](int a,int b,double& q) {
+        faces([&](int a,int b,double& q,double forcing) {
             if((a>=0 && cells[static_cast<std::size_t>(a)].masked) || (b>=0 && cells[static_cast<std::size_t>(b)].masked)) { q=0; return; }
             if((a<0 || b<0) && !openBoundary) { q=0; return; }
             if(!active(a) && !active(b)) { q=0; return; }
@@ -92,19 +102,19 @@ RunoffExchange RunoffGrid::advance(double seconds,std::span<const double> rain,d
             const auto& cb=cells[static_cast<std::size_t>(b>=0 ? b : a)];
             const double ha=a<0 ? 0 : (ca.sea ? std::max(0.0,seaLevel-ca.bed()) : ca.water);
             const double hb=b<0 ? 0 : (cb.sea ? std::max(0.0,seaLevel-cb.bed()) : cb.water);
-            q=inertialDischarge(q,ca.bed(),cb.bed(),ha,hb,(ca.roughness+cb.roughness)/2,spacing_,dt,gravity_);
+            q=inertialDischarge(q,ca.bed(),cb.bed(),ha,hb,(ca.roughness+cb.roughness)/2,spacing_,dt,gravity_,forcing);
             // Dry open edges permit outflow only. The coast may exchange both ways.
             if(a<0) q=std::min(0.0,q);
             if(b<0) q=std::max(0.0,q);
         });
         std::fill(outgoing.begin(),outgoing.end(),0);
-        faces([&](int a,int b,double q) {
+        faces([&](int a,int b,double q,double) {
             const int donor=q>=0 ? a : b;
             if(active(donor)) outgoing[static_cast<std::size_t>(donor)]+=std::abs(q)*dt/spacing_;
         });
         for(std::size_t i=0;i<cells.size();++i) factor[i]=outgoing[i]>0 ? std::min(1.0,cells[i].water/outgoing[i]) : 1;
         std::fill(waterDelta.begin(),waterDelta.end(),0); std::fill(solidDelta.begin(),solidDelta.end(),0);
-        faces([&](int a,int b,double& q) {
+        faces([&](int a,int b,double& q,double) {
             const int donor=q>=0 ? a : b;
             if(active(donor)) q*=factor[static_cast<std::size_t>(donor)];
             const double amount=q*dt/spacing_;
@@ -225,18 +235,23 @@ void Hydrology::synchronize(const World& world,Vec3 observer) {
         move(world,p,ix,iz,false);
     }
 }
-void Hydrology::step(const World& world,const Weather& weather,double seconds,double experimentRain) {
+void Hydrology::step(const World& world,const Weather& weather,double seconds,double experimentRain,const WaterMotion* motion) {
     if(!std::isfinite(seconds) || seconds<0 || seconds>120 || !std::isfinite(experimentRain) || experimentRain<0 || experimentRain>200)
         throw std::invalid_argument("Invalid hydrology step or rain experiment");
     if(!enabled_ || seconds==0) return;
     std::vector<double> rain(grid_.cells.size());
+    std::vector<Wind2> stress(grid_.cells.size());
     for(int z=0;z<resolution;++z) for(int x=0;x<resolution;++x) {
-        const auto air=weather.sample(directionAt(cellX(x),cellZ(z)));
+        const auto p=directionAt(cellX(x),cellZ(z)); const auto air=weather.sample(p);
         rain[static_cast<std::size_t>(z*resolution+x)]=air.rainRate/1000+experimentRain/3.6e6;
+        if(motion && motion->enabled()) {
+            const auto wind=motion->windAt(weather,p);
+            stress[static_cast<std::size_t>(z*resolution+x)]=windStress({dot(wind,east_),dot(wind,north_)},grid_.velocity(x,z));
+        }
     }
     const auto air=weather.sample(directionAt(cellX(resolution/2),cellZ(resolution/2)));
     const double evaporation=weather.cloudsEnabled() ? 4e-8*std::max(0.0,1-air.humidity)*(0.5+length(air.velocity)/10) : 0;
-    const auto change=grid_.advance(seconds,rain,evaporation,erosion_,true,world.modules().enabled(Module::Ocean),config_.seaLevel);
+    const auto change=grid_.advance(seconds,rain,evaporation,erosion_,true,world.modules().enabled(Module::Ocean),config_.seaLevel,stress);
     totals_.rainM3+=change.rainM3; totals_.evaporatedM3+=change.evaporatedM3; totals_.drainedM3+=change.drainedM3;
     totals_.boundaryM3+=change.boundaryM3; totals_.sedimentOutKg+=change.sedimentOutKg;
     totals_.erodedKg+=change.erodedKg; totals_.depositedKg+=change.depositedKg;
@@ -285,28 +300,32 @@ GroundSample Hydrology::sample(Vec3 unit) const {
     return sampleLocal(dot(unit,east_)*config_.radius/projection,dot(unit,north_)*config_.radius/projection);
 }
 double Hydrology::ground(const World& world,Vec3 unit) const {
-    const double original=world.surface(unit); const auto s=sample(unit);
+    const double original=world.elevation(unit); const auto s=sample(unit);
     return s.available ? mix(original,s.bed,s.weight) : original;
 }
 RunoffBudget Hydrology::budget() const {
     auto b=totals_; b.storedWaterM3=grid_.waterVolume(); b.storedSolidKg=grid_.solidMass(); return b;
 }
-Simulation::Simulation(const World& world,Vec3 observer,double seconds) : weather(world,observer,seconds),water(world,observer) {}
+Simulation::Simulation(const World& world,Vec3 observer,double seconds,std::optional<double> waterWind) : weather(world,observer,seconds),water(world,observer),motion(world,observer) {
+    motion.setWindExperiment(waterWind); motion.synchronize(world,weather,observer);
+}
 void Simulation::setClock(double seconds) { weather.setClock(seconds); pending_=0; }
 void Simulation::setRainExperiment(double rain) {
     if(!std::isfinite(rain) || rain<0 || rain>200) throw std::invalid_argument("Rain experiment must be in [0,200] mm/h");
     experimentRain_=rain;
 }
 void Simulation::advance(const World& world,Vec3 observer,double seconds) {
-    const bool active=world.modules().enabled(Module::Wind) || world.modules().enabled(Module::Hydrology);
+    const bool active=world.modules().enabled(Module::Wind) || world.modules().enabled(Module::Hydrology) || world.modules().enabled(Module::WaterMotion);
     if(!std::isfinite(seconds) || seconds<0 || seconds>(active ? 120 : 86400))
         throw std::invalid_argument("Simulation timestep exceeds its supported range");
     water.synchronize(world,observer); weather.advance(world,observer,0);
+    motion.synchronize(world,weather,observer); motion.advanceClock(seconds);
     if(!active) { weather.setClock(weather.seconds()+pending_+seconds); pending_=0; return; }
     pending_+=seconds;
     while(pending_+1e-9>=Weather::fixedStep) {
         weather.advance(world,observer,Weather::fixedStep);
-        water.step(world,weather,Weather::fixedStep,experimentRain_);
+        motion.step(world,weather,Weather::fixedStep);
+        water.step(world,weather,Weather::fixedStep,experimentRain_,&motion);
         pending_=std::max(0.0,pending_-Weather::fixedStep);
     }
 }

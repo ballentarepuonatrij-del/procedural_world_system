@@ -124,6 +124,34 @@ Relief World::relief(Vec3 p) const {
     }
     return result;
 }
+Landmark World::findCoast() const {
+    const Vec3 home=findLand(); const double radius=config_.radius,sea=config_.seaLevel;
+    double score=1e30; Landmark chosen{home,home,Landform::Lowland};
+    if(!modules_.enabled(Module::Terrain) || !modules_.enabled(Module::Ocean)) return chosen;
+    for(int ray=0;ray<48;++ray) {
+        const double angle=tau*ray/48;
+        const Vec3 axis=east(home)*std::cos(angle)+north(home)*std::sin(angle);
+        Vec3 dry=home;
+        for(int step=1;step<=120;++step) {
+            Vec3 wet=normalized(home+axis*(step*5000/radius));
+            if(elevation(wet)>sea) { dry=wet; continue; }
+            for(int i=0;i<32;++i) { const auto mid=normalized(dry+wet); if(elevation(mid)>sea) dry=mid; else wet=mid; }
+            const Vec3 shore=normalized(dry+wet),out=normalized(axis-shore*dot(axis,shore));
+            const auto position=normalized(shore-out*(30/radius));
+            Vec3 offshore=shore;
+            for(double distance:{100.,200.,400.,800.,1600.}) {
+                offshore=normalized(shore+out*(distance/radius)); if(elevation(offshore)<sea-12) break;
+            }
+            const double h=elevation(position),bottom=elevation(offshore);
+            if(h>sea && h<sea+12 && bottom<sea-8) {
+                const double merit=length(shore-home)*radius/10000+(h-sea)*4;
+                if(merit<score) { score=merit; chosen={position,offshore,relief(position).type}; }
+            }
+            break;
+        }
+    }
+    return chosen;
+}
 Landmark World::findLandmark(Landform type,Vec3 around) const {
     around=normalized(around);
     if(!modules_.enabled(Module::Landforms)) return {findLand(),around,Landform::Lowland};

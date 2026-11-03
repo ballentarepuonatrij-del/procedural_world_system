@@ -34,6 +34,114 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
     throw std::runtime_error("Walkable cave route was blocked");
 }
 void registerTests() {
+    test("water_motion","Bulk wind stress has physical units and opposes relative motion",[] {
+        const auto a=windStress({10,0}); near(a.east,0.177625,1e-12,"Ten metre reference wind stress in Pa"); near(a.north,0,0,"No crosswind force");
+        const auto b=windStress({-10,0}); near(b.east,-a.east,1e-12,"Reversing wind reverses force");
+        near(windStress({10,0},{10,0}).east,0,0,"No stress without relative wind");
+        require(windStress({0,0},{2,0}).east<0,"Still air resists moving water");
+        bool rejected=false;try { windStress({std::numeric_limits<double>::infinity(),0}); } catch(const std::invalid_argument&) { rejected=true; }
+        require(rejected,"Nonfinite wind rejected");
+    });
+    test("water_motion","Gravity wave dispersion approaches deep and shallow water limits",[] {
+        const double k=tau/20;
+        near(waveFrequency(k,200),std::sqrt(standardGravity*k),1e-12,"Deep water dispersion");
+        near(waveFrequency(1e-5,2)/1e-5,std::sqrt(standardGravity*2),1e-8,"Shallow water phase speed");
+        near(tau/waveFrequency(tau/100,1000),8.004415,0.000001,"100 metre deep water wave period");
+        bool rejected=false;try { waveFrequency(k,0); } catch(const std::invalid_argument&) { rejected=true; } require(rejected,"Zero depth rejected");
+    });
+    test("water_motion","Ocean slab preserves inertial energy and integrates wind momentum",[] {
+        const double f=1e-4; const Wind2 initial{1,0}; auto u=initial;
+        for(int i=0;i<120;++i) u=advanceSlab(u,{},15,f,0,60);
+        near(std::hypot(u.east,u.north),1,1e-12,"Coriolis force does no work"); require(u.north<0,"Northern current turns right");
+        const auto south=advanceSlab(initial,{},15,-f,0,120); require(south.north>0,"Southern current turns left");
+        const auto impulse=advanceSlab({}, {1,0},10,0,0,100); near(impulse.east,100.0/10250,1e-12,"Stress changes momentum by tau dt");
+        const auto damped=advanceSlab(initial,{},10,0,0.01,100); near(damped.east,std::exp(-1.0),1e-12,"Linear drag dissipates energy");
+    });
+    test("water_motion","Wind raises downwind lake level without creating water or sediment",[] {
+        RunoffGrid lake(12,4); for(auto& c:lake.cells) { c.water=1;c.soilWater=0;c.conductivity=0;c.sediment=0.2; }
+        const double volume=lake.waterVolume(),mass=lake.solidMass();
+        std::vector<double> rain(lake.cells.size());std::vector<Wind2> stress(lake.cells.size(),windStress({16,0}));
+        lake.advance(1,rain,0,false,false,false,0,stress);
+        require(lake.velocity(6,6).east>0,"Initial current responds downwind");
+        lake.advance(59,rain,0,false,false,false,0,stress);
+        near(lake.waterVolume(),volume,1e-8,"Wind supplies momentum, not water");near(lake.solidMass(),mass,1e-7,"Wind transport conserves solids");
+        require(lake.cells[6*12+11].water>lake.cells[6*12].water,"Downwind setup develops");
+        RunoffGrid dry(12,4);for(auto& c:dry.cells)c.soilWater=0;
+        dry.advance(10,rain,0,false,false,false,0,stress);near(dry.waterVolume(),0,0,"Wind cannot create water on dry ground");
+    });
+    test("water_motion","Wind seas decay in calm and retain state when disabled",[] {
+        Config c;c.seaLevel=20;World w(c);w.modules().set(Module::Terrain,false);const Vec3 p{1,0,0};Simulation sim(w,p,0,12);
+        const double height=sim.motion.significantHeight();require(height>0.2,"Wind creates finite wave variance");
+        sim.advance(w,p,120);require(length(sim.motion.current(p))>0.001,"Ocean current receives wind momentum");
+        sim.motion.setWindExperiment(0);for(int i=0;i<10;++i)sim.advance(w,p,120);
+        require(sim.motion.significantHeight()<height*0.6,"Calm waves dissipate rather than disappearing instantly");
+        const double time=sim.motion.seconds(),saved=sim.motion.significantHeight();
+        w.modules().set(Module::WaterMotion,false);sim.advance(w,p,10);near(sim.motion.seconds(),time,0,"Disabled wave clock pauses");
+        near(sim.motion.waves(p,20).height,0,0,"Disabled module leaves flat water");near(length(sim.motion.current(p)),0,0,"Disabled wind current is not applied");
+        w.modules().set(Module::WaterMotion,true);sim.advance(w,p,0);near(sim.motion.significantHeight(),saved,1e-12,"Enabling restores retained variance");
+    });
+    test("water_motion","Wave and current clocks are frame independent and pause is exact",[] {
+        Config c;c.seaLevel=20;World w(c);w.modules().set(Module::Terrain,false);const Vec3 p{1,0,0};Simulation a(w,p,0,12),b(w,p,0,12);
+        for(int i=0;i<240;++i) a.advance(w,p,0.5);
+        b.advance(w,p,120);
+        near(length(a.motion.current(p)-b.motion.current(p)),0,1e-12,"Same accumulated ocean forcing");
+        near(a.motion.waves(p,20).height,b.motion.waves(p,20).height,1e-12,"Same wave phase and variance");
+        const double wave=a.motion.waves(p,20).height;const auto probe=a.motion.probes()[0];a.advance(w,p,0);
+        near(a.motion.waves(p,20).height,wave,0,"Pause retains wave phase");near(length(a.motion.probes()[0]-probe),0,0,"Pause retains current probe");
+    });
+    test("water_motion","Wave surface is zero mean and bounded above the seabed",[] {
+        Config c;c.seaLevel=30;World w(c);w.modules().set(Module::Terrain,false);const Vec3 p{1,0,0};Simulation sim(w,p,0,16);
+        double mean=0,squares=0;const int n=64;
+        for(int y=0;y<n;++y)for(int x=0;x<n;++x) {
+            const auto q=normalized(p+(east(p)*(x*17)+north(p)*(y*23))/c.radius);
+            const auto wave=sim.motion.waves(q,30);mean+=wave.height;squares+=wave.height*wave.height;
+            require(std::abs(sim.motion.waves(q,0.03).height)<=0.0105+1e-10,"Shallow trough never cuts through bed");
+        }
+        mean/=n*n;squares/=n*n;
+        require(std::abs(mean)<sim.motion.significantHeight()*0.03,"Wave elevation has approximately zero spatial mean");
+        near(4*std::sqrt(squares),sim.motion.significantHeight(),sim.motion.significantHeight()*0.15,"Resolved variance agrees with significant height");
+        const double before=sim.motion.waves(p,30).height;sim.advance(w,p,0.3);
+        require(std::abs(before-sim.motion.waves(p,30).height)>0.001,"Wave geometry propagates between 2 s weather steps");
+    });
+    test("water_motion","Swimmer floats dives resurfaces and respects the seabed",[] {
+        Config c;c.seaLevel=20;World w(c);w.modules().set(Module::Terrain,false);Simulation sim(w,{1,0,0},0,0);Explorer e(w);e.teleport(w,{1,0,0},&sim.water);
+        for(int i=0;i<100;++i)e.update(w,{},0.1,&sim.water,&sim.motion);
+        require(e.swimming() && !e.underwater(),"Buoyant swimmer rests above the waterline");near(e.altitude(),20+Explorer::eyeHeight*(1-1/1.14),0.02,"Archimedes equilibrium");
+        for(int i=0;i<40;++i)e.update(w,{0,0,-1,false,false},0.1,&sim.water,&sim.motion);
+        require(e.underwater() && e.altitude()<18,"Ctrl supplies downward swimming thrust");
+        for(int i=0;i<50;++i)e.update(w,{0,0,1,false,false},0.1,&sim.water,&sim.motion);
+        require(!e.underwater(),"Space returns through the surface");
+        e.dive(w,{1,0,0},200,&sim.water,&sim.motion);require(e.altitude()>=Explorer::eyeHeight,"Dive cannot pass through the seabed");
+    });
+    test("water_motion","Ocean flow advects a submerged swimmer",[] {
+        Config c;c.seaLevel=20;World w(c);w.modules().set(Module::Terrain,false);const Vec3 p{1,0,0};Simulation sim(w,p,0,16);
+        for(int i=0;i<5;++i)sim.advance(w,p,120);
+        Explorer a(w),b(w);a.dive(w,p,5,&sim.water,&sim.motion);b.dive(w,p,5,&sim.water);
+        for(int i=0;i<50;++i){a.update(w,{},0.1,&sim.water,&sim.motion);b.update(w,{},0.1,&sim.water);}
+        require(dot(a.up()-p,east(p))*c.radius>0.05,"Water drag carries observer downcurrent");near(length(b.up()-p),0,1e-12,"Still water does not create lateral movement");
+    });
+    test("water_motion","Coast route connects walking swimming and diving",[] {
+        for(std::uint64_t seed=0;seed<6;++seed) {
+            Config c;c.seed=seed;World seeded(c);const auto coast=seeded.findCoast();
+            require(seeded.elevation(coast.position)>0 && seeded.elevation(coast.lookToward)<-8,"Seeded coast has a dry shore and a diving site");
+        }
+        World w;w.modules().set(Module::SurfaceDetail,false);const auto place=w.findCoast();
+        require(w.elevation(place.position)>0 && w.elevation(place.position)<12,"Dry shore within walking height of sea");
+        require(w.elevation(place.lookToward)<-8,"Offshore destination has diving depth");
+        Simulation sim(w,place.position,0,0);Explorer e(w);e.teleport(w,place.position,&sim.water);
+        const auto look=normalized(place.lookToward-place.position*dot(place.lookToward,place.position));
+        e.look(std::atan2(dot(look,east(place.position)),dot(look,north(place.position))),0);
+        for(int i=0;i<1200 && !e.swimming();++i){e.update(w,{1,0,0,true,false},0.1,&sim.water,&sim.motion);sim.advance(w,e.up(),0);}
+        require(e.swimming(),"Observer can enter the sea continuously from land");
+    });
+    test("water_motion","Hydrostatic water pressure and module changes remain finite",[] {
+        near(waterPressure(101325,10,false),199391.5,1e-8,"Ten metres of fresh water");
+        near(waterPressure(101325,10,true),201843.1625,1e-8,"Seawater density raises pressure");
+        Config c;c.seaLevel=20;World w(c);w.modules().set(Module::Terrain,false);Simulation sim(w,{1,0,0},0,12);Explorer e(w);e.dive(w,{1,0,0},5,&sim.water,&sim.motion);
+        w.modules().set(Module::Ocean,false);sim.advance(w,e.up(),0);e.update(w,{},0.1,&sim.water,&sim.motion);
+        require(!e.swimming() && !e.underwater() && !w.modules().enabled(Module::WaterMotion),"Disabling the last water module removes immersion");
+        require(std::isfinite(e.altitude()) && e.altitude()>=Explorer::eyeHeight,"Observer remains above dry ground");
+    });
     test("landforms","Regional relief contains distinct mountains canyons and gorges",[] {
         World w; const auto home=w.findLand();
         for(auto kind:{Landform::Mountains,Landform::Canyon,Landform::Gorge}) {

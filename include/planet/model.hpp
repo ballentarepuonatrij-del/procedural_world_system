@@ -8,9 +8,9 @@ constexpr double stefanBoltzmann = 5.670374419e-8;
 constexpr double gasConstantAir = 287.05287;
 constexpr double standardGravity = 9.80665;
 
-enum class Module : unsigned { Terrain, Ocean, Atmosphere, Climate, Biomes, SurfaceDetail, Count };
+enum class Module : unsigned { Terrain, Ocean, Atmosphere, Climate, Biomes, SurfaceDetail, Wind, Clouds, Count };
 constexpr auto moduleCount = static_cast<unsigned>(Module::Count);
-constexpr std::array<std::string_view, moduleCount> moduleNames{"Terrain", "Ocean", "Atmosphere", "Climate", "Biomes", "Surface detail"};
+constexpr std::array<std::string_view, moduleCount> moduleNames{"Terrain", "Ocean", "Atmosphere", "Climate", "Biomes", "Surface detail", "Wind", "Clouds"};
 class Modules {
 public:
     bool requested(Module module) const;
@@ -18,7 +18,7 @@ public:
     void set(Module module, bool enabled);
     void toggle(Module module) { set(module, !requested(module)); }
 private:
-    std::array<bool, moduleCount> active_{true, true, true, true, true, true};
+    std::array<bool, moduleCount> active_=[] { std::array<bool,moduleCount> values{}; values.fill(true); return values; }();
 };
 
 struct Config {

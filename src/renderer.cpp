@@ -172,6 +172,24 @@ Renderer::Renderer(HDC dc) {
         }
         pixels=std::move(next); size/=2; ++level;
     }
+    // A generated, soft density footprint; cloud water and motion come from Weather.
+    glGenTextures(1,&cloudTexture_); glBindTexture(GL_TEXTURE_2D,cloudTexture_);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    std::vector<unsigned char> cloudPixels(64*64*4);
+    const Noise cloudNoise(7117);
+    for(int y=0;y<64;++y) for(int x=0;x<64;++x) {
+        const double px=(x+0.5)/32-1,py=(y+0.5)/32-1;
+        const double radius=std::hypot(px,py)+0.10*cloudNoise.fbm({px*4,py*4,0.5},3);
+        const double density=(1-smoothstep(0.40,0.98,radius))*std::exp(-0.5*radius*radius);
+        const auto i=static_cast<std::size_t>((y*64+x)*4);
+        const auto shade=static_cast<unsigned char>(205+50*(y/63.0));
+        cloudPixels[i]=shade; cloudPixels[i+1]=shade; cloudPixels[i+2]=shade;
+        cloudPixels[i+3]=static_cast<unsigned char>(255*clamp(density,0.0,1.0));
+    }
+    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,64,64,0,GL_RGBA,GL_UNSIGNED_BYTE,cloudPixels.data());
 }
 Renderer::~Renderer() {
     glDeleteLists(terrain_,1); glDeleteLists(globe_,1);
@@ -179,6 +197,7 @@ Renderer::~Renderer() {
     glDeleteLists(objects_,1);
     glDeleteLists(font_,96); glDeleteLists(headingFont_,96);
     glDeleteTextures(1,&detailTexture_);
+    glDeleteTextures(1,&cloudTexture_);
 }
 std::string Renderer::device() const {
     const auto* vendor=glGetString(GL_RENDERER);
@@ -319,7 +338,8 @@ void Renderer::buildGlobe(const World& world,double seconds) {
     }
     glEndList(); lastGlobeTime_=seconds; globeDirty_=false;
 }
-void Renderer::draw(const World& world,const Explorer& explorer,const ViewState& view) {
+void Renderer::draw(const World& world,const Explorer& explorer,const Weather& weather,const ViewState& view) {
+    cloudCount_=0;
     glViewport(0,0,view.width,view.height);
     const auto sun=orbit(world.config(),view.seconds);
     const double daylight=smoothstep(-0.10,0.25,dot(explorer.up(),sun.sunDirection));
@@ -409,15 +429,70 @@ void Renderer::draw(const World& world,const Explorer& explorer,const ViewState&
             glVertex3d(v.x,v.y,v.z);
         }
         glEnd();
+        drawWeather(world,explorer,weather,view,daylight);
     }
-    drawHud(world,explorer,view);
+    drawHud(world,explorer,weather,view);
+}
+void Renderer::drawWeather(const World& world,const Explorer& explorer,const Weather& weather,const ViewState& view,double daylight) {
+    if(!weather.windEnabled()) return;
+    const auto local=[&](Vec3 p) { return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)}; };
+    const Vec3 origin=anchor_*world.config().radius;
+    const Vec3 eye=explorer.up()*(world.config().radius+explorer.altitude());
+    const Vec3 right=local(explorer.right()),up=local(normalized(cross(explorer.right(),explorer.forward())));
+    const bool wire=view.surfaceStyle==SurfaceStyle::Wireframe;
+    struct Sprite { Vec3 center; double distance,size; float alpha,shade; };
+    std::vector<Sprite> sprites;
+    if(weather.cloudsEnabled()) for(const auto& p:weather.clouds()) {
+        const auto s=weather.sampleLocal(p.x,p.z);
+        if(!s.available || s.cloudWater<0.004) continue;
+        const Vec3 center=weather.position(p.x,p.z,weather.layerAltitude()+p.height);
+        const double depth=dot(center-eye,explorer.forward());
+        if(depth < -p.size || length(center-eye)>Weather::extent) continue;
+        const double edge=1-smoothstep(Weather::extent*0.40,Weather::extent*0.50,std::max(std::abs(p.x),std::abs(p.z)));
+        const float alpha=static_cast<float>((1-std::exp(-s.cloudWater*7))*edge*0.72);
+        if(alpha<0.005f) continue;
+        sprites.push_back({local(center-origin),depth,p.size,alpha,static_cast<float>(0.90+0.10*randomUnit(p.id+8))});
+    }
+    std::sort(sprites.begin(),sprites.end(),[](const auto& a,const auto& b) { return a.distance>b.distance; });
+    cloudCount_=sprites.size();
+    glDisable(GL_LIGHTING); glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    if(!wire) glEnable(GL_FOG);
+    glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D,cloudTexture_);
+    glBegin(GL_QUADS);
+    for(const auto& s:sprites) {
+        const float light=static_cast<float>(0.10+0.90*daylight)*s.shade;
+        if(wire) glColor4f(0.12f,0.46f,0.62f,s.alpha*0.70f);
+        else glColor4f(light,light,static_cast<float>(0.13+0.87*daylight)*s.shade,s.alpha);
+        const Vec3 horizontal=right*s.size,vertical=up*(s.size*0.68);
+        const auto emit=[](Vec3 p,double u,double v) { glTexCoord2d(u,v); glVertex3d(p.x,p.y,p.z); };
+        emit(s.center-horizontal-vertical,0,0); emit(s.center+horizontal-vertical,1,0);
+        emit(s.center+horizontal+vertical,1,1); emit(s.center-horizontal+vertical,0,1);
+    }
+    glEnd(); glDisable(GL_TEXTURE_2D);
+    if(view.windTracers) {
+        glLineWidth(1.5f); glBegin(GL_LINES);
+        for(const auto& p:weather.tracers()) {
+            const auto s=weather.sampleLocal(p.x,p.z);
+            const Vec3 worldPosition=weather.position(p.x,p.z,weather.groundAt(p.x,p.z)+p.height);
+            const double distance=length(worldPosition-eye);
+            const float alpha=static_cast<float>(0.75*(1-smoothstep(1000,1900,distance)));
+            if(!s.available || alpha<=0) continue;
+            const Vec3 head=local(worldPosition-origin);
+            const Vec3 tail=head-local(s.velocity)*2.0;
+            glColor4f(0.60f,0.88f,1.0f,alpha); glVertex3d(head.x,head.y,head.z);
+            glColor4f(0.60f,0.88f,1.0f,0); glVertex3d(tail.x,tail.y,tail.z);
+        }
+        glEnd(); glLineWidth(1);
+    }
+    glDisable(GL_FOG); glDisable(GL_BLEND); glDepthMask(GL_TRUE);
 }
 void Renderer::text(float x,float y,const std::string& value,Color color,bool large) {
     glColor3f(color.r,color.g,color.b); glRasterPos2f(x,y);
     glListBase((large ? headingFont_ : font_)-32);
     glCallLists(static_cast<GLsizei>(value.size()),GL_UNSIGNED_BYTE,value.data());
 }
-void Renderer::drawHud(const World& world,const Explorer& explorer,const ViewState& view) {
+void Renderer::drawHud(const World& world,const Explorer& explorer,const Weather& weather,const ViewState& view) {
     glDisable(GL_DEPTH_TEST); glDisable(GL_LIGHTING); glDisable(GL_FOG);
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0,view.width,view.height,0,-1,1);
     glMatrixMode(GL_MODELVIEW); glLoadIdentity();
@@ -428,6 +503,14 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const ViewSta
     text(40,57,"PLANETLAB",white,true);
     text(41,80,"PROCEDURAL FIELD OBSERVATORY",muted);
     text(41,98,"SEED " + std::to_string(world.config().seed) + "  /  " + (view.globe ? "ORBIT" : "SURFACE"),mint);
+    if(weather.windEnabled()) {
+        const auto air=weather.sample(explorer.up());
+        rect(22,120,292,111,panel,0.88f);
+        text(40,143,"LOCAL WEATHER / "+fixed(weather.layerAltitude()/1000,1)+" km ASL",mint);
+        text(40,165,"WIND "+fixed(length(air.velocity))+" m/s  E "+fixed(air.wind.east)+" N "+fixed(air.wind.north),white);
+        text(40,187,weather.cloudsEnabled() ? "RH "+fixed(air.humidity*100,0)+"%  CLOUD "+fixed(air.cloudWater,2)+" kg/m2" : "MOISTURE / CLOUDS DISABLED",white);
+        text(40,215,"V wind tracers: "+std::string(view.windTracers ? "ON" : "OFF"),muted);
+    }
     rect(w-288,22,266,57,panel,0.9f);
     text(w-272,45,"DAY " + fixed(view.seconds/86400,2) + "  |  " + (view.paused ? "PAUSED" : fixed(view.timeScale,0)+"x"),white);
     text(w-272,66,"R " + fixed(world.config().radius/1000,0) + " km   " + fixed(view.fps,0) + " fps",muted);
@@ -442,7 +525,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const ViewSta
         text(40,h-104,"AIR     " + fixed(sample.density,3) + " kg/m3",muted);
     } else text(40,h-126,"ATMOSPHERE DISABLED",muted);
     text(40,h-82,"RAIN    " + (world.modules().enabled(Module::Climate) ? fixed(sample.precipitation,0)+" mm/y (estimate)" : "--"),muted);
-    rect(w-288,98,266,234,panel,0.90f);
+    rect(w-288,98,266,288,panel,0.90f);
     text(w-272,123,"SIMULATION MODULES",mint);
     for(unsigned i=0;i<moduleCount;++i) {
         const auto m=static_cast<Module>(i);
@@ -451,7 +534,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const ViewSta
         text(w-272,y,"["+std::to_string(i+1)+"] "+std::string(moduleNames[i]),on?white:muted);
         text(w-90,y,on ? "ON" : (world.modules().requested(m) ? "WAIT" : "OFF"),on?mint:muted);
     }
-    text(w-272,319,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
+    text(w-272,373,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
     rect(22,h-51,w-44,29,panel,0.9f);
     text(35,h-31,(view.captured ? "ESC release mouse" : "CLICK to look") + std::string("   WASD move   F fly   G grid   TAB orbit   H help   T noon   R new seed"),white);
     if(view.help) {
@@ -460,7 +543,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const ViewSta
         text(w-340,h-185,"SHIFT faster   SPACE jump / up",white);
         text(w-340,h-164,"CTRL down      WHEEL flight speed",white);
         text(w-340,h-143,"+ / - time     P pause",white);
-        text(w-340,h-122,"HOME landing   1-6 toggle modules",white);
+        text(w-340,h-122,"HOME landing   1-8 toggle modules",white);
         text(w-340,h-101,"G surface: "+std::string(surfaceStyleName(view.surfaceStyle)),mint);
         text(w-340,h-80,"TAB switches surface / globe",muted);
     }

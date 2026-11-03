@@ -4,3 +4,5 @@ a80230936fae19dfe2dcbaebbd18c3fbef96cd9bc9aff4f9149cce71385e50c0  PlanetLab-0.2.
 12a75890ef9e0eb8230c54d39a2ba4a79f3ba7007474fb946992a8e21854ddb9  PlanetLab-0.2.0-win64.zip
 8985d54e5bb694e028142b5f82230e5ed506e1cd9811e6a600d64eea3b6b7e74  PlanetLab-0.3.0-source.zip
 dfa39b98bcf3cea676a51d0f7a5d1d66dd92907b2252101f7b9ff7320d7a60cb  PlanetLab-0.3.0-win64.zip
+7b96cd7676a359a08bc34d594debe68fab9564e16cb504dc724750b79861144f  PlanetLab-0.4.0-source.zip
+5dcf5b441bc9c7187943cde9fbcf04fdfbb1082bdef01c0f99e0966dc20ae4b5  PlanetLab-0.4.0-win64.zip

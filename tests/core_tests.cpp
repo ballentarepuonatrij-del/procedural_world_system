@@ -1,8 +1,10 @@
 #include "planet/navigation.hpp"
+#include "planet/weather.hpp"
 #include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -382,6 +384,138 @@ void registerTests() {
         walker.teleport(w,start); walker.flying=true; walker.flightSpeed=5;
         walker.update(w,{1,0,0,false,false},1);
         require(dot(walker.up()-tree->up,north(tree->up))>0,"Free flight passes objects");
+    });
+    test("weather","Saturation agrees with reference water vapour pressures",[] {
+        near(saturationPressure(273.15),610.78,0.01,"Freezing-point vapour pressure");
+        near(saturationPressure(293.15),2338.1,3,"20 C vapour pressure");
+        near(saturationMixingRatio(293.15,101325),0.01469,0.00003,"20 C mixing ratio");
+        require(saturationPressure(303.15)>saturationPressure(293.15),"Warm air has higher saturation pressure");
+    });
+    test("weather","Condensation conserves water and moist enthalpy",[] {
+        double vapour=10,cloud=0,temperature=278;
+        constexpr double mass=800,pressure=80000,cp=1004,latent=2.5e6;
+        const double energy=cp*mass*temperature+latent*vapour;
+        equilibrateMoisture(vapour,cloud,temperature,mass,pressure);
+        require(cloud>0 && temperature>278,"Condensation releases latent heat");
+        near(vapour+cloud,10,1e-12,"Water conserved by phase change");
+        near(cp*mass*temperature+latent*vapour,energy,1e-5,"Moist enthalpy conserved");
+        near(vapour,mass*saturationMixingRatio(temperature,pressure),1e-9,"Saturation reached");
+    });
+    test("weather","Evaporation cools air and stops when liquid runs out",[] {
+        double vapour=1,cloud=0.6,temperature=288;
+        const double energy=1004*800*temperature+2.5e6*vapour;
+        equilibrateMoisture(vapour,cloud,temperature,800,85000);
+        near(cloud,0,1e-12,"Available liquid evaporated"); near(vapour,1.6,1e-12,"Vapour gained the liquid");
+        require(temperature<288,"Latent heat cools the air");
+        near(1004*800*temperature+2.5e6*vapour,energy,1e-5,"Evaporation enthalpy");
+    });
+    test("weather","Uniform flow transports a packet exactly one cell",[] {
+        constexpr int n=16; std::vector<double> water(n*n); water[4*n+3]=7;
+        const std::vector<Wind2> wind(n*n,{5,0});
+        const auto moved=transportWater(water,wind,n,100,20);
+        near(moved[4*n+4],7,1e-12,"Advection direction and metric speed");
+        near(std::accumulate(moved.begin(),moved.end(),0.0),7,1e-12,"Packet mass");
+        for(int i=0;i<n;++i) water=transportWater(water,wind,n,100,20);
+        near(water[4*n+3],7,1e-12,"Periodic traversal without mass loss");
+    });
+    test("weather","Divergent flow preserves mass and nonnegative columns",[] {
+        constexpr int n=16; std::vector<double> water(n*n); std::vector<Wind2> wind(n*n);
+        for(std::size_t i=0;i<water.size();++i) {
+            water[i]=randomUnit(i+30); wind[i]={16*randomUnit(i+400)-8,16*randomUnit(i+800)-8};
+        }
+        const double initial=std::accumulate(water.begin(),water.end(),0.0);
+        for(int i=0;i<200;++i) water=transportWater(water,wind,n,100,2);
+        near(std::accumulate(water.begin(),water.end(),0.0),initial,1e-10,"Conservative face fluxes");
+        for(double value:water) require(value>=0 && std::isfinite(value),"Positive water under compression");
+        bool rejected=false;
+        try { (void)transportWater(water,wind,n,100,100); } catch(const std::invalid_argument&) { rejected=true; }
+        require(rejected,"An unstable CFL number must be rejected");
+    });
+    test("weather","Fixed steps reproduce evolution across frame rates",[] {
+        World world; const auto p=world.findLand(); Weather a(world,p,79*86400),b(world,p,79*86400);
+        const auto first=a.clouds().front(); const auto start=a.cells().front();
+        a.advance(world,p,120);
+        for(int i=0;i<480;++i) b.advance(world,p,0.25);
+        require(a.steps()==60 && b.steps()==60,"Same number of physical steps");
+        for(std::size_t i=0;i<a.cells().size();++i) {
+            near(a.cells()[i].vapour,b.cells()[i].vapour,0,"Frame-independent vapour");
+            near(a.cells()[i].cloud,b.cells()[i].cloud,0,"Frame-independent cloud");
+            near(a.cells()[i].wind.east,b.cells()[i].wind.east,0,"Frame-independent wind");
+        }
+        require(std::hypot(a.clouds().front().x-first.x,a.clouds().front().z-first.z)>20,"Cloud tracers advect");
+        require(std::abs(a.cells().front().wind.east-start.wind.east)>0.01,"Wind responds to forces");
+    });
+    test("weather","Projected face flow preserves a uniform moisture field",[] {
+        constexpr int n=16;
+        std::vector<Wind2> faces(n*n);
+        double initialEnergy=0;
+        for(std::size_t i=0;i<faces.size();++i) {
+            faces[i]={12*randomUnit(i)-6,12*randomUnit(i+100)-6};
+            initialEnergy+=faces[i].east*faces[i].east+faces[i].north*faces[i].north;
+        }
+        projectWind(faces,n,100);
+        const auto at=[&](int x,int z)->const Wind2& { return faces[static_cast<std::size_t>(((z+n)%n)*n+(x+n)%n)]; };
+        double energy=0;
+        for(int z=0;z<n;++z) for(int x=0;x<n;++x) {
+            const auto c=at(x,z);
+            near((c.east-at(x-1,z).east+c.north-at(x,z-1).north)/100,0,1e-12,"Discrete divergence removed");
+            energy+=c.east*c.east+c.north*c.north;
+        }
+        require(energy<=initialEnergy+1e-8,"Pressure projection cannot add kinetic energy");
+        std::vector<double> water(n*n,3.0);
+        for(int i=0;i<100;++i) water=transportWater(water,faces,n,100,2,true);
+        for(const auto v:water) near(v,3,1e-11,"No artificial drying or concentration of a uniform layer");
+    });
+    test("weather","Integrated sources sinks and water budget remain finite",[] {
+        World world; const auto p=world.findLand(); Weather weather(world,p,79*86400);
+        for(int i=0;i<60;++i) weather.advance(world,p,60);
+        const auto budget=weather.budget();
+        require(budget.evaporatedKg>0 && budget.precipitatedKg>0,"Both moisture supply and precipitation occur");
+        require(std::abs(budget.residualKg())<budget.initialKg*1e-10,"Closed water accounting including rain");
+        for(const auto& c:weather.cells()) {
+            require(c.vapour>=0 && c.cloud>=0 && std::isfinite(c.cloud),"Nonnegative finite water");
+            require(std::isfinite(c.temperature) && c.temperature>180 && c.temperature<340,"Terrestrial layer temperature");
+            require(std::hypot(c.wind.east,c.wind.north)<43,"Bounded wind maintains stable transport");
+        }
+    });
+    test("weather","Wind and cloud switches suspend the right state",[] {
+        World world; const auto p=world.findLand(); Weather weather(world,p,79*86400);
+        const auto initial=weather.cells();
+        world.modules().set(Module::Wind,false); weather.advance(world,p,60);
+        require(!weather.windEnabled() && !weather.cloudsEnabled() && weather.steps()==0,"Wind and dependent clouds suspended");
+        for(std::size_t i=0;i<initial.size();++i) near(weather.cells()[i].vapour,initial[i].vapour,0,"No hidden moisture integration");
+        world.modules().set(Module::Wind,true); world.modules().set(Module::Clouds,false); weather.advance(world,p,20);
+        require(weather.windEnabled() && !weather.cloudsEnabled() && weather.steps()==10,"Independent wind continues");
+        for(std::size_t i=0;i<initial.size();++i) near(weather.cells()[i].cloud,initial[i].cloud,0,"Cloud water frozen when disabled");
+        world.modules().set(Module::Clouds,true); weather.advance(world,p,20);
+        require(weather.cloudsEnabled(),"Requested clouds restore");
+        world.modules().set(Module::Atmosphere,false); weather.advance(world,p,0);
+        require(!weather.windEnabled() && !weather.cloudsEnabled(),"Atmosphere dependency is enforced");
+    });
+    test("weather","Domain movement preserves overlap and accounts for exchange",[] {
+        World world; const auto p=world.findLand(); Weather weather(world,p,79*86400);
+        weather.advance(world,p,30); const auto before=weather.sample(p); const auto steps=weather.steps();
+        const auto q=normalized(p+east(p)*(6000/world.config().radius));
+        weather.advance(world,q,0); const auto after=weather.sample(p); const auto budget=weather.budget();
+        require(after.available && weather.sample(q).available,"Overlapping old and new locations remain sampled");
+        near(after.cloudWater,before.cloudWater,0.02,"Cloud field survives local-domain movement");
+        require(weather.steps()==steps,"Moving the domain does not integrate hidden time");
+        require(std::abs(budget.residualKg())<budget.initialKg*1e-10,"New and leaving domain water is accounted for");
+    });
+    test("weather","Poles pause and invalid timesteps are handled",[] {
+        World world;
+        for(const auto p:std::vector<Vec3>{{0,1,0},{0,-1,0},{-1,0,0}}) {
+            Weather weather(world,p,79*86400); weather.advance(world,p,20);
+            const auto air=weather.sample(p); require(air.available && std::isfinite(air.humidity),"Finite polar weather");
+            near(dot(air.velocity,p),0,1e-10,"Horizontal wind is tangent to the sphere");
+            const auto particle=weather.clouds().front(); const auto count=weather.steps();
+            weather.advance(world,p,0);
+            near(weather.clouds().front().x,particle.x,0,"Paused tracers stay fixed");
+            require(weather.steps()==count,"Pause does not step the model");
+            bool rejected=false;
+            try { weather.advance(world,p,121); } catch(const std::invalid_argument&) { rejected=true; }
+            require(rejected,"Oversized active timestep is rejected, not silently dropped");
+        }
     });
 }
 }

@@ -11,7 +11,8 @@ using namespace planet;
 struct Options {
     Config config;
     int frames=0;
-    bool globe=false, detail=true;
+    bool globe=false, detail=true, wind=true, clouds=true, paused=false, windTracers=false;
+    double weatherSeconds=0;
     SurfaceStyle surfaceStyle=SurfaceStyle::Grid;
     std::filesystem::path capture, report;
 };
@@ -40,6 +41,16 @@ Options parseOptions() {
             else if(arg==L"--report") options.report=next();
             else if(arg==L"--globe") options.globe=true;
             else if(arg==L"--no-detail") options.detail=false;
+            else if(arg==L"--no-weather") options.wind=false;
+            else if(arg==L"--no-clouds") options.clouds=false;
+            else if(arg==L"--paused") options.paused=true;
+            else if(arg==L"--wind-tracers") options.windTracers=true;
+            else if(arg==L"--weather-seconds") {
+                const auto value=next(); std::size_t used=0;
+                options.weatherSeconds=std::stod(value,&used);
+                if(used!=value.size() || !std::isfinite(options.weatherSeconds) || options.weatherSeconds<0 || options.weatherSeconds>3600)
+                    throw std::invalid_argument("Weather advance must be in [0,3600] seconds");
+            }
             else if(arg==L"--surface-style") {
                 const auto value=next();
                 if(value==L"natural") options.surfaceStyle=SurfaceStyle::Natural;
@@ -56,10 +67,17 @@ Options parseOptions() {
 }
 class Application {
 public:
-    explicit Application(Options options) : options_(std::move(options)), world_(options_.config), explorer_(world_) {
+    explicit Application(Options options) : options_(std::move(options)), world_(options_.config), explorer_(world_), weather_(world_,explorer_.up(),view_.seconds) {
         view_.globe=options_.globe; view_.surfaceStyle=options_.surfaceStyle;
+        view_.paused=options_.paused; view_.windTracers=options_.windTracers;
         world_.modules().set(Module::SurfaceDetail,options_.detail);
+        world_.modules().set(Module::Wind,options_.wind); world_.modules().set(Module::Clouds,options_.clouds);
         orientLanding(); noon();
+        weather_.advance(world_,explorer_.up(),0);
+        for(double remaining=options_.weatherSeconds;remaining>1e-9;) {
+            const double step=std::min(60.0,remaining);
+            weather_.advance(world_,explorer_.up(),step); view_.seconds+=step; remaining-=step;
+        }
     }
     ~Application() {
         captureMouse(false); renderer_.reset();
@@ -109,7 +127,9 @@ public:
             last=now;
             const double dt=clamp(elapsed,0.0,0.1);
             view_.fps=mix(view_.fps,1/std::max(elapsed,0.001),0.04);
-            if(!view_.paused) view_.seconds+=dt*view_.timeScale;
+            if(world_.modules().enabled(Module::Wind)) view_.timeScale=std::min(view_.timeScale,Weather::maximumTimeScale);
+            const double modelDt=view_.paused ? 0 : dt*view_.timeScale;
+            view_.seconds+=modelDt;
             Input input;
             if(view_.captured && !view_.globe) {
                 const auto down=[](int key) { return (GetAsyncKeyState(key)&0x8000)!=0; };
@@ -119,8 +139,9 @@ public:
                 input.sprint=down(VK_SHIFT); input.jump=down(VK_SPACE);
             }
             explorer_.update(world_,input,dt);
+            weather_.advance(world_,explorer_.up(),modelDt);
             const auto renderStart=Clock::now();
-            renderer_->draw(world_,explorer_,view_);
+            renderer_->draw(world_,explorer_,weather_,view_);
             const double renderMs=std::chrono::duration<double,std::milli>(Clock::now()-renderStart).count();
             renderTime+=renderMs; longestRender=std::max(longestRender,renderMs);
             ++frames;
@@ -143,7 +164,14 @@ public:
                 << "\nflight=" << explorer_.flying << "\nglobe=" << view_.globe
                 << "\nsurface_style=" << surfaceStyleName(view_.surfaceStyle)
                 << "\ndetail_objects=" << renderer_->detailCount()
+                << "\ncloud_sprites=" << renderer_->cloudCount() << "\nweather_steps=" << weather_.steps()
+                << "\nwind_tracers=" << view_.windTracers << "\npaused=" << view_.paused
                 << "\nrender_mean_ms=" << renderTime/std::max(1,frames) << "\nrender_max_ms=" << longestRender << '\n';
+            const auto air=weather_.sample(explorer_.up()); const auto water=weather_.budget();
+            out << "weather_time_s=" << weather_.seconds() << "\nwind_m_s=" << length(air.velocity)
+                << "\nwind_east_m_s=" << air.wind.east << "\nwind_north_m_s=" << air.wind.north
+                << "\nrelative_humidity=" << air.humidity << "\ncloud_water_kg_m2=" << air.cloudWater
+                << "\nwater_stored_kg=" << water.storedKg << "\nwater_budget_error_kg=" << water.residualKg() << '\n';
             for(unsigned i=0;i<moduleCount;++i) out << moduleNames[i] << '=' << world_.modules().enabled(static_cast<Module>(i)) << '\n';
             if(!out) throw std::runtime_error("Cannot write smoke report");
         }
@@ -174,6 +202,7 @@ private:
             if(elevation>best) { best=elevation; bestTime=time; }
         }
         view_.seconds=bestTime;
+        weather_.setClock(bestTime);
         if(renderer_) renderer_->invalidate();
     }
     void captureMouse(bool captured) {
@@ -193,6 +222,7 @@ private:
         else if(key=='F') explorer_.flying=!explorer_.flying;
         else if(key==VK_TAB) view_.globe=!view_.globe;
         else if(key=='H') view_.help=!view_.help;
+        else if(key=='V') view_.windTracers=!view_.windTracers;
         else if(key=='G') {
             switch(view_.surfaceStyle) {
                 case SurfaceStyle::Grid: view_.surfaceStyle=SurfaceStyle::Wireframe; break;
@@ -202,7 +232,7 @@ private:
         }
         else if(key=='P') view_.paused=!view_.paused;
         else if(key=='T') noon();
-        else if(key==VK_OEM_PLUS || key==VK_ADD) view_.timeScale=std::min(86400.0,view_.timeScale*2);
+        else if(key==VK_OEM_PLUS || key==VK_ADD) view_.timeScale=std::min(world_.modules().enabled(Module::Wind) ? Weather::maximumTimeScale : 86400.0,view_.timeScale*2);
         else if(key==VK_OEM_MINUS || key==VK_SUBTRACT) view_.timeScale=std::max(1.0,view_.timeScale/2);
         else if(key==VK_HOME) { explorer_.teleport(world_,world_.findLand()); orientLanding(); }
         else if(key=='R') {
@@ -210,8 +240,11 @@ private:
             const auto modules=world_.modules();
             world_=World(config); world_.modules()=modules;
             explorer_=Explorer(world_); orientLanding(); noon(); renderer_->invalidate();
+            weather_=Weather(world_,explorer_.up(),view_.seconds);
         } else if(key>='1' && key<'1'+moduleCount) {
-            world_.modules().toggle(static_cast<Module>(key-'1')); renderer_->invalidate();
+            const auto module=static_cast<Module>(key-'1');
+            world_.modules().toggle(module);
+            if(module<Module::Wind) renderer_->invalidate();
         }
     }
     static LRESULT CALLBACK procedure(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
@@ -254,6 +287,7 @@ private:
     World world_;
     Explorer explorer_;
     ViewState view_;
+    Weather weather_;
     HWND window_=nullptr;
     HDC dc_=nullptr;
     HGLRC context_=nullptr;

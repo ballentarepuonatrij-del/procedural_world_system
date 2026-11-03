@@ -23,7 +23,117 @@ struct Test { std::string suite,name; std::function<void()> run; };
 std::vector<Test> tests;
 void test(std::string suite,std::string name,std::function<void()> run) { tests.push_back({std::move(suite),std::move(name),std::move(run)}); }
 Vec3 point(int i,int count) { return direction(std::asin(1-2*(i+0.5)/count),i*pi*(3-std::sqrt(5.0))); }
+void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* water=nullptr) {
+    for(int i=0;i<700;++i) {
+        if(length(target-explorer.up())*world.config().radius<1.7) return;
+        const Vec3 forward=normalized(target-explorer.up()*dot(target,explorer.up()));
+        const double heading=std::atan2(dot(forward,east(explorer.up())),dot(forward,north(explorer.up())));
+        explorer.look(std::remainder(heading-explorer.heading(),tau),0);
+        explorer.update(world,{1,0,0,true,false},0.2,water);
+    }
+    throw std::runtime_error("Walkable cave route was blocked");
+}
 void registerTests() {
+    test("landforms","Regional relief contains distinct mountains canyons and gorges",[] {
+        World w; const auto home=w.findLand();
+        for(auto kind:{Landform::Mountains,Landform::Canyon,Landform::Gorge}) {
+            const auto place=w.findLandmark(kind,home); const auto target=w.relief(place.lookToward);
+            require(place.type==kind && target.type==kind,"Requested landform is reachable");
+            require(w.elevation(place.position)>w.config().seaLevel,"Survey ledge is dry land");
+            if(kind!=Landform::Mountains) require(target.incision>80,"Valley has substantial incision");
+        }
+    });
+    test("landforms","Steep new relief stays continuous at small distances",[] {
+        World w;
+        for(int i=0;i<2500;++i) {
+            const auto p=point(i,2500),q=normalized(p+east(p)*(0.1/w.config().radius)),r=normalized(p+east(p)*(0.001/w.config().radius));
+            require(std::abs(w.elevation(q)-w.elevation(p))<2,"No height discontinuity across 10 cm on steep relief");
+            require(std::abs(w.elevation(r)-w.elevation(p))<0.02,"No quantized terrace steps across 1 mm");
+        }
+        const auto place=w.findLandmark(Landform::Karst,w.findLand()); const auto cave=w.caveSite(place.position);
+        require(cave.has_value(),"Cave exists for boundary check");
+        for(double z:{-140.,-85.,-40.,65.,310.,380.,410.,500.}) {
+            const auto a=cave->directionAt(0,z-0.001),b=cave->directionAt(0,z+0.001);
+            require(std::abs(w.elevation(a)-w.elevation(b))<0.02,"Cave cover blends continuously");
+        }
+    });
+    test("landforms","Caves have deterministic dry entrances across seeds",[] {
+        for(std::uint64_t seed=0;seed<6;++seed) {
+            Config c;c.seed=seed; World a(c),b(c);
+            const auto place=a.findLandmark(Landform::Karst,a.findLand()); const auto ca=a.caveSite(place.position),cb=b.caveSite(place.position);
+            require(ca && cb && ca->id==cb->id,"Same seed and location give same cave");
+            require(ca->base>c.seaLevel+80,"Underground rooms remain above sea level");
+            near(ca->columnLocal(0,250).floor,cb->columnLocal(0,250).floor,0,"Deterministic chamber floor");
+        }
+    });
+    test("landforms","Entrance opens through the surface and gallery has solid cover",[] {
+        World w; const auto place=w.findLandmark(Landform::Karst,w.findLand()); const auto site=w.caveSite(place.position);
+        require(site.has_value(),"Cave present");
+        const auto mouth=site->directionAt(0,-50),deep=site->directionAt(site->nodes[4].x,site->nodes[4].z);
+        const auto a=site->column(mouth),b=site->column(deep);
+        require(a.floor<w.elevation(mouth) && a.ceiling>w.elevation(mouth),"Real opening intersects the top surface");
+        require(b.ceiling<w.elevation(deep)-25 && b.ceiling-b.floor>8,"Gallery lies under a substantial rock roof");
+        require(!site->columnLocal(110,120).valid(),"Solid material outside the footprint");
+        for(const auto link:site->links) for(int i=0;i<=20;++i) {
+            const auto first=site->nodes[link[0]],last=site->nodes[link[1]];
+            const auto column=site->columnLocal(mix(first.x,last.x,i/20.0),mix(first.z,last.z,i/20.0));
+            require(column.valid() && column.ceiling-column.floor>6,"All connected passage centres admit a person");
+        }
+    });
+    test("landforms","First person enters explores both branches and walks out",[] {
+        World w; w.modules().set(Module::SurfaceDetail,false);
+        const auto place=w.findLandmark(Landform::Karst,w.findLand()); const auto site=w.caveSite(place.position);
+        require(site.has_value(),"Cave present"); Explorer e(w); e.teleport(w,place.position); Hydrology water(w,place.position);
+        for(unsigned node:{1U,2U,3U,4U,5U,6U,5U,4U,3U,7U,8U,9U,8U,7U,3U,2U}) {
+            const auto p=site->directionAt(site->nodes[node].x,site->nodes[node].z); walkTo(e,w,p,&water);
+            const auto column=site->column(e.up());
+            require(e.altitude()>=column.floor+Explorer::eyeHeight-0.05,"Feet stay above the floor");
+            if(node!=1) require(e.underground() && e.altitude()<column.ceiling,"Walking under the roof, not above terrain");
+        }
+        walkTo(e,w,site->directionAt(0,-25),&water); walkTo(e,w,place.position,&water);
+        require(!e.underground(),"Exit reconnects to surface navigation");
+    });
+    test("landforms","Cave ceiling and walls block high speed flight",[] {
+        World w;w.modules().set(Module::SurfaceDetail,false);
+        const auto place=w.findLandmark(Landform::Karst,w.findLand()); const auto site=w.caveSite(place.position);
+        require(site.has_value(),"Cave present");Explorer e(w); e.teleport(w,place.position);
+        walkTo(e,w,site->directionAt(0,-25)); walkTo(e,w,site->directionAt(site->nodes[2].x,25));
+        e.flying=true;e.flightSpeed=20000;e.update(w,{0,0,1,true,false},1);
+        require(e.altitude()<=site->column(e.up()).ceiling-0.19,"Head stops at ceiling");
+        const auto right=site->right; const double heading=std::atan2(dot(right,east(e.up())),dot(right,north(e.up())));
+        e.look(std::remainder(heading-e.heading(),tau),0);e.update(w,{1,0,0,true,false},3);
+        require(e.underground() && site->column(e.up()).valid(),"Flight cannot tunnel through a cave wall");
+    });
+    test("landforms","Surface walking does not fall through a closed cave roof",[] {
+        World w;w.modules().set(Module::SurfaceDetail,false);
+        const auto place=w.findLandmark(Landform::Karst,w.findLand());const auto site=w.caveSite(place.position);
+        require(site.has_value(),"Cave present");Explorer e(w);e.teleport(w,site->directionAt(5,125));e.update(w,{},1);
+        near(e.altitude(),w.surface(e.up())+Explorer::eyeHeight,0.02,"Standing on the upper surface");
+        require(!e.underground(),"Upper and lower navigable surfaces stay separate");
+    });
+    test("landforms","Disabling caves returns the observer safely to the surface",[] {
+        World w;w.modules().set(Module::SurfaceDetail,false);
+        const auto place=w.findLandmark(Landform::Karst,w.findLand());const auto site=w.caveSite(place.position);
+        require(site.has_value(),"Cave present");Explorer e(w);e.teleport(w,place.position);
+        walkTo(e,w,site->directionAt(0,-25));walkTo(e,w,site->directionAt(site->nodes[2].x,25));
+        require(e.underground(),"Starts inside");w.modules().set(Module::Caves,false);e.update(w,{},0.1);
+        require(!e.underground(),"Safe return after disabling cave geometry");
+        near(e.altitude(),w.surface(e.up())+Explorer::eyeHeight,1e-8,"Observer is not embedded in the filled volume");
+        w.modules().set(Module::Caves,true); w.modules().set(Module::Landforms,false);
+        require(!w.modules().enabled(Module::Caves) && w.modules().requested(Module::Caves),"Cave dependency retains request");
+    });
+    test("landforms","Runoff excludes unresolved caves and rebases on module changes",[] {
+        World w;const auto place=w.findLandmark(Landform::Karst,w.findLand());const auto site=w.caveSite(place.position);
+        require(site.has_value(),"Cave present");const auto p=site->directionAt(0,-25);
+        Simulation sim(w,p,0);sim.setRainExperiment(80);sim.advance(w,p,20);
+        require(!sim.water.sample(p).available,"Heightfield water does not cover the cave entrance");
+        const auto check=[&] { const auto b=sim.water.budget();require(std::abs(b.waterResidual())<1e-6 && std::abs(b.solidResidual())<.001,"Mask/rebase ledger stays closed"); };
+        check();w.modules().set(Module::Caves,false);sim.advance(w,p,0);
+        require(sim.water.sample(p).available,"Ordinary surface water returns without caves");check();
+        w.modules().set(Module::Landforms,false);sim.advance(w,p,2);check();
+        near(sim.water.ground(w,p),w.surface(p),1.0,"Runoff bed follows the selected generator");
+        w.modules().set(Module::Landforms,true);w.modules().set(Module::Caves,true);sim.advance(w,p,0);check();
+    });
     test("astronomy","Kepler perihelion and aphelion",[] {
         Config c;
         near(orbit(c,0).distanceAU,1-c.eccentricity,1e-12,"Perihelion");
@@ -121,7 +231,7 @@ void registerTests() {
         near(w.elevation(direction(pi/2,0)),w.elevation(direction(pi/2,2)),1e-7,"North pole seamless");
     });
     test("terrain","Local continuity across random plate boundaries",[] {
-        World w;
+        World w; w.modules().set(Module::Landforms,false);
         for(int i=0;i<3000;++i) {
             const Vec3 p=point(i,3000),q=normalized(p+east(p)*(0.1/w.config().radius));
             require(std::abs(w.elevation(p)-w.elevation(q))<0.15,"No terrain cracks over 10 cm");

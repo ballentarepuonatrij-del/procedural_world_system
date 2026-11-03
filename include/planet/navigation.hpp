@@ -18,6 +18,7 @@ public:
     double heading() const { return std::atan2(dot(heading_,east(up_)),dot(heading_,north(up_))); }
     double pitch() const { return pitch_; }
     bool grounded() const { return grounded_; }
+    bool underground() const { return underground_; }
     bool flying = false;
     double flightSpeed = 250.0;
     static constexpr double eyeHeight = 1.75;
@@ -28,8 +29,9 @@ private:
     Vec3 obstacleAnchor_{};
     std::uint64_t obstacleSeed_=0;
     unsigned obstacleModules_=~0U;
+    std::optional<CaveSite> cave_;
     Vec3 up_, heading_;
     double altitude_ = 0, pitch_ = 0, verticalSpeed_ = 0;
-    bool grounded_ = true, jumpHeld_ = false;
+    bool grounded_ = true, jumpHeld_ = false, underground_=false;
 };
 } // namespace planet

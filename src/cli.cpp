@@ -22,6 +22,7 @@ int main(int argc, char** argv) {
         double lat = 30, lon = 0, day = 79;
         std::optional<double> weatherSeconds,waterSeconds;
         double rainMmH=0;
+        std::optional<planet::Landform> landmark;
         std::string mapPath;
         bool sample = false;
         for (int i=1; i<argc; ++i) {
@@ -49,8 +50,12 @@ int main(int argc, char** argv) {
                 rainMmH=number(next());
                 if(rainMmH<0 || rainMmH>200) throw std::invalid_argument("Rain experiment must be in [0,200] mm/h");
             }
+            else if(arg=="--landmark") {
+                landmark=planet::landmarkType(next());
+                if(!landmark) throw std::invalid_argument("Landmark must be cave, canyon, mountains or gorge");
+            }
             else if (arg == "--help") {
-                std::cout << "planet_cli [--seed uint64] [--sample latitude longitude] [--day days_since_perihelion] [--map world.ppm] [--weather 0..3600_seconds] [--water 0..3600_seconds] [--rain-mm-h 0..200]\n";
+                std::cout << "planet_cli [--seed uint64] [--sample latitude longitude] [--day days_since_perihelion] [--map world.ppm] [--weather 0..3600_seconds] [--water 0..3600_seconds] [--rain-mm-h 0..200] [--landmark cave|canyon|mountains|gorge]\n";
                 return 0;
             } else throw std::invalid_argument("Unknown option: " + arg);
         }
@@ -60,6 +65,10 @@ int main(int argc, char** argv) {
         if(rainMmH>0 && !waterSeconds) throw std::invalid_argument("--rain-mm-h requires --water duration");
         const double duration=waterSeconds.value_or(weatherSeconds.value_or(0));
         const planet::World world(config);
+        if(landmark) {
+            const auto place=world.findLandmark(*landmark,world.findLand());
+            lat=planet::degrees(planet::latitude(place.position)); lon=planet::degrees(planet::longitude(place.position)); sample=true;
+        }
         const auto location=planet::direction(planet::radians(lat),planet::radians(lon));
         const double finalTime=day*86400+duration;
         if (sample || mapPath.empty() || weatherSeconds || waterSeconds) {
@@ -73,6 +82,7 @@ int main(int argc, char** argv) {
                       << ",\n  \"density_kg_m3\": " << s.density
                       << ",\n  \"annual_precipitation_mm\": " << s.precipitation
                       << ",\n  \"insolation_W_m2\": " << s.insolation
+                      << ",\n  \"landform\": \"" << planet::landformName(s.landform) << '"'
                       << ",\n  \"biome\": \"" << planet::biomeName(s.biome) << '"';
             if(weatherSeconds || waterSeconds) {
                 planet::Simulation simulation(world,location,day*86400); simulation.setRainExperiment(rainMmH);
@@ -91,7 +101,7 @@ int main(int argc, char** argv) {
                 if(waterSeconds) {
                     const auto ground=simulation.water.sample(location); const auto runoff=simulation.water.budget();
                     double maximumDepth=0,maximumChange=0;
-                    for(const auto& c:simulation.water.grid().cells) if(!c.sea) {
+                    for(const auto& c:simulation.water.grid().cells) if(!c.sea && !c.masked) {
                         maximumDepth=std::max(maximumDepth,c.water);
                         maximumChange=std::max(maximumChange,std::abs(c.soil-c.initialSoil));
                     }

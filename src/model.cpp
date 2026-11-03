@@ -43,6 +43,8 @@ bool Modules::enabled(Module m) const {
     if (m == Module::Clouds) return enabled(Module::Climate) && enabled(Module::Wind);
     if (m == Module::Hydrology) return enabled(Module::Terrain);
     if (m == Module::Erosion) return enabled(Module::Hydrology);
+    if (m == Module::Landforms) return enabled(Module::Terrain);
+    if (m == Module::Caves) return enabled(Module::Landforms);
     return true;
 }
 void Modules::set(Module m, bool enabled) {
@@ -133,8 +135,9 @@ World::World(Config config) : config_(config), noise_(config.seed) {
         annualSolar_[i] = sum/96;
     }
 }
-double World::elevation(Vec3 p) const {
-    if (!modules_.enabled(Module::Terrain)) return 0;
+double World::elevation(Vec3 p) const { return relief(p).elevation; }
+Relief World::rawRelief(Vec3 p) const {
+    if (!modules_.enabled(Module::Terrain)) return {};
     p = normalized(p);
     double best = -2;
     std::array<double,24> similarities{};
@@ -165,7 +168,8 @@ double World::elevation(Vec3 p) const {
     const double detail = noise_.fbm(metres/150.0,3)*7.0
                         + noise_.value(metres/32.0)*1.1
                         + noise_.value(metres/9.0)*0.22;
-    return mix(-4800.0,550.0,land) + mountains + rolling + hills + detail;
+    const double height=mix(-4800.0,550.0,land)+mountains+rolling+hills+detail;
+    return modules_.enabled(Module::Landforms) ? shapeLandforms(p,config_.radius,config_.seaLevel,config_.seed,height,mountains/4000) : Relief{height};
 }
 double World::surface(Vec3 p) const {
     const double h = elevation(p);
@@ -185,7 +189,7 @@ Sample World::climatology(Vec3 p) const {
 Sample World::evaluate(Vec3 p, double seconds, bool annualMean) const {
     p = normalized(p);
     Sample s;
-    s.elevation = elevation(p);
+    const auto terrain=relief(p); s.elevation=terrain.elevation; s.landform=terrain.type;
     s.ocean = modules_.enabled(Module::Ocean) && s.elevation < config_.seaLevel;
     const double height = s.ocean ? config_.seaLevel : s.elevation;
     const double lat = latitude(p);

@@ -51,6 +51,7 @@ std::vector<SurfaceObject> surfaceObjects(const World& world,Vec3 center,double 
                 if(randomUnit(id+2)>area) continue;
                 const auto habitat=world.climatology(p);
                 if(habitat.ocean) continue;
+                if(const auto site=world.caveSite(p); site && site->protectedGround(p)) continue;
                 const double h=habitat.elevation;
                 const double dx=(world.elevation(normalized(p+east(p)*(2/planetRadius)))-h)/2;
                 const double dy=(world.elevation(normalized(p+north(p)*(2/planetRadius)))-h)/2;

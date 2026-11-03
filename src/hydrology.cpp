@@ -23,16 +23,16 @@ RunoffGrid::RunoffGrid(int size,double spacing,double gravity)
     eastFlow.resize(static_cast<std::size_t>((size+1)*size)); northFlow.resize(eastFlow.size());
 }
 double RunoffGrid::waterVolume() const {
-    double sum=0; for(const auto& c:cells) if(!c.sea) sum+=c.water+c.soilWater;
+    double sum=0; for(const auto& c:cells) if(!c.sea && !c.masked) sum+=c.water+c.soilWater;
     return sum*spacing_*spacing_;
 }
 double RunoffGrid::solidMass() const {
-    double sum=0; for(const auto& c:cells) if(!c.sea) sum+=soilDensity*c.soil+c.sediment;
+    double sum=0; for(const auto& c:cells) if(!c.sea && !c.masked) sum+=soilDensity*c.soil+c.sediment;
     return sum*spacing_*spacing_;
 }
 Wind2 RunoffGrid::velocity(int x,int z) const {
     const auto& c=cells[static_cast<std::size_t>(z*size_+x)];
-    if(c.sea || c.water<1e-7) return {};
+    if(c.sea || c.masked || c.water<1e-7) return {};
     Wind2 v{(eastFlow[static_cast<std::size_t>(z*(size_+1)+x)]+eastFlow[static_cast<std::size_t>(z*(size_+1)+x+1)])/(2*c.water),
             (northFlow[static_cast<std::size_t>(z*size_+x)]+northFlow[static_cast<std::size_t>((z+1)*size_+x)])/(2*c.water)};
     const double speed=std::hypot(v.east,v.north),limit=std::sqrt(gravity_*c.water);
@@ -58,7 +58,7 @@ RunoffExchange RunoffGrid::advance(double seconds,std::span<const double> rain,d
     RunoffExchange result;
     const double area=spacing_*spacing_;
     std::vector<double> outgoing(cells.size()),factor(cells.size()),waterDelta(cells.size()),solidDelta(cells.size());
-    const auto active=[&](int i) { return i>=0 && !cells[static_cast<std::size_t>(i)].sea; };
+    const auto active=[&](int i) { return i>=0 && !cells[static_cast<std::size_t>(i)].sea && !cells[static_cast<std::size_t>(i)].masked; };
     const auto faces=[&](auto&& action) {
         for(int z=0;z<size_;++z) for(int x=0;x<=size_;++x)
             action(x>0 ? z*size_+x-1 : -1,x<size_ ? z*size_+x : -1,eastFlow[static_cast<std::size_t>(z*(size_+1)+x)]);
@@ -67,11 +67,11 @@ RunoffExchange RunoffGrid::advance(double seconds,std::span<const double> rain,d
     };
     for(double remaining=seconds;remaining>1e-10;) {
         double deepest=0;
-        for(std::size_t i=0;i<cells.size();++i) if(!cells[i].sea)
+        for(std::size_t i=0;i<cells.size();++i) if(!cells[i].sea && !cells[i].masked)
             deepest=std::max(deepest,cells[i].water+rain[i]*std::min(remaining,0.5));
         const double dt=std::min({remaining,0.5,0.35*spacing_/std::sqrt(gravity_*std::max(0.001,deepest))});
         for(std::size_t i=0;i<cells.size();++i) {
-            auto& c=cells[i]; if(c.sea) continue;
+            auto& c=cells[i]; if(c.sea || c.masked) continue;
             const double input=rain[i]*dt; c.water+=input; result.rainM3+=input*area;
             const double capacity=porosity*c.soil;
             const double infiltrated=std::min({c.water,std::max(0.0,capacity-c.soilWater),c.conductivity*dt});
@@ -84,6 +84,7 @@ RunoffExchange RunoffGrid::advance(double seconds,std::span<const double> rain,d
             c.soilWater-=soilEvap; result.evaporatedM3+=(surfaceEvap+soilEvap)*area;
         }
         faces([&](int a,int b,double& q) {
+            if((a>=0 && cells[static_cast<std::size_t>(a)].masked) || (b>=0 && cells[static_cast<std::size_t>(b)].masked)) { q=0; return; }
             if((a<0 || b<0) && !openBoundary) { q=0; return; }
             if(!active(a) && !active(b)) { q=0; return; }
             if(!ocean && ((a>=0 && !active(a)) || (b>=0 && !active(b)))) { q=0; return; }
@@ -115,7 +116,7 @@ RunoffExchange RunoffGrid::advance(double seconds,std::span<const double> rain,d
             const double sign=static_cast<double>(active(a))-static_cast<double>(active(b));
             result.boundaryM3+=sign*amount*area; result.sedimentOutKg+=sign*solid*area;
         });
-        for(std::size_t i=0;i<cells.size();++i) if(!cells[i].sea) {
+        for(std::size_t i=0;i<cells.size();++i) if(!cells[i].sea && !cells[i].masked) {
             auto& c=cells[i];
             c.water=std::max(0.0,c.water+waterDelta[i]); c.sediment=std::max(0.0,c.sediment+solidDelta[i]);
             if(erosion) {
@@ -142,6 +143,7 @@ RunoffExchange RunoffGrid::advance(double seconds,std::span<const double> rain,d
 }
 Hydrology::Hydrology(const World& world,Vec3 observer) : config_(world.config()),anchor_(normalized(observer)),
     east_(east(anchor_)),north_(north(anchor_)),grid_(resolution,spacing,config_.gravity) {
+    geometryMask_=(world.modules().enabled(Module::Landforms) ? 1U : 0U)|(world.modules().enabled(Module::Caves) ? 2U : 0U);
     const auto climate=world.climatology(anchor_);
     climateWetness_=clamp(climate.precipitation/1800,0.0,1.0);
     vegetation_=(climate.biome==Biome::Forest || climate.biome==Biome::Rainforest) ? 0.8 :
@@ -162,6 +164,7 @@ GroundCell Hydrology::makeCell(const World& world,int x,int z) const {
     c.vegetation=vegetation_; c.roughness=0.025+0.04*vegetation_;
     c.conductivity=1e-6+3e-6*vegetation_;
     c.soilWater=RunoffGrid::porosity*soil*(0.2+0.55*climateWetness_);
+    if(const auto site=world.caveSite(p)) c.masked=site->protectedGround(p);
     return c;
 }
 Vec3 Hydrology::directionAt(double x,double z) const { return normalized(anchor_+(east_*x+north_*z)/config_.radius); }
@@ -198,6 +201,19 @@ void Hydrology::synchronize(const World& world,Vec3 observer) {
     if(next!=enabled_) ++revision_;
     enabled_=next; erosion_=world.modules().enabled(Module::Erosion);
     if(!enabled_) return;
+    const unsigned geometry=(world.modules().enabled(Module::Landforms) ? 1U : 0U)|(world.modules().enabled(Module::Caves) ? 2U : 0U);
+    if(geometry!=geometryMask_) {
+        const double beforeWater=grid_.waterVolume(),beforeSolid=grid_.solidMass();
+        for(int z=0;z<resolution;++z) for(int x=0;x<resolution;++x) {
+            auto& c=grid_.cells[static_cast<std::size_t>(z*resolution+x)]; const auto p=directionAt(cellX(x),cellZ(z));
+            const double h=world.elevation(p); c.rock=h-c.initialSoil; c.sea=h<config_.seaLevel;
+            const auto site=world.caveSite(p); c.masked=site && site->protectedGround(p);
+        }
+        totals_.domainWaterM3+=grid_.waterVolume()-beforeWater; totals_.domainSolidKg+=grid_.solidMass()-beforeSolid;
+        cache_.clear(); cacheOrder_.clear();
+        std::fill(grid_.eastFlow.begin(),grid_.eastFlow.end(),0); std::fill(grid_.northFlow.begin(),grid_.northFlow.end(),0);
+        geometryMask_=geometry; ++revision_;
+    }
     const Vec3 p=normalized(observer); const double project=dot(p,anchor_);
     if(project<0.99 || length(p-anchor_)*config_.radius>16000) {
         move(world,p,-resolution/2,-resolution/2,true); return;
@@ -253,7 +269,7 @@ GroundSample Hydrology::sampleLocal(double x,double z) const {
     s.weight=smoothstep(0,4,std::min({gx,gz,resolution-1-gx,resolution-1-gz}));
     for(int dz=0;dz<2;++dz) for(int dx=0;dx<2;++dx) {
         const auto& c=grid_.cells[static_cast<std::size_t>((iz+dz)*resolution+ix+dx)];
-        if(c.sea) return {};
+        if(c.sea || c.masked) return {};
         const double w=(dx ? tx : 1-tx)*(dz ? tz : 1-tz);
         s.bed+=c.bed()*w; s.depth+=c.water*w;
         s.saturation+=(c.soil>0 ? c.soilWater/(RunoffGrid::porosity*c.soil) : 0)*w;

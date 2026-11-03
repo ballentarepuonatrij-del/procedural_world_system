@@ -1,5 +1,6 @@
 #pragma once
 #include "planet/math.hpp"
+#include "planet/landforms.hpp"
 #include <array>
 #include <string_view>
 
@@ -8,9 +9,9 @@ constexpr double stefanBoltzmann = 5.670374419e-8;
 constexpr double gasConstantAir = 287.05287;
 constexpr double standardGravity = 9.80665;
 
-enum class Module : unsigned { Terrain, Ocean, Atmosphere, Climate, Biomes, SurfaceDetail, Wind, Clouds, Hydrology, Erosion, Count };
+enum class Module : unsigned { Terrain, Ocean, Atmosphere, Climate, Biomes, SurfaceDetail, Wind, Clouds, Hydrology, Erosion, Landforms, Caves, Count };
 constexpr auto moduleCount = static_cast<unsigned>(Module::Count);
-constexpr std::array<std::string_view, moduleCount> moduleNames{"Terrain", "Ocean", "Atmosphere", "Climate", "Biomes", "Surface detail", "Wind", "Clouds", "Surface water", "Erosion"};
+constexpr std::array<std::string_view, moduleCount> moduleNames{"Terrain", "Ocean", "Atmosphere", "Climate", "Biomes", "Surface detail", "Wind", "Clouds", "Surface water", "Erosion", "Landforms", "Caves"};
 class Modules {
 public:
     bool requested(Module module) const;
@@ -65,6 +66,7 @@ struct Sample {
     double insolation{};    // instantaneous top-of-atmosphere W/m^2
     Biome biome = Biome::Rock;
     bool ocean{};
+    Landform landform=Landform::Lowland;
 };
 
 class World {
@@ -75,12 +77,16 @@ public:
     const Modules& modules() const { return modules_; }
     double elevation(Vec3 unit) const;
     double surface(Vec3 unit) const;
+    Relief relief(Vec3 unit) const;
+    std::optional<CaveSite> caveSite(Vec3 unit,double reach=650,bool requireEnabled=true) const;
+    Landmark findLandmark(Landform type,Vec3 around) const;
     double annualInsolation(double latitudeRadians) const;
     Sample sample(Vec3 unit, double seconds) const;
     Sample climatology(Vec3 unit) const; // Annual energy-balance habitat, independent of view time.
     Color color(const Sample& sample) const;
     Vec3 findLand() const;
 private:
+    Relief rawRelief(Vec3 unit) const;
     Sample evaluate(Vec3 unit, double seconds, bool annualMean) const;
     struct Plate { Vec3 center; Vec3 velocity; double continental; };
     Config config_;
@@ -88,5 +94,7 @@ private:
     Noise noise_;
     std::array<Plate, 24> plates_{};
     std::array<double, 181> annualSolar_{};
+    mutable std::optional<std::uint64_t> caveCacheId_;
+    mutable std::optional<CaveSite> caveCache_;
 };
 } // namespace planet

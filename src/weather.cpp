@@ -206,7 +206,7 @@ void Weather::background(const World& world) {
             30*noise.value(p*(config_.radius/16000)),18*noise.value(p*(config_.radius/9000)+Vec3{11,37,9}),forcingWeight};
     }
     backgroundModules_=0;
-    for(unsigned i=0;i<4;++i) if(world.modules().enabled(static_cast<Module>(i))) backgroundModules_|=1U<<i;
+    for(unsigned i=0;i<moduleCount;++i) if((i<4 || i==static_cast<unsigned>(Module::Landforms)) && world.modules().enabled(static_cast<Module>(i))) backgroundModules_|=1U<<i;
 }
 void Weather::seedParticles() {
     clouds_.clear(); tracers_.clear();
@@ -284,7 +284,7 @@ void Weather::advance(const World& world,Vec3 observer,double modelSeconds) {
         throw std::invalid_argument("Reset weather after changing the planet");
     windEnabled_=world.modules().enabled(Module::Wind); cloudsEnabled_=world.modules().enabled(Module::Clouds);
     unsigned modules=0;
-    for(unsigned i=0;i<4;++i) if(world.modules().enabled(static_cast<Module>(i))) modules|=1U<<i;
+    for(unsigned i=0;i<moduleCount;++i) if((i<4 || i==static_cast<unsigned>(Module::Landforms)) && world.modules().enabled(static_cast<Module>(i))) modules|=1U<<i;
     if(modules!=backgroundModules_) background(world);
     if(length(normalized(observer)-anchor_)*config_.radius>5000) recenter(world,observer);
     if(!windEnabled_) { time_+=pending_+modelSeconds; pending_=0; return; }

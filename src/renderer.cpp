@@ -145,8 +145,8 @@ void detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up,Vec3 right,bool 
 }
 Renderer::Renderer(HDC dc) {
     font_=makeFont(dc,15,FW_NORMAL); headingFont_=makeFont(dc,28,FW_BOLD);
-    terrain_=glGenLists(1); terrainGrid_=glGenLists(1); globe_=glGenLists(1); objects_=glGenLists(1);
-    if (!terrain_ || !terrainGrid_ || !globe_ || !objects_) throw std::runtime_error("Cannot allocate terrain display lists");
+    terrain_=glGenLists(1); terrainGrid_=glGenLists(1); globe_=glGenLists(1); objects_=glGenLists(1); caves_=glGenLists(1);
+    if (!terrain_ || !terrainGrid_ || !globe_ || !objects_ || !caves_) throw std::runtime_error("Cannot allocate terrain display lists");
     glEnable(GL_DEPTH_TEST); glEnable(GL_NORMALIZE);
     glEnable(GL_COLOR_MATERIAL); glColorMaterial(GL_FRONT_AND_BACK,GL_AMBIENT_AND_DIFFUSE);
     glEnable(GL_LIGHT0);
@@ -194,7 +194,7 @@ Renderer::Renderer(HDC dc) {
 Renderer::~Renderer() {
     glDeleteLists(terrain_,1); glDeleteLists(globe_,1);
     glDeleteLists(terrainGrid_,1);
-    glDeleteLists(objects_,1);
+    glDeleteLists(objects_,1); glDeleteLists(caves_,1);
     glDeleteLists(font_,96); glDeleteLists(headingFont_,96);
     glDeleteTextures(1,&detailTexture_);
     glDeleteTextures(1,&cloudTexture_);
@@ -216,6 +216,7 @@ void Renderer::buildTerrain(const World& world,const Explorer& explorer,const Hy
     else face={0,0,std::copysign(1.0,anchor_.z)};
     const Vec3 reference=std::abs(face.y)<0.5 ? Vec3{0,1,0} : Vec3{0,0,1};
     const Vec3 right=normalized(cross(reference,face)), down=cross(right,face);
+    const auto cave=world.caveSite(anchor_);
     const double projection=radius/dot(anchor_,face);
     auto xs=terrainAxis(dot(anchor_,right)*projection,terrainStep_);
     auto ys=terrainAxis(dot(anchor_,down)*projection,terrainStep_);
@@ -232,9 +233,23 @@ void Renderer::buildTerrain(const World& world,const Explorer& explorer,const Hy
         };
         refine(xs,minX,maxX); refine(ys,minY,maxY);
     }
+    if(cave && explorer.altitude()-world.surface(anchor_)<1200) {
+        double minX=1e30,maxX=-1e30,minY=1e30,maxY=-1e30;
+        for(double z:{-85.,290.}) for(double x:{-110.,110.}) {
+            const auto q=cave->directionAt(x,z); const double k=radius/dot(q,face);
+            minX=std::min(minX,dot(q,right)*k); maxX=std::max(maxX,dot(q,right)*k);
+            minY=std::min(minY,dot(q,down)*k); maxY=std::max(maxY,dot(q,down)*k);
+        }
+        const double step=std::pow(2.0,std::ceil(std::log2(2/std::pow(dot(cave->anchor,face),2))));
+        const auto refine=[&](std::vector<double>& axis,double low,double high) {
+            for(double v=std::ceil(low/step)*step;v<=high;v+=step) axis.push_back(v);
+            std::sort(axis.begin(),axis.end()); axis.erase(std::unique(axis.begin(),axis.end()),axis.end());
+        };
+        refine(xs,minX,maxX); refine(ys,minY,maxY);
+    }
     const int columns=static_cast<int>(xs.size()),rows=static_cast<int>(ys.size());
     const double aboveGround=std::max(0.0,explorer.altitude()-world.surface(anchor_));
-    struct Vertex { Vec3 position; Color color; double u,v; float gridAlpha; Vec3 normal{}; bool ocean{}; };
+    struct Vertex { Vec3 position; Color color; double u,v; float gridAlpha; Vec3 normal{}; bool ocean{}; Vec3 unit{}; double height{}; CaveColumn cavity{}; Color rockColor{}; };
     std::vector<Vertex> vertices(xs.size()*ys.size());
     waterVertices_.clear(); waterTriangles_.clear();
     waterVertices_.reserve(vertices.size());
@@ -260,8 +275,15 @@ void Renderer::buildTerrain(const World& world,const Explorer& explorer,const Hy
         const Vec3 position{dot(relative,east_),dot(relative,anchor_),dot(relative,north_)};
         waterVertices_.push_back({p,position,h,ground.available && ground.weight>0});
         const float alpha=static_cast<float>(1-smoothstep(1500+aboveGround*4,10000+aboveGround*12,std::hypot(position.x,position.z)));
+        const double band=0.5+0.5*std::sin(h/7.5+0.35*std::sin(h/27));
+        Color rock{0.44f,0.42f,0.36f};
+        if(sample.landform==Landform::Canyon || sample.landform==Landform::Plateau)
+            rock={static_cast<float>(0.52+0.14*band),static_cast<float>(0.30+0.12*band),static_cast<float>(0.18+0.10*band)};
+        else if(sample.landform==Landform::Karst) rock={static_cast<float>(0.48+0.12*band),static_cast<float>(0.46+0.12*band),static_cast<float>(0.39+0.12*band)};
+        else if(sample.landform==Landform::Mountains || sample.landform==Landform::Gorge) rock={0.39f,0.41f,0.42f};
+        if(cave && cave->protectedGround(p)) color=rock;
         vertices[static_cast<std::size_t>(y*columns+x)]={position,color,
-            (global.x+global.z)*0.25,(global.y+global.z*0.37)*0.25,alpha,{},sample.ocean};
+            (global.x+global.z)*0.25,(global.y+global.z*0.37)*0.25,alpha,{},sample.ocean,p,h,cave ? cave->column(p) : CaveColumn{},rock};
     }
     const auto at=[&](int x,int y)->Vertex& { return vertices[static_cast<std::size_t>(y*columns+x)]; };
     for(int y=0;y<rows;++y) for(int x=0;x<columns;++x) {
@@ -270,8 +292,8 @@ void Renderer::buildTerrain(const World& world,const Explorer& explorer,const Hy
                                   at(x,std::max(y-1,0)).position-at(x,std::min(y+1,rows-1)).position));
         if(!v.ocean) {
             const float rock=static_cast<float>(smoothstep(0.12,0.42,1-v.normal.y));
-            v.color={static_cast<float>(mix(v.color.r,0.44,rock)),static_cast<float>(mix(v.color.g,0.42,rock)),
-                     static_cast<float>(mix(v.color.b,0.36,rock))};
+            v.color={static_cast<float>(mix(v.color.r,v.rockColor.r,rock)),static_cast<float>(mix(v.color.g,v.rockColor.g,rock)),
+                     static_cast<float>(mix(v.color.b,v.rockColor.b,rock))};
         }
         // Grazing lines cover subpixel cells near the horizon. Fade them instead
         // of accumulating a bright, flickering band of overlapping edges.
@@ -284,25 +306,89 @@ void Renderer::buildTerrain(const World& world,const Explorer& explorer,const Hy
             if(waterVertices_[tri[0]].available && waterVertices_[tri[1]].available && waterVertices_[tri[2]].available) waterTriangles_.push_back(tri);
     }
     waterRevision_=water.revision(); waterSteps_=water.steps();
-    glNewList(terrain_,GL_COMPILE);
-    const auto emit=[&](int x,int y) {
-        const auto& v=at(x,y);
-        glNormal3d(v.normal.x,v.normal.y,v.normal.z); glColor3f(v.color.r,v.color.g,v.color.b);
-        glTexCoord2d(v.u,v.v);
-        glVertex3d(v.position.x,v.position.y,v.position.z);
+    const auto interpolate=[&](const Vertex& a,const Vertex& b,double t) {
+        Vertex v=a; v.unit=normalized(a.unit*(1-t)+b.unit*t); v.height=world.surface(v.unit);
+        const Vec3 relative=v.unit*(radius+v.height)-anchor_*radius;
+        v.position={dot(relative,east_),dot(relative,anchor_),dot(relative,north_)};
+        v.normal=normalized(a.normal*(1-t)+b.normal*t);
+        v.color={static_cast<float>(mix(a.color.r,b.color.r,t)),static_cast<float>(mix(a.color.g,b.color.g,t)),static_cast<float>(mix(a.color.b,b.color.b,t))};
+        v.u=mix(a.u,b.u,t); v.v=mix(a.v,b.v,t); v.gridAlpha=static_cast<float>(mix(a.gridAlpha,b.gridAlpha,t));
+        v.cavity=cave ? cave->column(v.unit) : CaveColumn{}; return v;
     };
-    for(int y=0;y<rows-1;++y) {
-        glBegin(GL_TRIANGLE_STRIP);
-        for(int x=0;x<columns;++x) { emit(x,y+1); emit(x,y); }
-        glEnd();
+    const auto field=[](const Vertex& v,int plane) {
+        if(plane==0) return v.cavity.field;
+        if(plane==1) return -std::min(v.cavity.ceiling-v.height,v.height-v.cavity.floor);
+        return v.height-(plane==2 ? v.cavity.floor : v.cavity.ceiling);
+    };
+    const auto clip=[&](const std::vector<Vertex>& input,int plane) {
+        std::vector<Vertex> output;
+        if(input.empty()) return output;
+        for(std::size_t i=0;i<input.size();++i) {
+            const auto& a=input[i]; const auto& b=input[(i+1)%input.size()];
+            const bool inside=field(a,plane)>=0,next=field(b,plane)>=0;
+            if(inside) output.push_back(a);
+            if(inside!=next) {
+                double lo=0,hi=1;
+                for(int j=0;j<14;++j) { const double mid=(lo+hi)/2; if((field(interpolate(a,b,mid),plane)>=0)==inside) lo=mid; else hi=mid; }
+                auto v=interpolate(a,b,(lo+hi)/2);
+                if(plane==0) { v.cavity.field=0; v.cavity.floor=v.cavity.ceiling=(v.cavity.floor+v.cavity.ceiling)/2; }
+                else if(plane==2) v.cavity.floor=v.height;
+                else if(plane==3) v.cavity.ceiling=v.height;
+                output.push_back(v);
+            }
+        }
+        return output;
+    };
+    const auto terrainVertex=[](const Vertex& v) {
+        glNormal3d(v.normal.x,v.normal.y,v.normal.z); glColor3f(v.color.r,v.color.g,v.color.b);
+        glTexCoord2d(v.u,v.v); glVertex3d(v.position.x,v.position.y,v.position.z);
+    };
+    glNewList(terrain_,GL_COMPILE); glBegin(GL_TRIANGLES);
+    for(int y=0;y<rows-1;++y) for(int x=0;x<columns-1;++x) {
+        for(const auto& tri:{std::array<Vertex,3>{at(x,y),at(x,y+1),at(x+1,y+1)},std::array<Vertex,3>{at(x,y),at(x+1,y+1),at(x+1,y)}}) {
+            const auto polygon=cave ? clip({tri.begin(),tri.end()},1) : std::vector<Vertex>{tri.begin(),tri.end()};
+            for(std::size_t i=1;i+1<polygon.size();++i) { terrainVertex(polygon[0]); terrainVertex(polygon[i]); terrainVertex(polygon[i+1]); }
+        }
     }
-    glEndList();
+    glEnd(); glEndList();
+    caveCount_=0;
+    glNewList(caves_,GL_COMPILE); glBegin(GL_TRIANGLES);
+    if(cave) for(int y=0;y<rows-1;++y) for(int x=0;x<columns-1;++x) {
+        for(const auto& tri:{std::array<Vertex,3>{at(x,y),at(x,y+1),at(x+1,y+1)},std::array<Vertex,3>{at(x,y),at(x+1,y+1),at(x+1,y)}}) {
+            if(std::max({tri[0].cavity.field,tri[1].cavity.field,tri[2].cavity.field})<0) continue;
+            const auto footprint=clip({tri.begin(),tri.end()},0);
+            for(int side=2;side<=3;++side) {
+                const auto polygon=clip(footprint,side);
+                const auto point=[&](const Vertex& v) {
+                    const double h=side==2 ? v.cavity.floor : v.cavity.ceiling;
+                    const Vec3 p=v.unit*(radius+h)-anchor_*radius;
+                    return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)};
+                };
+                for(std::size_t i=1;i+1<polygon.size();++i) {
+                    const auto a=point(polygon[0]),b=point(polygon[i]),c=point(polygon[i+1]);
+                    auto normal=normalized(cross(b-a,c-a));
+                    if((normal.y>0)!=(side==2)) normal=-normal;
+                    glNormal3d(normal.x,normal.y,normal.z);
+                    for(const auto index:{std::size_t{0},i,i+1}) {
+                        const auto& v=polygon[index]; const auto p=point(v);
+                        const double height=side==2 ? v.cavity.floor : v.cavity.ceiling;
+                        const float shade=static_cast<float>(0.83+0.12*std::sin(height*1.5)+0.05*std::sin(height*5));
+                        glColor3f(0.51f*shade,0.47f*shade,0.38f*shade); glTexCoord2d(v.u,v.v);
+                        glVertex3d(p.x,p.y,p.z);
+                    }
+                    ++caveCount_;
+                }
+            }
+        }
+    }
+    glEnd(); glEndList();
     glNewList(terrainGrid_,GL_COMPILE);
     glBegin(GL_LINES);
     const auto edge=[&](int ax,int ay,int bx,int by,bool diagonal) {
         const auto& a=vertices[static_cast<std::size_t>(ay*columns+ax)];
         const auto& b=vertices[static_cast<std::size_t>(by*columns+bx)];
         if(a.gridAlpha==0 && b.gridAlpha==0) return;
+        if(cave && (field(a,1)<0 || field(b,1)<0)) return;
         const auto vertex=[&](const Vertex& v) {
             glColor4f(0.20f,0.82f,1.0f,v.gridAlpha*(diagonal ? 0.34f : 0.75f));
             glVertex3d(v.position.x,v.position.y,v.position.z);
@@ -375,7 +461,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
     else if(view.globe || !atmosphere) glClearColor(0.015f,0.023f,0.038f,1);
     else glClearColor(static_cast<float>(0.015+0.43*daylight),static_cast<float>(0.025+0.57*daylight),static_cast<float>(0.06+0.64*daylight),1);
     glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
-    glEnable(GL_DEPTH_TEST); glEnable(GL_LIGHTING); glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST); glEnable(GL_LIGHTING); glDisable(GL_BLEND); glDisable(GL_LIGHT1);
     if(view.globe) {
         if(globeDirty_ || std::abs(view.seconds-lastGlobeTime_)>3600) buildGlobe(world,view.seconds);
         perspective(radians(44),static_cast<double>(view.width)/view.height,0.1,20);
@@ -399,7 +485,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
            std::abs(explorer.altitude()-terrainEyeHeight_)>std::max(32.0,terrainStep_*4) ||
            terrainSpacing(world,explorer)!=terrainStep_ || std::abs(view.seconds-lastTerrainTime_)>900)
             buildTerrain(world,explorer,water,view.seconds);
-        perspective(radians(72),static_cast<double>(view.width)/view.height,0.25,400000);
+        perspective(radians(72),static_cast<double>(view.width)/view.height,explorer.underground() ? 0.08 : 0.25,400000);
         const auto local=[&](Vec3 p) { return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)}; };
         const Vec3 eye=local(explorer.up()*(world.config().radius+explorer.altitude())-anchor_*world.config().radius);
         camera(eye,local(explorer.forward()),local(explorer.up()));
@@ -423,6 +509,20 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
         glCallList(terrain_);
         glDisable(GL_TEXTURE_2D);
         glCallList(objects_);
+        if(caveCount_>0) {
+            glDisable(GL_LIGHT0); glDisable(GL_FOG);
+            const GLfloat dark[]{0.008f,0.010f,0.014f,1}; glLightModelfv(GL_LIGHT_MODEL_AMBIENT,dark);
+            if(view.headlamp) {
+                glEnable(GL_LIGHT1);
+                const GLfloat lamp[]{static_cast<float>(eye.x),static_cast<float>(eye.y),static_cast<float>(eye.z),1};
+                const GLfloat color[]{1.0f,0.94f,0.80f,1},black[]{0,0,0,1};
+                glLightfv(GL_LIGHT1,GL_POSITION,lamp); glLightfv(GL_LIGHT1,GL_DIFFUSE,color); glLightfv(GL_LIGHT1,GL_AMBIENT,black);
+                glLightf(GL_LIGHT1,GL_CONSTANT_ATTENUATION,1); glLightf(GL_LIGHT1,GL_LINEAR_ATTENUATION,0.015f);
+                glLightf(GL_LIGHT1,GL_QUADRATIC_ATTENUATION,0.0018f);
+            }
+            glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D,detailTexture_); glCallList(caves_); glDisable(GL_TEXTURE_2D);
+            glDisable(GL_LIGHT1); glEnable(GL_LIGHT0); glLightModelfv(GL_LIGHT_MODEL_AMBIENT,ambient);
+        }
         glDisable(GL_POLYGON_OFFSET_FILL); glEnable(GL_COLOR_MATERIAL);
         glDisable(GL_TEXTURE_2D); glDisable(GL_FOG); glDisable(GL_LIGHTING);
         if(showGrid) {
@@ -430,12 +530,14 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
             glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
             glEnable(GL_LINE_SMOOTH); glHint(GL_LINE_SMOOTH_HINT,GL_NICEST); glLineWidth(1.0f);
             glCallList(terrainGrid_);
-            if(wireframe) {
+            if(wireframe || caveCount_>0) {
                 glDisable(GL_COLOR_MATERIAL); glEnable(GL_LIGHTING);
                 const GLfloat black[]{0,0,0,1}, cyan[]{0.12f,0.64f,0.78f,1};
                 glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT_AND_DIFFUSE,black);
                 glMaterialfv(GL_FRONT_AND_BACK,GL_EMISSION,cyan);
-                glPolygonMode(GL_FRONT_AND_BACK,GL_LINE); glCallList(objects_);
+                glPolygonMode(GL_FRONT_AND_BACK,GL_LINE);
+                if(wireframe) glCallList(objects_);
+                glCallList(caves_);
                 glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
                 glMaterialfv(GL_FRONT_AND_BACK,GL_EMISSION,black);
                 glEnable(GL_COLOR_MATERIAL); glDisable(GL_LIGHTING);
@@ -585,7 +687,16 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
     text(40,57,"PLANETLAB",white,true);
     text(41,80,"PROCEDURAL FIELD OBSERVATORY",muted);
     text(41,98,"SEED " + std::to_string(world.config().seed) + "  /  " + (view.globe ? "ORBIT" : "SURFACE"),mint);
-    if(weather.windEnabled()) {
+    if(explorer.underground()) {
+        rect(22,120,292,111,panel,0.88f);
+        text(40,143,"UNDERGROUND / KARST",mint);
+        text(40,165,"L headlamp: "+std::string(view.headlamp ? "ON" : "OFF"),white);
+        if(const auto site=world.caveSite(explorer.up())) {
+            const auto column=site->column(explorer.up());
+            text(40,187,"CEILING "+fixed(column.ceiling-explorer.altitude(),1)+" m above eye",white);
+        }
+        text(40,215,"J next landmark / HOME landing",muted);
+    } else if(weather.windEnabled()) {
         const auto air=weather.sample(explorer.up());
         rect(22,120,292,111,panel,0.88f);
         text(40,143,"LOCAL WEATHER / "+fixed(weather.layerAltitude()/1000,1)+" km ASL",mint);
@@ -593,7 +704,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(40,187,weather.cloudsEnabled() ? "RH "+fixed(air.humidity*100,0)+"%  CLOUD "+fixed(air.cloudWater,2)+" kg/m2" : "MOISTURE / CLOUDS DISABLED",white);
         text(40,215,"V wind tracers: "+std::string(view.windTracers ? "ON" : "OFF"),muted);
     }
-    if(water.enabled()) {
+    if(water.enabled() && water.sample(explorer.up()).available) {
         const auto ground=water.sample(explorer.up());
         rect(22,238,292,120,panel,0.90f);
         text(40,261,"SURFACE WATER / 4 m CELLS",mint);
@@ -608,9 +719,12 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
     text(w-272,66,"R " + fixed(world.config().radius/1000,0) + " km   " + fixed(view.fps,0) + " fps",muted);
     const auto sample=world.sample(explorer.up(),view.seconds);
     rect(22,h-242,292,174,panel,0.88f);
-    text(40,h-217,"SURFACE TELEMETRY",mint);
+    text(40,h-217,std::string(landformName(sample.landform))+" / TELEMETRY",mint);
     text(40,h-192,"LAT " + fixed(degrees(latitude(explorer.up())),3) + "  LON " + fixed(degrees(longitude(explorer.up())),3),white);
-    text(40,h-170,"GROUND  " + fixed(water.ground(world,explorer.up()),0) + " m   " + std::string(biomeName(sample.biome)),white);
+    if(explorer.underground()) {
+        const auto site=world.caveSite(explorer.up());
+        if(site) text(40,h-170,"FLOOR  "+fixed(site->column(explorer.up()).floor,1)+" m   Limestone",white);
+    } else text(40,h-170,"GROUND  " + fixed(water.ground(world,explorer.up()),0) + " m   " + std::string(biomeName(sample.biome)),white);
     text(40,h-148,"EYE     " + fixed(explorer.altitude(),1) + " m ASL",white);
     if(world.modules().enabled(Module::Atmosphere)) {
         text(40,h-126,"SURFACE " + fixed(sample.temperature-273.15,1) + " C   " + fixed(sample.pressure/100,0) + " hPa",white);
@@ -622,22 +736,23 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
     for(unsigned i=0;i<moduleCount;++i) {
         const auto m=static_cast<Module>(i);
         const bool on=world.modules().enabled(m);
-        const float y=151+20*static_cast<float>(i);
-        text(w-272,y,"["+std::to_string((i+1)%10)+"] "+std::string(moduleNames[i]),on?white:muted);
+        const float y=145+17*static_cast<float>(i);
+        const std::string key=i<10 ? std::to_string((i+1)%10) : (i==10 ? "M" : "C");
+        text(w-272,y,"["+key+"] "+std::string(moduleNames[i]),on?white:muted);
         text(w-90,y,on ? "ON" : (world.modules().requested(m) ? "WAIT" : "OFF"),on?mint:muted);
     }
     text(w-272,353,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
     rect(22,h-51,w-44,29,panel,0.9f);
-    text(35,h-31,(view.captured ? "ESC release mouse" : "CLICK to look") + std::string("   WASD move   F fly   G grid   TAB orbit   H help   T noon   R new seed"),white);
+    text(35,h-31,(view.captured ? "ESC release mouse" : "CLICK to look") + std::string("   WASD move   F fly   G grid   TAB orbit   H help   J sites   L lamp"),white);
     if(view.help) {
         rect(w-358,h-232,336,165,panel,0.9f);
         text(w-340,h-208,explorer.flying ? "FLIGHT / "+fixed(explorer.flightSpeed,0)+" m/s" : "WALK / 2.5 m/s",mint);
         text(w-340,h-185,"SHIFT faster   SPACE jump / up",white);
         text(w-340,h-164,"CTRL down      WHEEL flight speed",white);
         text(w-340,h-143,"+ / - time     P pause",white);
-        text(w-340,h-122,"HOME landing   1-9/0 modules",white);
+        text(w-340,h-122,"HOME landing   1-9/0 M/C modules",white);
         text(w-340,h-101,"G surface: "+std::string(surfaceStyleName(view.surfaceStyle)),mint);
-        text(w-340,h-80,"TAB switches surface / globe",muted);
+        text(w-340,h-80,"J sites  L lamp  T noon  R seed",muted);
     }
     if(!view.globe) {
         const float cx=w/2,cy=h/2;

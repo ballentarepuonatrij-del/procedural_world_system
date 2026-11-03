@@ -10,6 +10,7 @@ struct GroundCell {
     double sediment{};                  // kg/m2 suspended solids
     double roughness=0.04, conductivity=2e-6, vegetation=0;
     bool sea=false;                     // prescribed sea-level reservoir, not simulated ocean
+    bool masked=false;                  // unresolved multilevel cave region: impermeable solver boundary
     double bed() const { return rock+soil; }
 };
 struct RunoffExchange {
@@ -87,6 +88,7 @@ private:
     double climateWetness_=0.5,vegetation_=0.5;
     std::uint64_t revision_=0,steps_=0;
     bool enabled_=false,erosion_=false;
+    unsigned geometryMask_=0;
 };
 // Shared fixed clock: weather rain over each 2 s interval feeds the ground once.
 // This avoids frame-rate-dependent rain when the renderer runs at different FPS.

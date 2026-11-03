@@ -38,6 +38,7 @@ bool Modules::enabled(Module m) const {
     if (!requested(m)) return false;
     if (m == Module::Climate) return requested(Module::Atmosphere);
     if (m == Module::Biomes) return enabled(Module::Climate);
+    if (m == Module::SurfaceDetail) return enabled(Module::Terrain);
     return true;
 }
 void Modules::set(Module m, bool enabled) {
@@ -153,8 +154,14 @@ double World::elevation(Vec3 p) const {
     const double ridge = 1-std::abs(noise_.fbm(p*110,4));
     const double mountains = boundary * convergence * 6400 * ridge * ridge * land;
     const double rolling = noise_.fbm(p*900,5) * (30 + 140*land);
-    const double detail = noise_.fbm(p*(config_.radius/180.0),3)*1.8;
-    return mix(-4800.0,550.0,land) + mountains + rolling + detail;
+    // Metric wavelengths fill the gap between continental terrain and walking scale.
+    // These are continuous geometric approximations, not an erosion simulation.
+    const Vec3 metres = p*config_.radius;
+    const double hills = noise_.fbm(metres/620.0,3)*(12+24*land);
+    const double detail = noise_.fbm(metres/150.0,3)*7.0
+                        + noise_.value(metres/32.0)*1.1
+                        + noise_.value(metres/9.0)*0.22;
+    return mix(-4800.0,550.0,land) + mountains + rolling + hills + detail;
 }
 double World::surface(Vec3 p) const {
     const double h = elevation(p);
@@ -166,6 +173,12 @@ double World::annualInsolation(double lat) const {
     return mix(annualSolar_[lower], annualSolar_[std::min(lower+1,annualSolar_.size()-1)], index-static_cast<double>(lower));
 }
 Sample World::sample(Vec3 p, double seconds) const {
+    return evaluate(p,seconds,false);
+}
+Sample World::climatology(Vec3 p) const {
+    return evaluate(p,0,true);
+}
+Sample World::evaluate(Vec3 p, double seconds, bool annualMean) const {
     p = normalized(p);
     Sample s;
     s.elevation = elevation(p);
@@ -173,7 +186,8 @@ Sample World::sample(Vec3 p, double seconds) const {
     const double height = s.ocean ? config_.seaLevel : s.elevation;
     const double lat = latitude(p);
     const double annual = annualInsolation(lat);
-    s.insolation = orbit(config_,seconds).irradiance * std::max(0.0,dot(p,orbit(config_,seconds).sunDirection));
+    const auto sun = orbit(config_,seconds);
+    s.insolation = annualMean ? annual : sun.irradiance * std::max(0.0,dot(p,sun.sunDirection));
     double seaTemperature = 288.15;
     if (modules_.enabled(Module::Climate)) {
         const double transported = 0.65*annual + 0.35*config_.solarConstant/4;
@@ -184,7 +198,7 @@ Sample World::sample(Vec3 p, double seconds) const {
         const double lag = std::atan(omega*heatCapacity/feedback)/omega;
         const double damping = feedback/std::hypot(feedback,omega*heatCapacity);
         const double anomaly = (dailyInsolation(config_,lat,seconds-lag)-annual)*(1-config_.albedo)*damping/feedback;
-        seaTemperature = clamp(equilibrium + anomaly, 180.0, 340.0);
+        seaTemperature = clamp(equilibrium + (annualMean ? 0 : anomaly), 180.0, 340.0);
     }
     if (modules_.enabled(Module::Atmosphere)) {
         const auto air = standardAtmosphere(height, seaTemperature, 101325, config_.radius, config_.gravity);

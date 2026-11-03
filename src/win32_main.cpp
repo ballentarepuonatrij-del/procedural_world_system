@@ -11,7 +11,7 @@ using namespace planet;
 struct Options {
     Config config;
     int frames=0;
-    bool globe=false;
+    bool globe=false, detail=true;
     SurfaceStyle surfaceStyle=SurfaceStyle::Grid;
     std::filesystem::path capture, report;
 };
@@ -39,6 +39,7 @@ Options parseOptions() {
             } else if(arg==L"--capture") options.capture=next();
             else if(arg==L"--report") options.report=next();
             else if(arg==L"--globe") options.globe=true;
+            else if(arg==L"--no-detail") options.detail=false;
             else if(arg==L"--surface-style") {
                 const auto value=next();
                 if(value==L"natural") options.surfaceStyle=SurfaceStyle::Natural;
@@ -57,6 +58,7 @@ class Application {
 public:
     explicit Application(Options options) : options_(std::move(options)), world_(options_.config), explorer_(world_) {
         view_.globe=options_.globe; view_.surfaceStyle=options_.surfaceStyle;
+        world_.modules().set(Module::SurfaceDetail,options_.detail);
         orientLanding(); noon();
     }
     ~Application() {
@@ -93,6 +95,7 @@ public:
         using Clock=std::chrono::steady_clock;
         auto last=Clock::now();
         int frames=0;
+        double renderTime=0, longestRender=0;
         while(running_) {
             MSG message{};
             while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) {
@@ -116,7 +119,10 @@ public:
                 input.sprint=down(VK_SHIFT); input.jump=down(VK_SPACE);
             }
             explorer_.update(world_,input,dt);
+            const auto renderStart=Clock::now();
             renderer_->draw(world_,explorer_,view_);
+            const double renderMs=std::chrono::duration<double,std::milli>(Clock::now()-renderStart).count();
+            renderTime+=renderMs; longestRender=std::max(longestRender,renderMs);
             ++frames;
             if(options_.frames>0 && frames>=options_.frames) {
                 if(!options_.capture.empty()) renderer_->capture(options_.capture,view_.width,view_.height);
@@ -135,8 +141,10 @@ public:
                 << "\nlongitude=" << degrees(longitude(explorer_.up())) << "\naltitude_m=" << explorer_.altitude()
                 << "\nheading_deg=" << degrees(explorer_.heading()) << "\npitch_deg=" << degrees(explorer_.pitch())
                 << "\nflight=" << explorer_.flying << "\nglobe=" << view_.globe
-                << "\nsurface_style=" << surfaceStyleName(view_.surfaceStyle) << '\n';
-            for(unsigned i=0;i<5;++i) out << moduleNames[i] << '=' << world_.modules().enabled(static_cast<Module>(i)) << '\n';
+                << "\nsurface_style=" << surfaceStyleName(view_.surfaceStyle)
+                << "\ndetail_objects=" << renderer_->detailCount()
+                << "\nrender_mean_ms=" << renderTime/std::max(1,frames) << "\nrender_max_ms=" << longestRender << '\n';
+            for(unsigned i=0;i<moduleCount;++i) out << moduleNames[i] << '=' << world_.modules().enabled(static_cast<Module>(i)) << '\n';
             if(!out) throw std::runtime_error("Cannot write smoke report");
         }
         return 0;
@@ -202,7 +210,7 @@ private:
             const auto modules=world_.modules();
             world_=World(config); world_.modules()=modules;
             explorer_=Explorer(world_); orientLanding(); noon(); renderer_->invalidate();
-        } else if(key>='1' && key<='5') {
+        } else if(key>='1' && key<'1'+moduleCount) {
             world_.modules().toggle(static_cast<Module>(key-'1')); renderer_->invalidate();
         }
     }

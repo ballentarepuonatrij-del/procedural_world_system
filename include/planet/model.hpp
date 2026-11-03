@@ -8,8 +8,9 @@ constexpr double stefanBoltzmann = 5.670374419e-8;
 constexpr double gasConstantAir = 287.05287;
 constexpr double standardGravity = 9.80665;
 
-enum class Module : unsigned { Terrain, Ocean, Atmosphere, Climate, Biomes, Count };
-constexpr std::array<std::string_view, 5> moduleNames{"Terrain", "Ocean", "Atmosphere", "Climate", "Biomes"};
+enum class Module : unsigned { Terrain, Ocean, Atmosphere, Climate, Biomes, SurfaceDetail, Count };
+constexpr auto moduleCount = static_cast<unsigned>(Module::Count);
+constexpr std::array<std::string_view, moduleCount> moduleNames{"Terrain", "Ocean", "Atmosphere", "Climate", "Biomes", "Surface detail"};
 class Modules {
 public:
     bool requested(Module module) const;
@@ -17,7 +18,7 @@ public:
     void set(Module module, bool enabled);
     void toggle(Module module) { set(module, !requested(module)); }
 private:
-    std::array<bool, 5> active_{true, true, true, true, true};
+    std::array<bool, moduleCount> active_{true, true, true, true, true, true};
 };
 
 struct Config {
@@ -76,9 +77,11 @@ public:
     double surface(Vec3 unit) const;
     double annualInsolation(double latitudeRadians) const;
     Sample sample(Vec3 unit, double seconds) const;
+    Sample climatology(Vec3 unit) const; // Annual energy-balance habitat, independent of view time.
     Color color(const Sample& sample) const;
     Vec3 findLand() const;
 private:
+    Sample evaluate(Vec3 unit, double seconds, bool annualMean) const;
     struct Plate { Vec3 center; Vec3 velocity; double continental; };
     Config config_;
     Modules modules_;

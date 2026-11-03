@@ -1,5 +1,5 @@
 #pragma once
-#include "planet/model.hpp"
+#include "planet/surface_detail.hpp"
 
 namespace planet {
 struct Input { double forward{}, right{}, vertical{}; bool sprint{}, jump{}; };
@@ -22,6 +22,11 @@ public:
     static constexpr double eyeHeight = 1.75;
 private:
     void step(const World& world, const Input& input, double dt);
+    void refreshObstacles(const World& world);
+    std::vector<SurfaceObject> obstacles_;
+    Vec3 obstacleAnchor_{};
+    std::uint64_t obstacleSeed_=0;
+    unsigned obstacleModules_=~0U;
     Vec3 up_, heading_;
     double altitude_ = 0, pitch_ = 0, verticalSpeed_ = 0;
     bool grounded_ = true, jumpHeld_ = false;

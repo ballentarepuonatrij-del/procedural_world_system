@@ -1,6 +1,8 @@
 #include "planet/navigation.hpp"
 #include <functional>
 #include <iostream>
+#include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -130,7 +132,7 @@ void registerTests() {
     });
     test("modules","Core survives all modules disabled",[] {
         World w;
-        for(unsigned i=0;i<5;++i) w.modules().set(static_cast<Module>(i),false);
+        for(unsigned i=0;i<moduleCount;++i) w.modules().set(static_cast<Module>(i),false);
         near(w.surface({1,0,0}),0,0,"Bare sphere surface");
         const auto s=w.sample({1,0,0},0);
         require(!s.ocean && s.pressure==0 && std::isnan(s.temperature),"Vacuum state");
@@ -160,8 +162,8 @@ void registerTests() {
     });
     test("modules","All module combinations yield valid samples",[] {
         World w;
-        for(unsigned bits=0;bits<32;++bits) {
-            for(unsigned i=0;i<5;++i) w.modules().set(static_cast<Module>(i),(bits&(1U<<i))!=0);
+        for(unsigned bits=0;bits<(1U<<moduleCount);++bits) {
+            for(unsigned i=0;i<moduleCount;++i) w.modules().set(static_cast<Module>(i),(bits&(1U<<i))!=0);
             const auto s=w.sample(direction(0.5,0.3),100*86400);
             require(std::isfinite(s.elevation) && std::isfinite(s.pressure) && std::isfinite(s.precipitation),"Finite sample");
         }
@@ -261,6 +263,125 @@ void registerTests() {
             try { World w(c); } catch(const std::invalid_argument&) { rejected=true; }
             require(rejected,"Invalid configuration throws");
         }
+    });
+    test("detail","Stable objects in overlapping neighbourhoods",[] {
+        World w;
+        const Vec3 p=w.findLand(),q=normalized(p+east(p)*(17/w.config().radius));
+        const auto a=surfaceObjects(w,p,180),b=surfaceObjects(w,q,180),again=surfaceObjects(w,p,180);
+        require(a.size()>30 && a.size()==again.size(),"Populated, reproducible neighbourhood");
+        std::map<std::uint64_t,SurfaceObject> lookup;
+        for(const auto& o:b) require(lookup.emplace(o.id,o).second,"No duplicate object identities");
+        int shared=0;
+        for(std::size_t i=0;i<a.size();++i) {
+            const auto& o=a[i];
+            require(o.id==again[i].id && o.kind==again[i].kind,"Query order does not alter generation");
+            if(o.kind==DetailKind::Grass || o.kind==DetailKind::Shrub || length(o.up-q)*w.config().radius>179) continue;
+            require(lookup.contains(o.id),"Objects in overlap cannot disappear on mesh recenter");
+            const auto& other=lookup.at(o.id);
+            near(length(o.up-other.up),0,0,"Position stays fixed");
+            near(o.elevation,other.elevation,0,"Base stays fixed");
+            near(o.height,other.height,0,"Shape stays fixed");
+            ++shared;
+        }
+        require(shared>10,"Compared enough shared rocks and trees");
+        Config c; c.seed=43; World different(c);
+        const auto changed=surfaceObjects(different,different.findLand(),180);
+        require(!changed.empty() && changed.front().id!=a.front().id,"Seed changes object identities");
+    });
+    test("detail","Cube edges corners poles and dateline have stable coverage",[] {
+      for(double radius:{100000.,6371000.}) {
+        Config c; c.radius=radius; c.seaLevel=-5000; World w(c);
+        w.modules().set(Module::Biomes,false);
+        std::size_t total=0;
+        for(Vec3 p:std::vector<Vec3>{{1,1,0},{1,-1,0},{-1,1,0},{1,0,1},{-1,0,-1},{0,1,-1},{1,1,1},{-1,-1,-1},{0,1,0},{0,-1,0},{-1,0,0}}) {
+            p=normalized(p);
+            const auto q=normalized(p+east(p)*(20/c.radius));
+            const auto a=surfaceObjects(w,p,160,false),b=surfaceObjects(w,q,160,false);
+            std::map<std::uint64_t,SurfaceObject> lookup;
+            for(const auto& o:b) require(lookup.emplace(o.id,o).second,"Unique face ownership");
+            // On a 100 km planet the same continental heights can form cliffs:
+            // slope filtering legitimately removes rocks at some corners.
+            if(radius>100000) require(a.size()>5,"No empty cube seam on terrestrial terrain");
+            total+=a.size();
+            for(const auto& o:a) if(length(o.up-q)*c.radius<159) {
+                require(lookup.contains(o.id),"Face transition preserves overlapping objects");
+                near(length(o.up-lookup.at(o.id).up),0,0,"No displacement across chart change");
+            }
+        }
+        require(total>100,"Seam comparisons cover a populated sample");
+      }
+    });
+    test("detail","Habitat ocean and slope restrictions",[] {
+        std::array<int,4> counts{};
+        for(std::uint64_t seed=0;seed<6;++seed) {
+            Config c; c.seed=seed; World w(c);
+            const auto objects=surfaceObjects(w,w.findLand(),240);
+            for(const auto& o:objects) {
+                ++counts[static_cast<std::size_t>(o.kind)];
+                const auto s=w.climatology(o.up);
+                require(!s.ocean,"No underwater decorations");
+                near(o.elevation,w.elevation(o.up),1e-8,"Objects meet the collision surface");
+                if(o.kind!=DetailKind::Rock) {
+                    require(s.temperature>267 && s.temperature<315 && s.precipitation>180,"Plant climate envelope");
+                    require(s.elevation>c.seaLevel+2,"Plants avoid shoreline");
+                    const double dx=(w.elevation(normalized(o.up+east(o.up)*(2/c.radius)))-s.elevation)/2;
+                    const double dy=(w.elevation(normalized(o.up+north(o.up)*(2/c.radius)))-s.elevation)/2;
+                    require(std::hypot(dx,dy)<0.65,"Plants avoid steep slopes");
+                }
+            }
+            for(int i=0;i<200;++i) if(w.elevation(point(i,200))<-100) {
+                require(surfaceObjects(w,point(i,200),80).empty(),"Open ocean has no props"); break;
+            }
+        }
+        for(int count:counts) require(count>0,"All four detail kinds are represented");
+    });
+    test("detail","Module dependencies remove and restore detail",[] {
+        World w; const auto p=w.findLand();
+        const auto initial=surfaceObjects(w,p,150);
+        w.modules().set(Module::SurfaceDetail,false);
+        require(surfaceObjects(w,p,150).empty(),"Detail switches off independently");
+        w.modules().set(Module::SurfaceDetail,true); w.modules().set(Module::Terrain,false);
+        require(!w.modules().enabled(Module::SurfaceDetail) && surfaceObjects(w,p,150).empty(),"Detail waits for terrain");
+        w.modules().set(Module::Terrain,true);
+        const auto restored=surfaceObjects(w,p,150);
+        require(initial.size()==restored.size(),"Restored identical population");
+        for(std::size_t i=0;i<initial.size();++i) require(initial[i].id==restored[i].id,"Restored identities");
+        w.modules().set(Module::Atmosphere,false);
+        const auto vacuum=surfaceObjects(w,p,150);
+        require(!vacuum.empty(),"Rocks remain without air");
+        for(const auto& o:vacuum) require(o.kind==DetailKind::Rock,"No vegetation without biomes");
+    });
+    test("detail","Bounded query and invalid radius handling",[] {
+        World w; const auto p=w.findLand();
+        const auto objects=surfaceObjects(w,p,600);
+        require(objects.size()<12000,"Finite local population budget");
+        for(const auto& o:objects) {
+            require(length(o.up-p)*w.config().radius<=600,"Within query radius");
+            require(std::isfinite(o.height) && o.height>0 && o.radius>0,"Finite positive dimensions");
+        }
+        for(double radius:{-1.,0.,601.,std::numeric_limits<double>::infinity()}) {
+            bool rejected=false;
+            try { (void)surfaceObjects(w,p,radius); } catch(const std::invalid_argument&) { rejected=true; }
+            require(rejected,"Reject unbounded query");
+        }
+    });
+    test("detail","Trunk collision and module toggle invalidate navigation cache",[] {
+        World w; const auto objects=surfaceObjects(w,w.findLand(),180,false);
+        const auto tree=std::find_if(objects.begin(),objects.end(),[](const auto& o) { return o.kind==DetailKind::Tree; });
+        require(tree!=objects.end(),"Test site contains a tree");
+        const double clearance=tree->collisionRadius()+0.3;
+        const Vec3 start=normalized(tree->up-north(tree->up)*((clearance+1)/w.config().radius));
+        Explorer walker(w); walker.teleport(w,start);
+        walker.update(w,{1,0,0,false,false},1.2);
+        require(length(walker.up()-tree->up)*w.config().radius>=clearance-0.02,"Cannot walk through trunk");
+        require(length(walker.up()-start)*w.config().radius>0.5,"Walking reaches obstacle");
+        w.modules().set(Module::SurfaceDetail,false);
+        walker.update(w,{1,0,0,false,false},1.2);
+        require(dot(walker.up()-tree->up,north(tree->up))>0,"Disabled obstacle no longer blocks movement");
+        w.modules().set(Module::SurfaceDetail,true);
+        walker.teleport(w,start); walker.flying=true; walker.flightSpeed=5;
+        walker.update(w,{1,0,0,false,false},1);
+        require(dot(walker.up()-tree->up,north(tree->up))>0,"Free flight passes objects");
     });
 }
 }

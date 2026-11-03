@@ -31,7 +31,7 @@ std::string fixed(double value,int precision=1) {
 double terrainSpacing(const World& world,const Explorer& explorer) {
     const double aboveGround=std::max(0.0,explorer.altitude()-world.surface(explorer.up()));
     const int level=clamp(static_cast<int>(std::floor(std::log2(std::max(1.0,aboveGround/64)))),0,12);
-    return std::ldexp(8.0,level);
+    return std::ldexp(2.0,level);
 }
 std::vector<double> terrainAxis(double center,double step) {
     std::vector<double> points;
@@ -60,11 +60,93 @@ GLuint makeFont(HDC dc,int size,int weight) {
     if (!ok) { if (base) glDeleteLists(base,96); throw std::runtime_error("Cannot create OpenGL font"); }
     return base;
 }
+// Small meshes in metres, generated into one cached display list. The same
+// triangles are reused for the solid and wireframe passes.
+void detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up,Vec3 right,bool simple) {
+    right=rotate(right,up,object.angle);
+    const Vec3 back=cross(right,up);
+    const auto transform=[&](Vec3 p) { return origin+right*p.x+up*p.y+back*p.z; };
+    const auto triangle=[&](Vec3 a,Vec3 b,Vec3 c,Color color) {
+        a=transform(a); b=transform(b); c=transform(c);
+        const Vec3 n=normalized(cross(b-a,c-a));
+        glNormal3d(n.x,n.y,n.z); glColor3f(color.r,color.g,color.b);
+        glVertex3d(a.x,a.y,a.z); glVertex3d(b.x,b.y,b.z); glVertex3d(c.x,c.y,c.z);
+    };
+    const auto tube=[&](Vec3 a,Vec3 b,double base,double tip,Color color) {
+        const Vec3 axis=normalized(b-a);
+        const Vec3 side=normalized(cross(axis,Vec3{0.4,0.1,1})), front=cross(axis,side);
+        for(int i=0;i<6;++i) {
+            const Vec3 u=side*std::cos(tau*i/6)+front*std::sin(tau*i/6);
+            const Vec3 v=side*std::cos(tau*(i+1)/6)+front*std::sin(tau*(i+1)/6);
+            triangle(a+u*base,a+v*base,b+v*tip,color);
+            triangle(a+u*base,b+v*tip,b+u*tip,color);
+        }
+    };
+    const auto crown=[&](Vec3 center,Vec3 scale,Color color,std::uint64_t salt) {
+        const int rings=simple ? 3 : 4, sides=simple ? 6 : 8;
+        const auto vertex=[&](int row,int column) {
+            column%=sides;
+            const double lat=-pi/2+pi*row/rings, angle=tau*column/sides;
+            const double rough=0.82+0.30*randomUnit(object.id+salt+static_cast<std::uint64_t>(row*17+column));
+            return center+Vec3{std::cos(lat)*std::cos(angle)*scale.x*rough,
+                               std::sin(lat)*scale.y,std::cos(lat)*std::sin(angle)*scale.z*rough};
+        };
+        for(int row=0;row<rings;++row) for(int column=0;column<sides;++column) {
+            const float tint=static_cast<float>(0.83+0.22*randomUnit(object.id+salt+static_cast<std::uint64_t>(row*31+column)));
+            const Color shaded{color.r*tint,color.g*tint,color.b*tint};
+            const auto a=vertex(row,column),b=vertex(row,column+1),c=vertex(row+1,column),d=vertex(row+1,column+1);
+            if(row>0) triangle(a,c,b,shaded);
+            if(row+1<rings) triangle(b,c,d,shaded);
+        }
+    };
+    const double h=object.height,r=object.radius;
+    const float variation=static_cast<float>(0.85+0.30*randomUnit(object.id+11));
+    const Color leaves{0.22f*variation,0.39f*variation,0.12f*variation};
+    switch(object.kind) {
+        case DetailKind::Rock:
+            crown({0,h*0.32,0},{r,h*0.68,r*0.82},{0.46f*variation,0.43f*variation,0.36f*variation},101);
+            break;
+        case DetailKind::Tree: {
+            const Color bark{0.27f,0.19f,0.12f};
+            tube({0,-0.4,0},{0,h*0.72,0},h*0.025,h*0.008,bark);
+            if(object.evergreen) {
+                for(int layer=0;layer<3;++layer) {
+                    const double base=h*(0.24+layer*0.20), width=r*(1-layer*0.22);
+                    for(int i=0;i<8;++i) {
+                        const Vec3 a{width*std::cos(tau*i/8),base,width*std::sin(tau*i/8)};
+                        const Vec3 b{width*std::cos(tau*(i+1)/8),base,width*std::sin(tau*(i+1)/8)};
+                        triangle(a,{0,std::min(h,base+h*0.4),0},b,{0.13f,0.29f,0.18f});
+                    }
+                }
+            } else {
+                crown({0,h*0.73,0},{r,h*0.27,r},leaves,200);
+                if(!simple) for(int i=0;i<3;++i) {
+                    const double angle=tau*i/3+0.4;
+                    const Vec3 branch{std::cos(angle)*r*0.65,h*(0.56+i*0.055),std::sin(angle)*r*0.65};
+                    tube({0,h*0.38,0},branch,h*0.012,h*0.004,bark);
+                    crown(branch,{r*0.62,h*0.17,r*0.62},leaves,static_cast<std::uint64_t>(300+i*80));
+                }
+            }
+            break;
+        }
+        case DetailKind::Shrub:
+            crown({0,h*0.43,0},{r,h*0.57,r},leaves,500);
+            break;
+        case DetailKind::Grass:
+            for(int i=0;i<5;++i) {
+                const double angle=tau*i/5;
+                const Vec3 side{std::cos(angle),0,std::sin(angle)};
+                const Vec3 base=side*(r*0.35);
+                triangle(base-side*0.06,base+side*0.06,base+Vec3{r*0.3,h*(0.6+0.1*i),r*0.2},leaves);
+            }
+            break;
+    }
+}
 }
 Renderer::Renderer(HDC dc) {
     font_=makeFont(dc,15,FW_NORMAL); headingFont_=makeFont(dc,28,FW_BOLD);
-    terrain_=glGenLists(1); terrainGrid_=glGenLists(1); globe_=glGenLists(1);
-    if (!terrain_ || !terrainGrid_ || !globe_) throw std::runtime_error("Cannot allocate terrain display lists");
+    terrain_=glGenLists(1); terrainGrid_=glGenLists(1); globe_=glGenLists(1); objects_=glGenLists(1);
+    if (!terrain_ || !terrainGrid_ || !globe_ || !objects_) throw std::runtime_error("Cannot allocate terrain display lists");
     glEnable(GL_DEPTH_TEST); glEnable(GL_NORMALIZE);
     glEnable(GL_COLOR_MATERIAL); glColorMaterial(GL_FRONT_AND_BACK,GL_AMBIENT_AND_DIFFUSE);
     glEnable(GL_LIGHT0);
@@ -94,6 +176,7 @@ Renderer::Renderer(HDC dc) {
 Renderer::~Renderer() {
     glDeleteLists(terrain_,1); glDeleteLists(globe_,1);
     glDeleteLists(terrainGrid_,1);
+    glDeleteLists(objects_,1);
     glDeleteLists(font_,96); glDeleteLists(headingFont_,96);
     glDeleteTextures(1,&detailTexture_);
 }
@@ -119,8 +202,9 @@ void Renderer::buildTerrain(const World& world,const Explorer& explorer,double s
     const auto ys=terrainAxis(dot(anchor_,down)*projection,terrainStep_);
     const int columns=static_cast<int>(xs.size()),rows=static_cast<int>(ys.size());
     const double aboveGround=std::max(0.0,explorer.altitude()-world.surface(anchor_));
-    struct Vertex { Vec3 position; Color color; double u,v; float gridAlpha; Vec3 normal{}; };
+    struct Vertex { Vec3 position; Color color; double u,v; float gridAlpha; Vec3 normal{}; bool ocean{}; };
     std::vector<Vertex> vertices(xs.size()*ys.size());
+    const Noise material(world.config().seed^0x695c17ULL);
     for(int y=0;y<rows;++y) for(int x=0;x<columns;++x) {
         const Vec3 p=normalized(face*radius+right*xs[static_cast<std::size_t>(x)]+down*ys[static_cast<std::size_t>(y)]);
         const auto sample=world.sample(p,seconds);
@@ -130,19 +214,27 @@ void Renderer::buildTerrain(const World& world,const Explorer& explorer,double s
         if(sample.ocean) {
             const float shallow=static_cast<float>(1-clamp((world.config().seaLevel-sample.elevation)/150,0.0,1.0));
             color.g+=0.10f*shallow; color.b+=0.07f*shallow;
+        } else {
+            const float variation=static_cast<float>(0.87+0.22*material.fbm(p*(radius/45),2));
+            color.r*=variation; color.g*=variation; color.b*=variation;
         }
         // World-anchored coordinates keep the material stationary when the local mesh recentres.
         const Vec3 global=p*(radius+h);
         const Vec3 position{dot(relative,east_),dot(relative,anchor_),dot(relative,north_)};
         const float alpha=static_cast<float>(1-smoothstep(1500+aboveGround*4,10000+aboveGround*12,std::hypot(position.x,position.z)));
         vertices[static_cast<std::size_t>(y*columns+x)]={position,color,
-            (global.x+global.z)*0.25,(global.y+global.z*0.37)*0.25,alpha};
+            (global.x+global.z)*0.25,(global.y+global.z*0.37)*0.25,alpha,{},sample.ocean};
     }
     const auto at=[&](int x,int y)->Vertex& { return vertices[static_cast<std::size_t>(y*columns+x)]; };
     for(int y=0;y<rows;++y) for(int x=0;x<columns;++x) {
         auto& v=at(x,y);
         v.normal=normalized(cross(at(std::min(x+1,columns-1),y).position-at(std::max(x-1,0),y).position,
                                   at(x,std::max(y-1,0)).position-at(x,std::min(y+1,rows-1)).position));
+        if(!v.ocean) {
+            const float rock=static_cast<float>(smoothstep(0.12,0.42,1-v.normal.y));
+            v.color={static_cast<float>(mix(v.color.r,0.44,rock)),static_cast<float>(mix(v.color.g,0.42,rock)),
+                     static_cast<float>(mix(v.color.b,0.36,rock))};
+        }
         // Grazing lines cover subpixel cells near the horizon. Fade them instead
         // of accumulating a bright, flickering band of overlapping edges.
         const double incidence=dot(v.normal,normalized(Vec3{0,terrainEyeHeight_,0}-v.position));
@@ -180,6 +272,33 @@ void Renderer::buildTerrain(const World& world,const Explorer& explorer,double s
         if(x+1<columns && y+1<rows) edge(x,y,x+1,y+1,true);
     }
     glEnd(); glEndList();
+    glNewList(objects_,GL_COMPILE);
+    detailCount_=0;
+    if(aboveGround<1800) {
+        const auto objects=surfaceObjects(world,anchor_,420,aboveGround<100);
+        const auto local=[&](Vec3 p) { return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)}; };
+        glBegin(GL_TRIANGLES);
+        for(const auto& object:objects) {
+            const double distance=length(object.up-anchor_)*radius;
+            const double range=object.kind==DetailKind::Tree ? 420 : (object.kind==DetailKind::Rock ? 220 : 80);
+            if(distance>range) continue;
+            // Seat objects on the actual rendered triangle. Distant LOD samples
+            // can differ from the exact collision height; roots must not float.
+            const double project=radius/dot(object.up,face);
+            const double x=dot(object.up,right)*project,y=dot(object.up,down)*project;
+            const int ix=clamp(static_cast<int>(std::upper_bound(xs.begin(),xs.end(),x)-xs.begin())-1,0,columns-2);
+            const int iy=clamp(static_cast<int>(std::upper_bound(ys.begin(),ys.end(),y)-ys.begin())-1,0,rows-2);
+            const double tx=clamp((x-xs[static_cast<std::size_t>(ix)])/(xs[static_cast<std::size_t>(ix+1)]-xs[static_cast<std::size_t>(ix)]),0.0,1.0);
+            const double ty=clamp((y-ys[static_cast<std::size_t>(iy)])/(ys[static_cast<std::size_t>(iy+1)]-ys[static_cast<std::size_t>(iy)]),0.0,1.0);
+            const Vec3 a=at(ix,iy).position,d=at(ix+1,iy+1).position;
+            const Vec3 base=tx>=ty ? a*(1-tx)+at(ix+1,iy).position*(tx-ty)+d*ty
+                                  : a*(1-ty)+at(ix,iy+1).position*(ty-tx)+d*tx;
+            detailMesh(object,base,local(object.up),local(east(object.up)),distance>100 || aboveGround>100);
+            ++detailCount_;
+        }
+        glEnd();
+    }
+    glEndList();
     lastTerrainTime_=seconds; dirty_=false;
 }
 void Renderer::buildGlobe(const World& world,double seconds) {
@@ -230,7 +349,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const ViewState&
             glEnd();
         }
     } else {
-        if(dirty_ || length(explorer.up()-anchor_)*world.config().radius>std::max(30.0,terrainStep_*4) ||
+        if(dirty_ || length(explorer.up()-anchor_)*world.config().radius>std::max(12.0,terrainStep_*4) ||
            std::abs(explorer.altitude()-terrainEyeHeight_)>std::max(32.0,terrainStep_*4) ||
            terrainSpacing(world,explorer)!=terrainStep_ || std::abs(view.seconds-lastTerrainTime_)>900)
             buildTerrain(world,explorer,view.seconds);
@@ -256,6 +375,8 @@ void Renderer::draw(const World& world,const Explorer& explorer,const ViewState&
             glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT_AND_DIFFUSE,material);
         } else { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D,detailTexture_); }
         glCallList(terrain_);
+        glDisable(GL_TEXTURE_2D);
+        glCallList(objects_);
         glDisable(GL_POLYGON_OFFSET_FILL); glEnable(GL_COLOR_MATERIAL);
         glDisable(GL_TEXTURE_2D); glDisable(GL_FOG); glDisable(GL_LIGHTING);
         if(showGrid) {
@@ -263,6 +384,16 @@ void Renderer::draw(const World& world,const Explorer& explorer,const ViewState&
             glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
             glEnable(GL_LINE_SMOOTH); glHint(GL_LINE_SMOOTH_HINT,GL_NICEST); glLineWidth(1.0f);
             glCallList(terrainGrid_);
+            if(wireframe) {
+                glDisable(GL_COLOR_MATERIAL); glEnable(GL_LIGHTING);
+                const GLfloat black[]{0,0,0,1}, cyan[]{0.12f,0.64f,0.78f,1};
+                glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT_AND_DIFFUSE,black);
+                glMaterialfv(GL_FRONT_AND_BACK,GL_EMISSION,cyan);
+                glPolygonMode(GL_FRONT_AND_BACK,GL_LINE); glCallList(objects_);
+                glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
+                glMaterialfv(GL_FRONT_AND_BACK,GL_EMISSION,black);
+                glEnable(GL_COLOR_MATERIAL); glDisable(GL_LIGHTING);
+            }
             glDisable(GL_LINE_SMOOTH); glDisable(GL_BLEND);
             glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
         }
@@ -311,16 +442,16 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const ViewSta
         text(40,h-104,"AIR     " + fixed(sample.density,3) + " kg/m3",muted);
     } else text(40,h-126,"ATMOSPHERE DISABLED",muted);
     text(40,h-82,"RAIN    " + (world.modules().enabled(Module::Climate) ? fixed(sample.precipitation,0)+" mm/y (estimate)" : "--"),muted);
-    rect(w-288,98,266,207,panel,0.90f);
+    rect(w-288,98,266,234,panel,0.90f);
     text(w-272,123,"SIMULATION MODULES",mint);
-    for(unsigned i=0;i<5;++i) {
+    for(unsigned i=0;i<moduleCount;++i) {
         const auto m=static_cast<Module>(i);
         const bool on=world.modules().enabled(m);
         const float y=151+27*static_cast<float>(i);
         text(w-272,y,"["+std::to_string(i+1)+"] "+std::string(moduleNames[i]),on?white:muted);
         text(w-90,y,on ? "ON" : (world.modules().requested(m) ? "WAIT" : "OFF"),on?mint:muted);
     }
-    text(w-272,292,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
+    text(w-272,319,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
     rect(22,h-51,w-44,29,panel,0.9f);
     text(35,h-31,(view.captured ? "ESC release mouse" : "CLICK to look") + std::string("   WASD move   F fly   G grid   TAB orbit   H help   T noon   R new seed"),white);
     if(view.help) {
@@ -329,7 +460,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const ViewSta
         text(w-340,h-185,"SHIFT faster   SPACE jump / up",white);
         text(w-340,h-164,"CTRL down      WHEEL flight speed",white);
         text(w-340,h-143,"+ / - time     P pause",white);
-        text(w-340,h-122,"HOME landing   1-5 toggle modules",white);
+        text(w-340,h-122,"HOME landing   1-6 toggle modules",white);
         text(w-340,h-101,"G surface: "+std::string(surfaceStyleName(view.surfaceStyle)),mint);
         text(w-340,h-80,"TAB switches surface / globe",muted);
     }

@@ -34,6 +34,148 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
     throw std::runtime_error("Walkable cave route was blocked");
 }
 void registerTests() {
+    test("global_weather","Spherical areas cover the planet including polar caps",[] {
+        constexpr double radius=6371000;double area=0;
+        for(int y=0;y<36;++y) {const double a=sphericalCellArea(y,72,36,radius);require(a>0,"Positive polar area");area+=72*a;}
+        near(area/(4*pi*radius*radius),1,1e-14,"Exact spherical area");
+        near(sphericalCellArea(0,72,36,radius),sphericalCellArea(35,72,36,radius),.01,"Symmetric polar caps");
+    });
+    test("global_weather","Spherical transport wraps longitude conservatively and remains positive",[] {
+        constexpr int nx=16,ny=8;constexpr double radius=20000;
+        std::vector<double> water(nx*ny);std::vector<Wind2> wind(nx*ny,{70,20});water[3*nx+15]=12;
+        const auto mass=[&](const auto& v) {double total=0;for(int y=0;y<ny;++y) for(int x=0;x<nx;++x) total+=v[static_cast<std::size_t>(y*nx+x)]*sphericalCellArea(y,nx,ny,radius);return total;};
+        const auto one=transportSphere(water,wind,nx,ny,radius,1);
+        require(one[3*nx]>0,"Flux crosses the date line");
+        const auto many=transportSphere(water,wind,nx,ny,radius,3600);
+        near(mass(many)/mass(water),1,1e-13,"Area-weighted mass including closed polar boundary");
+        for(double v:many) require(std::isfinite(v) && v>=0,"Outgoing CFL substeps preserve positivity");
+        wind[0].north=std::numeric_limits<double>::infinity();bool rejected=false;
+        try { (void)transportSphere(water,wind,nx,ny,radius,1); } catch(const std::invalid_argument&) { rejected=true; }
+        require(rejected,"Nonfinite velocity rejected");
+    });
+    test("global_weather","Cyclone wind satisfies gradient balance with calm eye and decaying exterior",[] {
+        const double r=55000,dp=6000,f=1e-4,v=cycloneWind(r,r,dp,f);
+        near(v*v+f*r*v,1.4*dp/(1.15*std::exp(1.0)),1e-9,"Gradient wind pressure balance");
+        near(cycloneWind(r,r,dp,-f),v,0,"Hemisphere changes rotation not speed");
+        near(cycloneWind(0,r,dp,f),0,0,"Calm vortex center");
+        require(cycloneWind(r*8,r,dp,f)<v*.3,"Outer winds decline");
+        near(cycloneWind(1,1e250,dp,f),0,0,"Extreme inner profile has no overflow");
+    });
+    test("global_weather","Tropical genesis requires warm ocean humidity and off-equatorial latitude",[] {
+        near(tropicalSupport(299, radians(15),true,.9),0,0,"Cold ocean cannot support genesis");
+        near(tropicalSupport(305,0,true,.9),0,0,"Equator lacks planetary rotation");
+        near(tropicalSupport(305,radians(45),true,.9),0,0,"Extratropical latitude excluded");
+        near(tropicalSupport(305,radians(15),false,.9),0,0,"No genesis over land");
+        near(tropicalSupport(305,radians(15),true,.4),0,0,"Dry air suppresses genesis");
+        require(tropicalSupport(302,radians(15),true,.85)>.8,"Warm humid ocean supports development");
+        Config config;double mean=0;
+        for(int i=0;i<360;++i) mean+=oceanTemperature(config,direction(radians(12),radians(i)),297)-297;
+        near(mean/360,0,1e-13,"Prescribed basin anomaly has zero zonal mean");
+    });
+    test("global_weather","Seeded catalog is deterministic and placed in eligible habitats",[] {
+        World w;GlobalWeather a(w),b(w);require(a.storms().size()==12,"Default planet has all three system families");
+        for(std::size_t i=0;i<a.storms().size();++i) {
+            const auto& s=a.storms()[i];near(length(s.center-b.storms()[i].center),0,0,"Deterministic seed");
+            const auto climate=w.climatology(s.center);
+            if(s.kind==StormKind::Hurricane) require(tropicalSupport(oceanTemperature(w.config(),s.center,climate.temperature),latitude(s.center),climate.ocean,.85)>.35,"Warm tropical ocean");
+            if(s.kind==StormKind::Thunderstorm) require(!climate.ocean && climate.precipitation>=700,"Moist terrestrial convective site");
+            if(s.kind!=StormKind::Thunderstorm) {
+                const auto p=normalized(s.center+east(s.center)*(s.radius/w.config().radius));const auto v=a.sample(p).velocity;
+                require(dot(v,north(p))*std::sin(latitude(s.center))>0,"Cyclonic circulation has the correct hemisphere sign");
+                near(dot(v,p),0,1e-10,"Wind tangent to sphere");
+            }
+        }
+        w.modules().set(Module::Ocean,false);GlobalWeather dry(w);require(!dry.strongest(StormKind::Hurricane),"No tropical cyclone seeded on an oceanless world");
+    });
+    test("global_weather","Scalar weather is continuous at the date line and both poles",[] {
+        World w;GlobalWeather g(w);
+        for(double lat:{-pi/2,pi/2}) {
+            const auto a=g.sample(direction(lat,0)),b=g.sample(direction(lat,2));
+            near(a.cloud,b.cloud,1e-10,"Same pole cloud");near(a.temperature,b.temperature,1e-10,"Same pole temperature");
+        }
+        const auto a=g.sample(direction(.2,pi-1e-9)),b=g.sample(direction(.2,-pi+1e-9));
+        near(a.cloud,b.cloud,1e-7,"Cloud seam continuity");near(length(a.velocity-b.velocity),0,1e-6,"Vector seam continuity");
+    });
+    test("global_weather","Global water accounting and evolution are independent of frame partition",[] {
+        World w;GlobalWeather a(w),b(w);a.advance(w,10800);
+        for(int i=0;i<36;++i) b.advance(w,300);
+        require(a.steps()==36 && b.steps()==36,"Fixed five-minute global step");
+        require(std::abs(a.budget().residualKg())/a.budget().initialKg<1e-12,"Closed evaporation transport condensation rain ledger");
+        require(a.budget().precipitatedKg>0,"Actual global precipitation");
+        for(std::size_t i=0;i<a.cells().size();++i) {
+            near(a.cells()[i].vapour,b.cells()[i].vapour,0,"Same transported water");
+            near(a.cells()[i].temperature,b.cells()[i].temperature,0,"Same thermal history");
+            require(a.cells()[i].cloud>=0 && a.cells()[i].vapour>=0,"Positive water columns");
+        }
+        require(length(a.storms()[0].center-b.storms()[0].center)==0,"Same track");
+    });
+    test("global_weather","Storms travel on the sphere age and renew with reproducible cohorts",[] {
+        World w;GlobalWeather g(w);const auto first=g.storms();g.advance(w,43200);
+        unsigned renewed=0;
+        for(std::size_t i=0;i<first.size();++i) {
+            const auto& s=g.storms()[i];near(length(s.center),1,1e-12,"Spherical track");
+            if(s.kind==StormKind::Thunderstorm && s.generation>first[i].generation) ++renewed;
+            if(s.kind==StormKind::Cyclone) require(length(s.center-first[i].center)*w.config().radius>10000,"Synoptic translation");
+        }
+        require(renewed==4,"Finite-lived thunderstorm cells are replaced by young cohorts");
+    });
+    test("global_weather","Tropical cyclones decay over land with a finite relaxation time",[] {
+        World w;GlobalWeather g(w);const auto before=g.storms();w.modules().set(Module::Ocean,false);g.advance(w,21600);
+        for(std::size_t i=0;i<before.size();++i) if(before[i].kind==StormKind::Hurricane)
+            near(g.storms()[i].deficit,before[i].deficit*std::exp(-6.0/5),1e-8,"Five-hour landfall intensity decay");
+    });
+    test("global_weather","Module dependencies pause restore and solar clock preserve storm state",[] {
+        World w;GlobalWeather g(w);g.advance(w,123);const auto center=g.storms()[0].center;
+        for(auto module:{Module::GlobalWeather,Module::Wind,Module::Atmosphere,Module::Climate}) {
+            w.modules().set(module,false);g.advance(w,600);g.advanceEffects(2);
+            require(!g.sample(center).available,"Disabled dependency stops global field");near(g.elapsed(),123,0,"Pending weather time frozen");
+            near(g.effectsTime(),0,0,"Disabled effects clock frozen");w.modules().set(module,true);g.advance(w,0);
+        }
+        g.setSolarClock(1e7);near(g.elapsed(),123,0,"Noon does not age storms");near(length(g.storms()[0].center-center),0,0,"No teleport from solar clock change");
+        const auto p=g.observation(StormKind::Thunderstorm);require(g.flash(p)>0,"Convective lightning pulse");
+        w.modules().set(Module::Clouds,false);g.advance(w,0);
+        require(g.sample(p).cloud==0 && g.flash(p)==0 && length(g.sample(p).velocity)>0,"Cloud module removes moisture effects but retains circulation");
+        w.modules().set(Module::Clouds,true);g.advance(w,0);g.advanceEffects(1);near(g.flash(p),0,0,"Lightning pulse expires on model clock");
+        for(unsigned i=0;i<moduleCount;++i) w.modules().set(static_cast<Module>(i),false);
+        Simulation bare(w,{1,0,0},0);bare.advance(w,{1,0,0},2);
+        require(!bare.global.enabled(),"New planet with all modules off is valid");
+        for(unsigned i=0;i<moduleCount;++i) w.modules().set(static_cast<Module>(i),true);
+        bare.advance(w,{1,0,0},0);require(bare.global.strongest(StormKind::Hurricane).has_value(),"Restored climate can initialize eligible missing systems");
+    });
+    test("global_weather","Storm wind reaches the sea and nesting water has an explicit ledger",[] {
+        World w;GlobalWeather catalog(w);const auto p=catalog.observation(StormKind::Hurricane);Simulation sim(w,p,0);
+        require(length(sim.motion.forcingWind())>33,"Hurricane-strength natural water wind");
+        sim.advance(w,p,120);
+        require(sim.motion.significantHeight()>.1 && length(sim.motion.forcingWind())>33,"Natural storm grows wind waves");
+        require(sim.weather.sample(p).rainRate>0,"Storm rain reaches local column");
+        const auto budget=sim.weather.budget();require(std::abs(budget.synopticExchangeKg)>1,"Nesting exchanges moisture");
+        require(std::abs(budget.residualKg())<.001,"Regional water accounting includes the exchange");
+    });
+    test("global_weather","Observer relocation cannot change the global forecast",[] {
+        World w;const auto p=w.findLand();Simulation a(w,p,0),b(w,p,0);
+        for(int i=0;i<3;++i) {
+            a.advance(w,p,120);b.advance(w,i%2 ? p : -p,120);
+        }
+        near(length(a.global.storms()[0].center-b.global.storms()[0].center),0,0,"Same storm independent of recentering");
+        near(a.global.budget().storedKg,b.global.budget().storedKg,0,"Same global column water");
+        near(a.global.elapsed(),360,0,"Elapsed time includes fractional global step");
+    });
+    test("global_weather","Thunderstorm rain feeds runoff once and paused frames add nothing",[] {
+        World w;GlobalWeather catalog(w);const auto p=catalog.observation(StormKind::Thunderstorm);Simulation sim(w,p,0);
+        sim.advance(w,p,2);const double rain=sim.water.budget().rainM3;
+        require(rain>0 && sim.weather.sample(p).rainRate*3600>20,"Heavy convective rain enters soil and runoff");
+        sim.advance(w,p,0);near(sim.water.budget().rainM3,rain,0,"No rain during pause");
+        require(std::abs(sim.water.budget().waterResidual())<1e-6,"Conservative ground water");
+        near(sim.global.elapsed(),2,0,"Zero frame leaves global clock unchanged");
+    });
+    test("global_weather","Global preview validates limits and advances only the global model",[] {
+        World w;const auto p=w.findLand();Simulation sim(w,p,0,{},2);
+        near(sim.global.elapsed(),7200,0,"Two-hour global forecast");require(sim.weather.steps()==0 && sim.water.steps()==0,"Local history is not fabricated by preview");
+        for(double hours:{-1.,241.,std::numeric_limits<double>::quiet_NaN()}) {
+            bool rejected=false;try {GlobalWeather invalid(w,0,hours);} catch(const std::invalid_argument&) {rejected=true;}
+            require(rejected,"Invalid preview rejected");
+        }
+    });
     test("flora","Species traits cover distinct land and marine growth strategies",[] {
         unsigned marine=0,woody=0;
         for(unsigned i=1;i<speciesCount;++i) {

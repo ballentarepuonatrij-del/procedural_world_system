@@ -26,6 +26,9 @@ int main(int argc, char** argv) {
         double rainMmH=0;
         bool floraOutput=false,youngFlora=false,grove=false;
         double growDays=0;
+        double globalHours=0;
+        bool globalOutput=false,globalEnabled=true;
+        std::optional<planet::StormKind> storm;
         std::optional<planet::Landform> landmark;
         std::string mapPath;
         bool sample = false,coast=false;
@@ -43,6 +46,15 @@ int main(int argc, char** argv) {
             else if (arg == "--day") day = number(next());
             else if (arg == "--map") mapPath = next();
             else if (arg == "--coast") coast=true;
+            else if(arg=="--no-global-weather") {globalEnabled=false;globalOutput=true;}
+            else if(arg=="--storm") {
+                storm=planet::stormKind(next());globalOutput=true;
+                if(!storm) throw std::invalid_argument("Storm must be cyclone, hurricane or thunderstorm");
+            }
+            else if(arg=="--global-hours") {
+                globalHours=number(next());globalOutput=true;
+                if(globalHours<0 || globalHours>240) throw std::invalid_argument("Global preview must be 0..240 hours");
+            }
             else if(arg=="--flora") floraOutput=true;
             else if(arg=="--grove") { grove=true;floraOutput=true; }
             else if(arg=="--young-flora") { youngFlora=true;floraOutput=true; }
@@ -72,6 +84,7 @@ int main(int argc, char** argv) {
             }
             else if (arg == "--help") {
                 std::cout << "planet_cli [--seed uint64] [--sample latitude longitude] [--day days_since_perihelion] [--map world.ppm] [--weather 0..3600_seconds] [--water 0..3600_seconds] [--rain-mm-h 0..200] [--landmark cave|canyon|mountains|gorge] [--coast] [--wind-m-s 0..40] [--flora] [--grove] [--young-flora] [--grow-days 0..365250]\n";
+                std::cout << "Global weather: [--storm cyclone|hurricane|thunderstorm] [--global-hours 0..240] [--no-global-weather]\n";
                 return 0;
             } else throw std::invalid_argument("Unknown option: " + arg);
         }
@@ -80,7 +93,7 @@ int main(int argc, char** argv) {
             throw std::invalid_argument("Weather and water share one duration; supply the same seconds");
         if(rainMmH>0 && !waterSeconds) throw std::invalid_argument("--rain-mm-h requires --water duration");
         const double duration=waterSeconds.value_or(weatherSeconds.value_or(0));
-        const planet::World world(config);
+        planet::World world(config);world.modules().set(planet::Module::GlobalWeather,globalEnabled);
         if(floraOutput && !sample && !coast && !landmark) {
             const auto p=world.findLand();lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
         }
@@ -96,9 +109,23 @@ int main(int argc, char** argv) {
             const auto p=planet::findGrove(world).position;
             lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
         }
-        const auto location=planet::direction(planet::radians(lat),planet::radians(lon));
-        const double finalTime=day*86400+duration;
-        if (sample || mapPath.empty() || weatherSeconds || waterSeconds || waterWind) {
+        auto location=planet::direction(planet::radians(lat),planet::radians(lon));
+        std::optional<planet::Simulation> model;
+        double previewSeconds=0;
+        if(weatherSeconds || waterSeconds || waterWind || coast || globalOutput) {
+            model.emplace(world,location,day*86400,waterWind,globalHours);previewSeconds=model->global.elapsed();
+            if(storm) {
+                if(!model->global.strongest(*storm)) throw std::runtime_error("No active storm of the requested kind on this planet");
+                location=model->global.observation(*storm);lat=planet::degrees(planet::latitude(location));lon=planet::degrees(planet::longitude(location));
+                model->advance(world,location,0);
+            }
+            model->setRainExperiment(rainMmH);
+            for(double remaining=duration;remaining>1e-9;) {
+                const double step=std::min(60.0,remaining);model->advance(world,location,step);remaining-=step;
+            }
+        }
+        const double finalTime=day*86400+previewSeconds+duration;
+        if (sample || mapPath.empty() || model) {
             const auto s = world.sample(location,finalTime);
             std::cout << std::fixed << std::setprecision(6)
                       << "{\n  \"seed\": " << config.seed
@@ -135,11 +162,23 @@ int main(int argc, char** argv) {
                 }
                 std::cout << "]\n  }";
             }
-            if(weatherSeconds || waterSeconds || waterWind || coast) {
-                planet::Simulation simulation(world,location,day*86400,waterWind); simulation.setRainExperiment(rainMmH);
-                for(double remaining=duration;remaining>1e-9;) {
-                    const double step=std::min(60.0,remaining); simulation.advance(world,location,step); remaining-=step;
+            if(model) {
+                const auto& simulation=*model;const auto& global=simulation.global;
+                const auto synoptic=global.sample(location);const auto globalWater=global.budget();
+                std::cout << ",\n  \"global_weather\": {\n    \"enabled\": " << (global.enabled() ? "true" : "false")
+                    << ",\n    \"elapsed_s\": " << global.elapsed() << ",\n    \"steps\": " << global.steps()
+                    << ",\n    \"sea_level_pressure_Pa\": " << synoptic.pressure << ",\n    \"wind_10m_m_s\": " << planet::length(synoptic.velocity)
+                    << ",\n    \"severity\": " << synoptic.severity << ",\n    \"convection\": " << synoptic.convection
+                    << ",\n    \"stored_water_kg\": " << globalWater.storedKg << ",\n    \"budget_error_kg\": " << globalWater.residualKg()
+                    << ",\n    \"systems\": [";
+                for(std::size_t i=0;i<global.storms().size();++i) {
+                    const auto& system=global.storms()[i];if(i) std::cout << ',';
+                    std::cout << "{\"id\": \"" << system.id << "\", \"kind\": \"" << planet::stormName(system.kind)
+                        << "\", \"latitude_deg\": " << planet::degrees(planet::latitude(system.center))
+                        << ", \"longitude_deg\": " << planet::degrees(planet::longitude(system.center))
+                        << ", \"age_h\": " << system.age/3600 << ", \"pressure_amplitude_Pa\": " << system.deficit << '}';
                 }
+                std::cout << "]\n  }";
                 const auto& weather=simulation.weather;
                 const auto liquid=planet::liquidAt(world,&simulation.water,&simulation.motion,location);
                 std::cout << ",\n  \"water_motion\": {\n    \"wind_10m_m_s\": " << planet::length(simulation.motion.forcingWind())
@@ -154,6 +193,7 @@ int main(int argc, char** argv) {
                           << ",\n    \"relative_humidity\": " << air.humidity << ",\n    \"cloud_water_kg_m2\": " << air.cloudWater
                           << ",\n    \"rain_mm_h\": " << air.rainRate*3600
                           << ",\n    \"stored_water_kg\": " << water.storedKg << ",\n    \"evaporated_kg\": " << water.evaporatedKg
+                          << ",\n    \"domain_exchange_kg\": " << water.domainExchangeKg << ",\n    \"synoptic_exchange_kg\": " << water.synopticExchangeKg
                           << ",\n    \"precipitated_kg\": " << water.precipitatedKg << ",\n    \"budget_error_kg\": " << water.residualKg() << "\n  }";
                 if(waterSeconds) {
                     const auto ground=simulation.water.sample(location); const auto runoff=simulation.water.budget();

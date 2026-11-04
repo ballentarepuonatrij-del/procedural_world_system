@@ -19,6 +19,10 @@ struct Options {
     bool coast=false,waterMotion=true;
     bool youngFlora=false,plantGrowth=true,grove=false;
     double growDays=0,growthRate=1;
+    bool globalWeather=true;
+    double globalHours=0;
+    std::optional<StormKind> storm;
+    WeatherLayer weatherLayer=WeatherLayer::Clouds;
     SurfaceStyle surfaceStyle=SurfaceStyle::Grid;
     std::filesystem::path capture, report;
 };
@@ -48,6 +52,24 @@ Options parseOptions() {
             else if(arg==L"--globe") options.globe=true;
             else if(arg==L"--no-detail") options.detail=false;
             else if(arg==L"--no-weather") options.wind=false;
+            else if(arg==L"--no-global-weather") options.globalWeather=false;
+            else if(arg==L"--storm") {
+                const auto value=next();options.storm=stormKind(std::string(value.begin(),value.end()));
+                if(!options.storm) throw std::invalid_argument("Storm must be cyclone, hurricane or thunderstorm");
+            }
+            else if(arg==L"--global-hours") {
+                const auto value=next();std::size_t used=0;options.globalHours=std::stod(value,&used);
+                if(used!=value.size() || !std::isfinite(options.globalHours) || options.globalHours<0 || options.globalHours>240)
+                    throw std::invalid_argument("Global preview must be 0..240 hours");
+            }
+            else if(arg==L"--weather-layer") {
+                const auto value=next();
+                if(value==L"clouds") options.weatherLayer=WeatherLayer::Clouds;
+                else if(value==L"pressure") options.weatherLayer=WeatherLayer::Pressure;
+                else if(value==L"wind") options.weatherLayer=WeatherLayer::Wind;
+                else if(value==L"off") options.weatherLayer=WeatherLayer::Off;
+                else throw std::invalid_argument("Weather layer must be clouds, pressure, wind or off");
+            }
             else if(arg==L"--no-clouds") options.clouds=false;
             else if(arg==L"--no-water") options.water=false;
             else if(arg==L"--no-erosion") options.erosion=false;
@@ -108,17 +130,19 @@ Options parseOptions() {
     if(!options.capture.empty() && options.frames==0) options.frames=3;
     return options;
 }
+World configuredWorld(const Options& options) {
+    World world(options.config);auto& modules=world.modules();
+    modules.set(Module::SurfaceDetail,options.detail);modules.set(Module::Wind,options.wind);modules.set(Module::Clouds,options.clouds);
+    modules.set(Module::Hydrology,options.water);modules.set(Module::Erosion,options.erosion);
+    modules.set(Module::Landforms,options.landforms);modules.set(Module::Caves,options.caves);
+    modules.set(Module::WaterMotion,options.waterMotion);modules.set(Module::PlantGrowth,options.plantGrowth);
+    modules.set(Module::GlobalWeather,options.globalWeather);return world;
+}
 class Application {
 public:
-    explicit Application(Options options) : options_(std::move(options)), world_(options_.config), explorer_(world_), simulation_(world_,explorer_.up(),view_.seconds,options_.waterWind) {
-        view_.globe=options_.globe; view_.surfaceStyle=options_.surfaceStyle;
+    explicit Application(Options options) : options_(std::move(options)), world_(configuredWorld(options_)), explorer_(world_), simulation_(world_,explorer_.up(),view_.seconds,options_.waterWind,options_.globalHours) {
+        view_.seconds+=simulation_.global.elapsed();view_.weatherLayer=options_.weatherLayer;view_.surfaceStyle=options_.surfaceStyle;
         view_.paused=options_.paused; view_.windTracers=options_.windTracers; view_.headlamp=options_.headlamp;
-        world_.modules().set(Module::SurfaceDetail,options_.detail);
-        world_.modules().set(Module::Wind,options_.wind); world_.modules().set(Module::Clouds,options_.clouds);
-        world_.modules().set(Module::Hydrology,options_.water); world_.modules().set(Module::Erosion,options_.erosion);
-        world_.modules().set(Module::Landforms,options_.landforms); world_.modules().set(Module::Caves,options_.caves);
-        world_.modules().set(Module::WaterMotion,options_.waterMotion);
-        world_.modules().set(Module::PlantGrowth,options_.plantGrowth);
         simulation_.flora.setYoung(options_.youngFlora);simulation_.flora.setRate(options_.growthRate);
         simulation_.flora.advanceDays(world_,options_.growDays);
         simulation_.setRainExperiment(options_.rainMmH);
@@ -128,6 +152,7 @@ public:
         if(options_.landmark) visitLandmark(*options_.landmark);
         if(options_.grove) visitGrove();
         if(options_.coast || options_.diveDepth) visitCoast(options_.diveDepth.has_value());
+        if(options_.storm && !visitStorm(*options_.storm)) throw std::runtime_error("No active storm of the requested kind on this planet");
         simulation_.advance(world_,explorer_.up(),0);
         for(double remaining=options_.weatherSeconds;remaining>1e-9;) {
             const double step=std::min(60.0,remaining);
@@ -142,6 +167,7 @@ public:
             const double dt=std::min(left,0.1); explorer_.update(world_,{1,0,0,false,false},dt,&simulation_.water,&simulation_.motion,&simulation_.flora);
             simulation_.advance(world_,explorer_.up(),0); left-=dt;
         }
+        view_.globe=options_.globe;
     }
     ~Application() {
         captureMouse(false); renderer_.reset();
@@ -238,6 +264,15 @@ public:
                 << "\nflora_plants=" << renderer_->plantCount() << "\nmarine_plants=" << renderer_->marineCount()
                 << "\nflora_species=" << renderer_->plantSpeciesCount() << "\nflora_height_sum_m=" << renderer_->plantHeightSum() << '\n';
             const auto air=simulation_.weather.sample(explorer_.up()); const auto water=simulation_.weather.budget();
+            const auto synoptic=simulation_.global.sample(explorer_.up());const auto globalWater=simulation_.global.budget();
+            out << "global_enabled=" << simulation_.global.enabled() << "\nglobal_elapsed_s=" << simulation_.global.elapsed()
+                << "\nglobal_steps=" << simulation_.global.steps() << "\nglobal_systems=" << simulation_.global.storms().size()
+                << "\nglobal_slp_pa=" << synoptic.pressure << "\nglobal_wind10_m_s=" << length(synoptic.velocity)
+                << "\nglobal_convection=" << synoptic.convection << "\nglobal_cloud_kg_m2=" << synoptic.cloud
+                << "\nglobal_stored_kg=" << globalWater.storedKg << "\nglobal_water_relative_error=" << globalWater.residualKg()/globalWater.initialKg
+                << "\nweather_layer=" << weatherLayerName(view_.weatherLayer) << "\nstorm_markers=" << renderer_->stormMarkerCount()
+                << "\nrain_streaks=" << renderer_->rainCount() << "\nlightning_segments=" << renderer_->lightningCount()
+                << "\nrain_mm_h=" << air.rainRate*3600 << "\nsynoptic_exchange_kg=" << water.synopticExchangeKg << '\n';
             out << "weather_time_s=" << simulation_.weather.seconds() << "\nwind_m_s=" << length(air.velocity)
                 << "\nwind_east_m_s=" << air.wind.east << "\nwind_north_m_s=" << air.wind.north
                 << "\nrelative_humidity=" << air.humidity << "\ncloud_water_kg_m2=" << air.cloudWater
@@ -271,6 +306,17 @@ public:
         return 0;
     }
 private:
+    bool visitStorm(StormKind kind) {
+        if(!simulation_.global.strongest(kind)) return false;
+        const auto p=simulation_.global.observation(kind);
+        explorer_.teleport(world_,p);simulation_.advance(world_,p,0);explorer_.teleport(world_,p,&simulation_.water);
+        if(world_.climatology(p).ocean) {
+            explorer_.flying=true;const double speed=explorer_.flightSpeed;explorer_.flightSpeed=20;
+            explorer_.update(world_,{0,0,1,false,false},1,&simulation_.water,&simulation_.motion);explorer_.flightSpeed=speed;
+        }
+        explorer_.look(pi/2,radians(kind==StormKind::Thunderstorm ? 12 : -3));
+        view_.globe=false;noon();if(renderer_) renderer_->invalidate();return true;
+    }
     void visitGrove() {
         const auto place=findGrove(world_);
         explorer_.teleport(world_,place.position);simulation_.advance(world_,place.position,0);
@@ -353,6 +399,12 @@ private:
         else if(key=='L') view_.headlamp=!view_.headlamp;
         else if(key=='E') view_.floraInfo=!view_.floraInfo;
         else if(key=='I') world_.modules().toggle(Module::PlantGrowth);
+        else if(key=='Q') world_.modules().toggle(Module::GlobalWeather);
+        else if(key==VK_F3) view_.weatherLayer=static_cast<WeatherLayer>((static_cast<unsigned>(view_.weatherLayer)+1)%4);
+        else if(key==VK_F2) {
+            constexpr std::array<StormKind,3> tour{StormKind::Hurricane,StormKind::Cyclone,StormKind::Thunderstorm};
+            for(unsigned i=0;i<tour.size();++i) if(visitStorm(tour[stormIndex_++%tour.size()])) break;
+        }
         else if(key=='Y') simulation_.flora.setRate(simulation_.flora.rate()<86400 ? 86400 : (simulation_.flora.rate()<2592000 ? 2592000 : 1));
         else if(key=='Z') {
             const double rate=simulation_.flora.rate();simulation_.flora=Flora{};
@@ -447,6 +499,7 @@ private:
     std::unique_ptr<Renderer> renderer_;
     bool running_=true;
     std::size_t landmarkIndex_=0;
+    std::size_t stormIndex_=0;
 };
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int show) {

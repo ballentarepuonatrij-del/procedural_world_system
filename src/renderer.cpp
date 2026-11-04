@@ -192,8 +192,8 @@ void detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up,Vec3 right,bool 
 }
 Renderer::Renderer(HDC dc) {
     font_=makeFont(dc,15,FW_NORMAL); headingFont_=makeFont(dc,28,FW_BOLD);
-    terrain_=glGenLists(1); terrainGrid_=glGenLists(1); globe_=glGenLists(1); objects_=glGenLists(1); caves_=glGenLists(1);
-    if (!terrain_ || !terrainGrid_ || !globe_ || !objects_ || !caves_) throw std::runtime_error("Cannot allocate terrain display lists");
+    terrain_=glGenLists(1); terrainGrid_=glGenLists(1); globe_=glGenLists(1); objects_=glGenLists(1); caves_=glGenLists(1);weatherMap_=glGenLists(1);
+    if (!terrain_ || !terrainGrid_ || !globe_ || !objects_ || !caves_ || !weatherMap_) throw std::runtime_error("Cannot allocate terrain display lists");
     glEnable(GL_DEPTH_TEST); glEnable(GL_NORMALIZE);
     glEnable(GL_COLOR_MATERIAL); glColorMaterial(GL_FRONT_AND_BACK,GL_AMBIENT_AND_DIFFUSE);
     glEnable(GL_LIGHT0);
@@ -242,6 +242,7 @@ Renderer::~Renderer() {
     glDeleteLists(terrain_,1); glDeleteLists(globe_,1);
     glDeleteLists(terrainGrid_,1);
     glDeleteLists(objects_,1); glDeleteLists(caves_,1);
+    glDeleteLists(weatherMap_,1);
     glDeleteLists(font_,96); glDeleteLists(headingFont_,96);
     glDeleteTextures(1,&detailTexture_);
     glDeleteTextures(1,&cloudTexture_);
@@ -514,11 +515,13 @@ void Renderer::buildGlobe(const World& world,double seconds) {
     glEndList(); lastGlobeTime_=seconds; globeDirty_=false;
 }
 void Renderer::draw(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view) {
-    const auto& weather=simulation.weather; const auto& water=simulation.water;
-    cloudCount_=0; waterCount_=0;
+    const auto& water=simulation.water;
+    cloudCount_=0;waterCount_=0;rainCount_=0;lightningCount_=0;stormMarkerCount_=0;
     glViewport(0,0,view.width,view.height);
     const auto sun=orbit(world.config(),view.seconds);
-    const double daylight=smoothstep(-0.10,0.25,dot(explorer.up(),sun.sunDirection));
+    const auto synoptic=simulation.global.sample(explorer.up());
+    const double daylight=smoothstep(-0.10,0.25,dot(explorer.up(),sun.sunDirection))*(view.globe ? 1 : 1-.62*clamp(synoptic.cloud/3,0.0,1.0));
+    const double rain=simulation.weather.sample(explorer.up()).rainRate*3600+simulation.rainExperiment();
     const bool atmosphere=world.modules().enabled(Module::Atmosphere);
     const bool wireframe=view.surfaceStyle==SurfaceStyle::Wireframe && !view.globe;
     const auto liquid=liquidAt(world,&water,&simulation.motion,explorer.up());
@@ -543,6 +546,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
         const GLfloat ambient[]{0.12f,0.14f,0.16f,1};
         glLightModelfv(GL_LIGHT_MODEL_AMBIENT,ambient);
         glDisable(GL_FOG); glCallList(globe_); glDisable(GL_LIGHTING);
+        drawGlobalWeather(simulation.global,view);
         const Vec3 marker=explorer.up()*1.004;
         glPointSize(7); glColor3f(0.6f,1.0f,0.7f); glBegin(GL_POINTS); glVertex3d(marker.x,marker.y,marker.z); glEnd();
         // Sparse meridians: geographic orientation, drawn above the planet surface.
@@ -581,7 +585,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
         } else if(atmosphere && !wireframe) {
             const GLfloat fog[]{static_cast<float>(0.08+0.47*daylight),static_cast<float>(0.1+0.53*daylight),static_cast<float>(0.15+0.56*daylight),1};
             glEnable(GL_FOG); glFogfv(GL_FOG_COLOR,fog); glFogi(GL_FOG_MODE,GL_EXP2);
-            glFogf(GL_FOG_DENSITY,static_cast<float>(0.000025*std::exp(-std::max(explorer.altitude(),0.0)/8500)));
+            glFogf(GL_FOG_DENSITY,static_cast<float>((.000025+.000018*std::sqrt(rain))*std::exp(-std::max(explorer.altitude(),0.0)/8500)));
         } else glDisable(GL_FOG);
         const bool showGrid=view.surfaceStyle!=SurfaceStyle::Natural;
         if(showGrid) { glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(1.0f,1.0f); }
@@ -646,7 +650,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
             glVertex3d(v.x,v.y,v.z);
         }
         glEnd();
-        drawWeather(world,explorer,weather,view,daylight);
+        drawWeather(world,explorer,simulation,view,daylight);
         }
     }
     drawHud(world,explorer,simulation,view);
@@ -744,7 +748,50 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
     }
     glDisable(GL_BLEND); glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
 }
-void Renderer::drawWeather(const World& world,const Explorer& explorer,const Weather& weather,const ViewState& view,double daylight) {
+void Renderer::drawGlobalWeather(const GlobalWeather& weather,const ViewState& view) {
+    if(!weather.enabled() || view.weatherLayer==WeatherLayer::Off) return;
+    if(weatherDirty_ || lastGlobalStep_!=weather.steps() || lastWeatherLayer_!=view.weatherLayer || lastGlobalClouds_!=weather.cloudsEnabled()) {
+        glNewList(weatherMap_,GL_COMPILE);
+        glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDepthMask(GL_FALSE);
+        const auto emit=[&](Vec3 p) {
+            const auto s=weather.sample(p);
+            if(view.weatherLayer==WeatherLayer::Clouds) glColor4f(.88f,.94f,1,static_cast<float>(.84*(1-std::exp(-s.cloud*2))));
+            else if(view.weatherLayer==WeatherLayer::Pressure) {
+                const float t=static_cast<float>(clamp((s.pressure-94000)/10000,0.0,1.0));
+                glColor4f(t,.25f+.45f*(1-std::abs(2*t-1)),1-t,.78f);
+            } else {
+                const float t=static_cast<float>(clamp(length(s.velocity)/70,0.0,1.0));
+                glColor4f(std::min(1.0f,2*t),.35f+.5f*(1-t),1-t,.78f);
+            }
+            p=p*1.006;glVertex3d(p.x,p.y,p.z);
+        };
+        constexpr int nx=192,ny=96;
+        for(int y=0;y<ny;++y) {
+            glBegin(GL_TRIANGLE_STRIP);
+            for(int x=0;x<=nx;++x) for(int dy:{1,0}) emit(direction(-pi/2+pi*(y+dy)/ny,-pi+tau*x/nx));
+            glEnd();
+        }
+        glDepthMask(GL_TRUE);glDisable(GL_BLEND);glEndList();
+        weatherDirty_=false;lastGlobalStep_=weather.steps();lastWeatherLayer_=view.weatherLayer;lastGlobalClouds_=weather.cloudsEnabled();
+    }
+    glCallList(weatherMap_);
+    // Symbols mark systems; their screen radius is not the physical storm radius.
+    glLineWidth(2);
+    for(const auto& s:weather.storms()) if(s.deficit>1) {
+        if(s.kind==StormKind::Hurricane) glColor3f(1,.57f,.16f);
+        else if(s.kind==StormKind::Thunderstorm) glColor3f(.91f,.38f,1);
+        else glColor3f(.25f,.94f,1);
+        glBegin(GL_LINE_LOOP);
+        for(int i=0;i<24;++i) {
+            const double a=tau*i/24;const auto p=normalized(s.center+(east(s.center)*std::cos(a)+north(s.center)*std::sin(a))*.018)*1.012;
+            glVertex3d(p.x,p.y,p.z);
+        }
+        glEnd();++stormMarkerCount_;
+    }
+    glLineWidth(1);
+}
+void Renderer::drawWeather(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight) {
+    const auto& weather=simulation.weather;
     if(!weather.windEnabled()) return;
     const auto local=[&](Vec3 p) { return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)}; };
     const Vec3 origin=anchor_*world.config().radius;
@@ -781,6 +828,44 @@ void Renderer::drawWeather(const World& world,const Explorer& explorer,const Wea
         emit(s.center+horizontal+vertical,1,1); emit(s.center-horizontal+vertical,0,1);
     }
     glEnd(); glDisable(GL_TEXTURE_2D);
+    const auto air=weather.sample(explorer.up());
+    const double rain=air.rainRate*3600+simulation.rainExperiment();
+    if(rain>.1) {
+        const int count=static_cast<int>(clamp(rain*24,24.0,1800.0));
+        const double time=std::remainder(view.seconds,100000.0);
+        const auto wind=air.velocity*.7,vertical=explorer.up();
+        const auto wrap=[](double x,double span) {return x-span*std::floor(x/span)-span/2;};
+        glLineWidth(1);glBegin(GL_LINES);
+        for(int i=0;i<count;++i) {
+            const auto id=hash64(world.config().seed+static_cast<unsigned>(i)+78123);
+            const double x=wrap(randomUnit(id)*120+dot(wind,east(explorer.up()))*time,120);
+            const double z=wrap(randomUnit(id+1)*120+dot(wind,north(explorer.up()))*time,120);
+            const double y=wrap(randomUnit(id+2)*60-7*time,60);
+            const auto position=eye+east(explorer.up())*x+north(explorer.up())*z+vertical*y;
+            const auto head=local(position-origin),tail=local(position-origin-(wind-vertical*7)*.08);
+            glColor4f(.62f,.79f,.92f,.43f);glVertex3d(head.x,head.y,head.z);
+            glColor4f(.7f,.84f,1,.06f);glVertex3d(tail.x,tail.y,tail.z);++rainCount_;
+        }
+        glEnd();
+    }
+    const double flash=simulation.global.flash(explorer.up());
+    if(flash>0) {
+        glDisable(GL_FOG);glLineWidth(3);glColor4f(.82f,.88f,1,static_cast<float>(std::min(1.0,flash*2)));
+        for(const auto& storm:simulation.global.storms()) {
+            if(storm.kind!=StormKind::Thunderstorm || storm.deficit<50 || length(storm.center-explorer.up())*world.config().radius>25000) continue;
+            const auto strike=normalized(storm.center+east(storm.center)*(700/world.config().radius));
+            const double ground=world.surface(strike);glBegin(GL_LINE_STRIP);
+            const auto tick=static_cast<std::uint64_t>(simulation.global.effectsTime()/12);
+            for(unsigned i=0;i<=18;++i) {
+                const double height=3000*(1-static_cast<double>(i)/18),jitter=i==18 ? 0 : 110;
+                const auto p=local(strike*(world.config().radius+ground+height)-origin+
+                    east(strike)*((randomUnit(storm.id+tick*31+i)-.5)*jitter)+north(strike)*((randomUnit(storm.id+tick*31+i+91)-.5)*jitter));
+                glVertex3d(p.x,p.y,p.z);if(i) ++lightningCount_;
+            }
+            glEnd();
+        }
+        glLineWidth(1);
+    }
     if(view.windTracers) {
         glLineWidth(1.5f); glBegin(GL_LINES);
         for(const auto& p:weather.tracers()) {
@@ -811,6 +896,8 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
     const Color white{0.88f,0.93f,0.91f}, muted{0.53f,0.65f,0.65f}, mint{0.55f,0.91f,0.73f}, panel{0.025f,0.055f,0.064f};
     const float w=static_cast<float>(view.width), h=static_cast<float>(view.height);
+    if(!view.globe && !explorer.underwater() && !explorer.underground())
+        rect(0,0,w,h,{.75f,.82f,1},static_cast<float>(simulation.global.flash(explorer.up())*.15));
     rect(22,22,292,86,panel,0.9f); rect(22,22,3,86,mint);
     text(40,57,"PLANETLAB",white,true);
     text(41,80,"PROCEDURAL FIELD OBSERVATORY",muted);
@@ -835,14 +922,24 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(40,215,"SPACE up / CTRL dive / WASD swim",muted);
     } else if(weather.windEnabled()) {
         const auto air=weather.sample(explorer.up());
+        const auto synoptic=simulation.global.sample(explorer.up());
         rect(22,120,292,111,panel,0.88f);
-        text(40,143,"LOCAL WEATHER / "+fixed(weather.layerAltitude()/1000,1)+" km ASL",mint);
+        text(40,143,synoptic.available && synoptic.severity>.15 ? std::string(stormName(synoptic.kind)) : "LOCAL WEATHER / "+fixed(weather.layerAltitude()/1000,1)+" km ASL",mint);
         text(40,165,"WIND "+fixed(length(air.velocity))+" m/s  E "+fixed(air.wind.east)+" N "+fixed(air.wind.north),white);
         text(40,187,weather.cloudsEnabled() ? "RH "+fixed(air.humidity*100,0)+"%  CLOUD "+fixed(air.cloudWater,2)+" kg/m2" : "MOISTURE / CLOUDS DISABLED",white);
-        text(40,215,simulation.motion.windExperiment() ? "WATER WIND "+fixed(*simulation.motion.windExperiment(),0)+" m/s [EXPERIMENT]" : "V wind tracers: "+std::string(view.windTracers ? "ON" : "OFF"),muted);
+        text(40,215,synoptic.available ? "SLP "+fixed(synoptic.pressure/100,0)+" hPa  RAIN "+fixed(air.rainRate*3600,1)+" mm/h" :
+            (simulation.motion.windExperiment() ? "WATER WIND "+fixed(*simulation.motion.windExperiment(),0)+" m/s [EXPERIMENT]" : "V wind tracers: "+std::string(view.windTracers ? "ON" : "OFF")),muted);
     }
     const auto liquid=liquidAt(world,&water,&simulation.motion,explorer.up());
-    if(view.floraInfo && !view.globe) {
+    if(view.globe) {
+        rect(22,238,292,120,panel,.90f);
+        text(40,259,"WEATHER MAP / "+std::string(weatherLayerName(view.weatherLayer)),mint);
+        text(40,280,simulation.global.enabled() ? "GLOBAL +"+fixed(simulation.global.elapsed()/3600,2)+" h / 5 degree grid" : "GLOBAL WEATHER DISABLED",white);
+        text(40,301,view.weatherLayer==WeatherLayer::Pressure ? "BLUE 940 -- RED 1040 hPa [SLP]" :
+            (view.weatherLayer==WeatherLayer::Wind ? "BLUE 0 -- RED 70 m/s [10 m]" : "WHITE: column cloud / subgrid"),white);
+        text(40,323,"CYAN cyclone / ORANGE tropical",white);
+        text(40,346,"PURPLE thunder / F3 next map",muted);
+    } else if(view.floraInfo) {
         rect(22,238,292,120,panel,.90f);
         text(40,259,"FLORA / nearest; "+std::to_string(plantSpeciesCount_)+" kinds",mint);
         if(focusPlant_) {
@@ -891,21 +988,21 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
     for(unsigned i=0;i<moduleCount;++i) {
         const auto m=static_cast<Module>(i);
         const bool on=world.modules().enabled(m);
-        const float y=145+16*static_cast<float>(i);
-        const std::string key=i<10 ? std::to_string((i+1)%10) : (i==10 ? "M" : (i==11 ? "C" : (i==12 ? "K" : "I")));
+        const float y=145+14*static_cast<float>(i);
+        const std::string key=i<10 ? std::to_string((i+1)%10) : (i==10 ? "M" : (i==11 ? "C" : (i==12 ? "K" : (i==13 ? "I" : "Q"))));
         text(w-272,y,"["+key+"] "+std::string(moduleNames[i]),on?white:muted);
         text(w-90,y,on ? "ON" : (world.modules().requested(m) ? "WAIT" : "OFF"),on?mint:muted);
     }
     text(w-272,367,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
     rect(22,h-51,w-44,29,panel,0.9f);
-    text(35,h-31,(view.captured ? "ESC release mouse" : "CLICK to look") + std::string("   WASD move  F fly  G grid  O coast  Z seedlings  Y grow  H help"),white);
+    text(35,h-31,(view.captured ? "ESC release mouse" : "CLICK to look") + std::string("   WASD move  F fly  G grid  TAB globe  F2 storms  F3 map  H help"),white);
     if(view.help) {
         rect(w-358,h-232,336,165,panel,0.9f);
         text(w-340,h-208,explorer.flying ? "FLIGHT / "+fixed(explorer.flightSpeed,0)+" m/s" : (explorer.swimming() ? "SWIM / 1.6 m/s + CURRENT" : "WALK / 2.5 m/s"),mint);
         text(w-340,h-185,"SHIFT faster   SPACE jump / up",white);
         text(w-340,h-164,"CTRL down      WHEEL flight speed",white);
         text(w-340,h-143,"+ / - time     P pause",white);
-        text(w-340,h-122,"HOME landing  1-9/0 M/C/K/I",white);
+        text(w-340,h-122,"HOME landing  1-9/0 M/C/K/I/Q",white);
         text(w-340,h-101,"G surface: "+std::string(surfaceStyleName(view.surfaceStyle)),mint);
         text(w-340,h-80,"X grove  O coast  Y grow  E panel",muted);
     }

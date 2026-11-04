@@ -1,4 +1,5 @@
 #include "planet/weather.hpp"
+#include "planet/global_weather.hpp"
 #include <complex>
 #include <numeric>
 #include <stdexcept>
@@ -148,7 +149,7 @@ std::vector<double> transportWater(std::span<const double> water,std::span<const
     for(auto& value:result) value=std::max(0.0,value); // Roundoff only; CFL guarantees positivity.
     return result;
 }
-Weather::Weather(const World& world,Vec3 observer,double seconds) : config_(world.config()) {
+Weather::Weather(const World& world,Vec3 observer,double seconds,const GlobalWeather* global) : config_(world.config()) {
     setClock(seconds);
     anchor_=normalized(observer); east_=east(anchor_); north_=north(anchor_);
     background(world);
@@ -160,13 +161,17 @@ Weather::Weather(const World& world,Vec3 observer,double seconds) : config_(worl
         const Vec3 p=directionAt(px,pz)*config_.radius;
         const auto& b=background_[i]; auto& c=cells_[i];
         c.temperature=b.temperature;
-        const double humidity=clamp(0.78+0.16*b.wetness+0.46*noise.value(p/4200)+0.12*noise.value(p/1500),0.30,1.35);
+        const auto synoptic=global ? global->sample(p) : GlobalSample{};
+        const double humidity=synoptic.available ? synoptic.humidity : clamp(0.78+0.16*b.wetness+0.46*noise.value(p/4200)+0.12*noise.value(p/1500),0.30,1.35);
         c.vapour=humidity*b.airMass*saturationMixingRatio(c.temperature,b.pressure);
+        c.cloud=synoptic.cloud;
         equilibrateMoisture(c.vapour,c.cloud,c.temperature,b.airMass,b.pressure);
-        c.wind={-6*std::cos(3*latitude(anchor_))+1.5*noise.value(p/7000),-1.5*std::sin(2*latitude(anchor_))};
+        c.wind=synoptic.available ? Wind2{dot(synoptic.velocity,east_)/.7,dot(synoptic.velocity,north_)/.7} :
+            Wind2{-6*std::cos(3*latitude(anchor_))+1.5*noise.value(p/7000),-1.5*std::sin(2*latitude(anchor_))};
+        if(synoptic.available) c.rainRate=std::max(0.0,c.cloud-.3)*(1+5*synoptic.severity)/900;
     }
     seedParticles(); initialWater_=waterMass();
-    advance(world,observer,0);
+    advance(world,observer,0,global);
 }
 void Weather::setClock(double seconds) {
     if(!std::isfinite(seconds) || std::abs(seconds)>1e12) throw std::invalid_argument("Invalid weather clock");
@@ -249,14 +254,14 @@ double Weather::waterMass() const {
     double total=0; for(const auto& c:cells_) total+=c.vapour+c.cloud;
     return total*spacing*spacing;
 }
-WaterBudget Weather::budget() const { return {initialWater_,waterMass(),evaporation_,precipitation_,domainExchange_}; }
-void Weather::recenter(const World& world,Vec3 observer) {
+WaterBudget Weather::budget() const { return {initialWater_,waterMass(),evaporation_,precipitation_,domainExchange_,synopticExchange_}; }
+void Weather::recenter(const World& world,Vec3 observer,const GlobalWeather* global) {
     const auto previous=cells_;
     const Vec3 oldAnchor=anchor_,oldEast=east_,oldNorth=north_;
     const double previousMass=waterMass(),oldAltitude=layerAltitude_;
     // A new local domain supplies the entering cells. Carry overlapping column
     // water and rotate wind vectors; account explicitly for the changed domain.
-    Weather fresh(world,observer,time_+pending_);
+    Weather fresh(world,observer,time_+pending_,global);
     anchor_=fresh.anchor_; east_=fresh.east_; north_=fresh.north_;
     layerAltitude_=fresh.layerAltitude_; annualTemperature_=fresh.annualTemperature_;
     background_=std::move(fresh.background_); cells_=std::move(fresh.cells_);
@@ -276,7 +281,7 @@ void Weather::recenter(const World& world,Vec3 observer) {
     domainExchange_+=waterMass()-previousMass;
     seedParticles();
 }
-void Weather::advance(const World& world,Vec3 observer,double modelSeconds) {
+void Weather::advance(const World& world,Vec3 observer,double modelSeconds,const GlobalWeather* global) {
     if(!std::isfinite(modelSeconds) || modelSeconds<0 || modelSeconds>86400 ||
        (world.modules().enabled(Module::Wind) && modelSeconds>120))
         throw std::invalid_argument("Weather timestep exceeds its supported range");
@@ -286,14 +291,14 @@ void Weather::advance(const World& world,Vec3 observer,double modelSeconds) {
     unsigned modules=0;
     for(unsigned i=0;i<moduleCount;++i) if((i<4 || i==static_cast<unsigned>(Module::Landforms)) && world.modules().enabled(static_cast<Module>(i))) modules|=1U<<i;
     if(modules!=backgroundModules_) background(world);
-    if(length(normalized(observer)-anchor_)*config_.radius>5000) recenter(world,observer);
+    if(length(normalized(observer)-anchor_)*config_.radius>5000) recenter(world,observer,global);
     if(!windEnabled_) { time_+=pending_+modelSeconds; pending_=0; return; }
     pending_+=modelSeconds;
     while(pending_+1e-9>=fixedStep) {
-        step(world,observer); time_+=fixedStep; pending_=std::max(0.0,pending_-fixedStep); ++steps_;
+        step(world,observer,global); time_+=fixedStep; pending_=std::max(0.0,pending_-fixedStep); ++steps_;
     }
 }
-void Weather::step(const World& world,Vec3 observer) {
+void Weather::step(const World& world,Vec3 observer,const GlobalWeather* global) {
     const auto previous=cells_;
     const auto index=[](int x,int z) { return static_cast<std::size_t>(wrap(z,resolution)*resolution+wrap(x,resolution)); };
     const double coriolis=2*(tau/config_.day)*std::sin(latitude(anchor_));
@@ -303,6 +308,9 @@ void Weather::step(const World& world,Vec3 observer) {
     const double surfaceTemperature=world.sample(anchor_,time_).temperature;
     const double season=std::isfinite(surfaceTemperature) ? clamp(surfaceTemperature-annualTemperature_,-15.0,15.0) : 0;
     std::vector<double> pressure(cells_.size());
+    std::vector<GlobalSample> synoptic(cells_.size());
+    if(global && global->enabled()) for(int z=0;z<resolution;++z) for(int x=0;x<resolution;++x)
+        synoptic[static_cast<std::size_t>(z*resolution+x)]=global->sample(directionAt((x+.5)*spacing-extent/2,(z+.5)*spacing-extent/2));
     for(std::size_t i=0;i<cells_.size();++i) {
         const auto& b=background_[i];
         pressure[i]=b.forcingWeight*(b.pressureA*std::cos(phase)+b.pressureB*std::sin(phase)+2*(previous[i].temperature-b.temperature));
@@ -319,10 +327,12 @@ void Weather::step(const World& world,Vec3 observer) {
         // Prescribed geostrophic forcing, regularized near the equator. The
         // projected horizontal layer has no compressive air-mass source/sink.
         const double balancedF=std::copysign(std::max(std::abs(coriolis),1e-4),coriolis==0 ? 1 : coriolis);
-        const Wind2 target{clamp(prevailing.east-(pressure[n]-pressure[s])/(2*spacing*density*balancedF),-20.0,20.0),
+        Wind2 target{clamp(prevailing.east-(pressure[n]-pressure[s])/(2*spacing*density*balancedF),-20.0,20.0),
                            clamp(prevailing.north+(pressure[e]-pressure[w])/(2*spacing*density*balancedF),-20.0,20.0)};
-        c.wind.east=clamp(rotated.east+fixedStep*(target.east-rotated.east)/900,-30.0,30.0);
-        c.wind.north=clamp(rotated.north+fixedStep*(target.north-rotated.north)/900,-30.0,30.0);
+        if(synoptic[i].available) target={dot(synoptic[i].velocity,east_)/.7,dot(synoptic[i].velocity,north_)/.7};
+        const double relaxation=synoptic[i].available ? 180 : 900,limit=synoptic[i].available ? 100 : 30;
+        c.wind.east=clamp(rotated.east+fixedStep*(target.east-rotated.east)/relaxation,-limit,limit);
+        c.wind.north=clamp(rotated.north+fixedStep*(target.north-rotated.north)/relaxation,-limit,limit);
         c.rainRate=0;
     }
     std::vector<Wind2> faces(cells_.size());
@@ -332,13 +342,14 @@ void Weather::step(const World& world,Vec3 observer) {
                   (cells_[i].wind.north+cells_[index(x,z+1)].wind.north)/2};
     }
     projectWind(faces,resolution,spacing);
-    double maxOutgoing=0;
+    double maxOutgoing=0,maxSpeed=0;
     for(int z=0;z<resolution;++z) for(int x=0;x<resolution;++x) {
         const auto i=index(x,z);
+        maxSpeed=std::max(maxSpeed,std::hypot(faces[i].east,faces[i].north));
         maxOutgoing=std::max(maxOutgoing,std::max(0.0,faces[i].east)+std::max(0.0,-faces[index(x-1,z)].east)
                             +std::max(0.0,faces[i].north)+std::max(0.0,-faces[index(x,z-1)].north));
     }
-    const double stability=std::min(1.0,0.9*spacing/(fixedStep*std::max(1.0,maxOutgoing)));
+    const double stability=std::min({1.0,0.9*spacing/(fixedStep*std::max(1.0,maxOutgoing)),100/std::max(1.0,maxSpeed)});
     for(auto& f:faces) { f.east*=stability; f.north*=stability; }
     for(int z=0;z<resolution;++z) for(int x=0;x<resolution;++x) {
         const auto i=index(x,z),e=index(x+1,z),w=index(x-1,z),n=index(x,z+1),s=index(x,z-1);
@@ -348,7 +359,7 @@ void Weather::step(const World& world,Vec3 observer) {
                                                       (z+0.5)*spacing-extent/2-c.wind.north*fixedStep);
         c.uplift=clamp((c.wind.east*(background_[e].terrain-background_[w].terrain)
                      +c.wind.north*(background_[n].terrain-background_[s].terrain))/(2*spacing)
-                     *std::exp(-std::max(0.0,layerAltitude_-b.terrain)/3000),-1.0,1.0);
+                     *std::exp(-std::max(0.0,layerAltitude_-b.terrain)/3000)+.4*synoptic[i].severity+.8*synoptic[i].convection,-1.0,1.5);
         c.temperature=clamp(carried.temperature+fixedStep*((b.temperature+season-carried.temperature)/1800-0.0098*c.uplift),200.0,320.0);
     }
     if(cloudsEnabled_) {
@@ -363,8 +374,16 @@ void Weather::step(const World& world,Vec3 observer) {
                               *std::max(0.0,1-vapour[i]/saturation)*fixedStep;
             c.vapour=vapour[i]+input; c.cloud=cloud[i];
             evaporation_+=input*spacing*spacing;
+            if(synoptic[i].available) {
+                // One-way nesting. The regional column has an explicit external
+                // water source/sink; this mass is not removed from the global grid.
+                const double old=c.vapour+c.cloud,blend=1-std::exp(-fixedStep/900);
+                c.vapour=mix(c.vapour,synoptic[i].humidity*saturation,blend);
+                c.cloud=mix(c.cloud,synoptic[i].cloud,blend);
+                synopticExchange_+=(c.vapour+c.cloud-old)*spacing*spacing;
+            }
             equilibrateMoisture(c.vapour,c.cloud,c.temperature,b.airMass,b.pressure);
-            const double rain=std::max(0.0,c.cloud-0.30)*(1-std::exp(-fixedStep/900));
+            const double rain=std::max(0.0,c.cloud-0.30)*(1-std::exp(-fixedStep*(1+5*synoptic[i].severity)/900));
             c.cloud-=rain; c.rainRate=rain/fixedStep; precipitation_+=rain*spacing*spacing;
         }
         for(auto& p:clouds_) {

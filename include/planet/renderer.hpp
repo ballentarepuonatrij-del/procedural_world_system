@@ -8,6 +8,10 @@
 
 namespace planet {
 enum class SurfaceStyle { Natural, Grid, Wireframe };
+enum class WeatherLayer { Clouds, Pressure, Wind, Off };
+inline const char* weatherLayerName(WeatherLayer layer) {
+    switch(layer) { case WeatherLayer::Clouds:return "clouds";case WeatherLayer::Pressure:return "pressure";case WeatherLayer::Wind:return "wind";default:return "off"; }
+}
 inline const char* surfaceStyleName(SurfaceStyle style) {
     switch(style) {
         case SurfaceStyle::Grid: return "grid";
@@ -22,6 +26,7 @@ struct ViewState {
     bool windTracers=false,waterTracers=true,headlamp=true;
     bool floraInfo=true;
     SurfaceStyle surfaceStyle=SurfaceStyle::Grid;
+    WeatherLayer weatherLayer=WeatherLayer::Clouds;
 };
 class Renderer {
 public:
@@ -29,7 +34,7 @@ public:
     ~Renderer();
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
-    void invalidate() { dirty_=true; globeDirty_=true; }
+    void invalidate() { dirty_=true; globeDirty_=true; weatherDirty_=true; }
     void draw(const World& world, const Explorer& explorer, const Simulation& simulation,const ViewState& view);
     void capture(const std::filesystem::path& path, int width, int height) const;
     std::string device() const;
@@ -41,11 +46,15 @@ public:
     std::size_t marineCount() const { return marineCount_; }
     std::size_t plantSpeciesCount() const { return plantSpeciesCount_; }
     double plantHeightSum() const { return plantHeightSum_; }
+    std::size_t rainCount() const { return rainCount_; }
+    std::size_t lightningCount() const { return lightningCount_; }
+    std::size_t stormMarkerCount() const { return stormMarkerCount_; }
 private:
     void buildTerrain(const World& world,const Explorer& explorer,const Hydrology& water,double seconds);
     void buildGlobe(const World& world,double seconds);
     void buildObjects(const World& world,const Flora& flora);
-    void drawWeather(const World& world,const Explorer& explorer,const Weather& weather,const ViewState& view,double daylight);
+    void drawWeather(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight);
+    void drawGlobalWeather(const GlobalWeather& weather,const ViewState& view);
     void drawWater(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight);
     void drawHud(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view);
     void text(float x,float y,const std::string& value,Color color,bool large=false);
@@ -70,5 +79,10 @@ private:
     double lastTerrainTime_=-1e30, lastGlobeTime_=-1e30;
     double terrainStep_=2, terrainEyeHeight_=0;
     bool dirty_=true, globeDirty_=true;
+    GLuint weatherMap_=0;
+    std::uint64_t lastGlobalStep_=0;
+    WeatherLayer lastWeatherLayer_=WeatherLayer::Off;
+    bool weatherDirty_=true,lastGlobalClouds_=true;
+    std::size_t rainCount_=0,lightningCount_=0,stormMarkerCount_=0;
 };
 } // namespace planet

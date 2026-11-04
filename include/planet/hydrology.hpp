@@ -2,6 +2,7 @@
 #include "planet/weather.hpp"
 #include "planet/water_motion.hpp"
 #include "planet/flora.hpp"
+#include "planet/global_weather.hpp"
 #include <map>
 #include <deque>
 
@@ -96,11 +97,12 @@ private:
 // This avoids frame-rate-dependent rain when the renderer runs at different FPS.
 class Simulation {
 public:
-    Simulation(const World& world,Vec3 observer,double seconds,std::optional<double> waterWind={});
+    Simulation(const World& world,Vec3 observer,double seconds,std::optional<double> waterWind={},double globalHours=0);
     void advance(const World& world,Vec3 observer,double modelSeconds);
     void setClock(double seconds);
     void setRainExperiment(double mmPerHour);
     double rainExperiment() const { return experimentRain_; }
+    GlobalWeather global;
     Weather weather;
     Hydrology water;
     WaterMotion motion;

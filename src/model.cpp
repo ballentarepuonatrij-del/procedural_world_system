@@ -47,6 +47,7 @@ bool Modules::enabled(Module m) const {
     if (m == Module::Caves) return enabled(Module::Landforms);
     if (m == Module::WaterMotion) return enabled(Module::Ocean) || enabled(Module::Hydrology);
     if (m == Module::PlantGrowth) return enabled(Module::SurfaceDetail) && enabled(Module::Biomes);
+    if (m == Module::GlobalWeather) return enabled(Module::Wind) && enabled(Module::Climate);
     return true;
 }
 void Modules::set(Module m, bool enabled) {

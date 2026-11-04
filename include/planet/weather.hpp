@@ -4,6 +4,7 @@
 #include <vector>
 
 namespace planet {
+class GlobalWeather;
 struct Wind2 { double east{}, north{}; };
 // Liquid-water saturation, Tetens approximation (Pa), and moist phase adjustment.
 double saturationPressure(double temperatureK);
@@ -37,16 +38,17 @@ struct WeatherSample {
 };
 struct WaterBudget {
     double initialKg{}, storedKg{}, evaporatedKg{}, precipitatedKg{}, domainExchangeKg{};
-    double residualKg() const { return storedKg+precipitatedKg-initialKg-evaporatedKg-domainExchangeKg; }
+    double synopticExchangeKg{};
+    double residualKg() const { return storedKg+precipitatedKg-initialKg-evaporatedKg-domainExchangeKg-synopticExchangeKg; }
 };
 class Weather {
 public:
     static constexpr int resolution=32;
     static constexpr double spacing=750, extent=resolution*spacing, layerDepth=800;
     static constexpr double fixedStep=2, maximumTimeScale=600;
-    Weather(const World& world,Vec3 observer,double seconds);
+    Weather(const World& world,Vec3 observer,double seconds,const GlobalWeather* global=nullptr);
     // At most 120 model seconds per call when wind is enabled; no dropped steps.
-    void advance(const World& world,Vec3 observer,double modelSeconds);
+    void advance(const World& world,Vec3 observer,double modelSeconds,const GlobalWeather* global=nullptr);
     void setClock(double seconds);
     WeatherSample sample(Vec3 unit) const;
     WeatherSample sampleLocal(double x,double z) const;
@@ -65,9 +67,9 @@ public:
 private:
     struct Background { double temperature{}, pressure{}, airMass{}, terrain{}, wetness{}, pressureA{}, pressureB{}, forcingWeight{}; };
     void background(const World& world);
-    void recenter(const World& world,Vec3 observer);
+    void recenter(const World& world,Vec3 observer,const GlobalWeather* global);
     void seedParticles();
-    void step(const World& world,Vec3 observer);
+    void step(const World& world,Vec3 observer,const GlobalWeather* global);
     WeatherCell interpolate(double x,double z) const;
     double waterMass() const;
     Config config_;
@@ -77,6 +79,7 @@ private:
     std::vector<WeatherParticle> clouds_,tracers_;
     double layerAltitude_=1800, time_=0, pending_=0, annualTemperature_=288.15;
     double initialWater_=0, evaporation_=0, precipitation_=0, domainExchange_=0;
+    double synopticExchange_=0;
     std::uint64_t steps_=0;
     unsigned backgroundModules_=~0U;
     bool windEnabled_=false, cloudsEnabled_=false;

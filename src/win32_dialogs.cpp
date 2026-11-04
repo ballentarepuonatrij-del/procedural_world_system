@@ -7,7 +7,7 @@
 
 namespace planet {
 namespace {
-constexpr int moduleId=100,gridId=120,volumeId=121,volumeTextId=122,interfaceId=123,seedId=200;
+constexpr int moduleId=100,gridId=120,volumeId=121,volumeTextId=122,interfaceId=123,skyId=124,shadowsId=125,seedId=200;
 struct DialogData {
     Preferences preferences;
     bool seedOnly=false;
@@ -16,7 +16,7 @@ struct DialogData {
 };
 std::vector<WORD> dialogTemplate(bool seed) {
     const DLGTEMPLATE header{WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME|DS_CENTER|DS_SETFONT,0,0,0,0,
-        static_cast<short>(seed ? 320 : 360),static_cast<short>(seed ? 134 : 302)};
+        static_cast<short>(seed ? 320 : 360),static_cast<short>(seed ? 134 : 324)};
     std::vector<WORD> data((sizeof(header)+1)/2);std::memcpy(data.data(),&header,sizeof(header));
     data.insert(data.end(),{0,0,0,10}); // No menu/class/title; 10 pt font follows.
     for(wchar_t ch:std::wstring(L"Segoe UI")) data.push_back(static_cast<WORD>(ch));
@@ -75,14 +75,18 @@ INT_PTR CALLBACK procedure(HWND dialog,UINT message,WPARAM wParam,LPARAM lParam)
             CheckDlgButton(dialog,gridId,data->preferences.grid ? BST_CHECKED : BST_UNCHECKED);
             control(dialog,L"BUTTON",L"Показывать интерфейс",WS_TABSTOP|BS_AUTOCHECKBOX,interfaceId,186,218,162,18);
             CheckDlgButton(dialog,interfaceId,data->preferences.interfaceVisible ? BST_CHECKED : BST_UNCHECKED);
-            control(dialog,L"STATIC",L"Громкость",0,-1,12,245,65,18);
-            control(dialog,TRACKBAR_CLASSW,L"",WS_TABSTOP|TBS_HORZ|TBS_NOTICKS,volumeId,78,240,214,25);
+            control(dialog,L"BUTTON",L"Небо и звёзды",WS_TABSTOP|BS_AUTOCHECKBOX,skyId,12,240,165,18);
+            CheckDlgButton(dialog,skyId,data->preferences.sky ? BST_CHECKED : BST_UNCHECKED);
+            control(dialog,L"BUTTON",L"Тени объектов и рельефа",WS_TABSTOP|BS_AUTOCHECKBOX,shadowsId,186,240,162,18);
+            CheckDlgButton(dialog,shadowsId,data->preferences.shadows ? BST_CHECKED : BST_UNCHECKED);
+            control(dialog,L"STATIC",L"Громкость",0,-1,12,267,65,18);
+            control(dialog,TRACKBAR_CLASSW,L"",WS_TABSTOP|TBS_HORZ|TBS_NOTICKS,volumeId,78,262,214,25);
             SendDlgItemMessageW(dialog,volumeId,TBM_SETRANGE,TRUE,MAKELPARAM(0,100));
             SendDlgItemMessageW(dialog,volumeId,TBM_SETPOS,TRUE,data->preferences.volume);
-            control(dialog,L"STATIC",L"",0,volumeTextId,300,245,48,18);volumeLabel(dialog);
-            control(dialog,L"STATIC",L"ОК сохраняет настройки для следующего запуска.",0,-1,12,276,192,20);
-            control(dialog,L"BUTTON",L"ОК",WS_TABSTOP|BS_DEFPUSHBUTTON,IDOK,212,272,64,22);
-            control(dialog,L"BUTTON",L"Отмена",WS_TABSTOP,IDCANCEL,284,272,64,22);
+            control(dialog,L"STATIC",L"",0,volumeTextId,300,267,48,18);volumeLabel(dialog);
+            control(dialog,L"STATIC",L"ОК сохраняет настройки для следующего запуска.",0,-1,12,298,192,20);
+            control(dialog,L"BUTTON",L"ОК",WS_TABSTOP|BS_DEFPUSHBUTTON,IDOK,212,294,64,22);
+            control(dialog,L"BUTTON",L"Отмена",WS_TABSTOP,IDCANCEL,284,294,64,22);
             return TRUE;
         }
         if(!data) return FALSE;
@@ -103,6 +107,7 @@ INT_PTR CALLBACK procedure(HWND dialog,UINT message,WPARAM wParam,LPARAM lParam)
                 for(unsigned i=0;i<moduleCount;++i) next.modules.set(static_cast<Module>(i),IsDlgButtonChecked(dialog,moduleId+static_cast<int>(i))==BST_CHECKED);
                 next.grid=IsDlgButtonChecked(dialog,gridId)==BST_CHECKED;
                 next.interfaceVisible=IsDlgButtonChecked(dialog,interfaceId)==BST_CHECKED;
+                next.sky=IsDlgButtonChecked(dialog,skyId)==BST_CHECKED;next.shadows=IsDlgButtonChecked(dialog,shadowsId)==BST_CHECKED;
                 next.volume=static_cast<unsigned>(SendDlgItemMessageW(dialog,volumeId,TBM_GETPOS,0,0));
                 data->settingsCommit(next);
             }

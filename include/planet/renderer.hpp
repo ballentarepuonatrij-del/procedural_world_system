@@ -2,6 +2,8 @@
 #include "planet/navigation.hpp"
 #include "planet/hydrology.hpp"
 #include "planet/globe_camera.hpp"
+#include "planet/lighting.hpp"
+#include "planet/shadows.hpp"
 #include <windows.h>
 #include <GL/gl.h>
 #include <filesystem>
@@ -31,6 +33,7 @@ struct ViewState {
     double volume=.55;
     bool audioAvailable=false;
     bool interfaceVisible=true;
+    bool skyEnabled=true,shadowsEnabled=true;
     GlobeCamera globeCamera;
 };
 bool globeHudHit(const ViewState& view,int x,int y);
@@ -55,10 +58,17 @@ public:
     std::size_t rainCount() const { return rainCount_; }
     std::size_t lightningCount() const { return lightningCount_; }
     std::size_t stormMarkerCount() const { return stormMarkerCount_; }
+    std::size_t starCount() const { return starCount_; }
+    std::size_t shadowCount() const { return shadowCount_; }
+    bool shadowSupport() const { return stencilBits_>=8; }
+    bool shadowsUsed() const { return shadowsUsed_; }
+    const Lighting& illumination() const { return lighting_; }
 private:
     void buildTerrain(const World& world,const Explorer& explorer,const Hydrology& water,double seconds);
     void buildGlobe(const World& world,double seconds);
     void buildObjects(const World& world,const Flora& flora);
+    void drawSky(const World& world,const Explorer& explorer,const ViewState& view);
+    void drawShadows(Vec3 sun,bool textured);
     void drawWeather(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight);
     void drawGlobalWeather(const GlobalWeather& weather,const ViewState& view);
     void drawWater(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight);
@@ -90,5 +100,14 @@ private:
     WeatherLayer lastWeatherLayer_=WeatherLayer::Off;
     bool weatherDirty_=true,lastGlobalClouds_=true;
     std::size_t rainCount_=0,lightningCount_=0,stormMarkerCount_=0;
+    Lighting lighting_;
+    std::vector<Star> stars_;
+    std::uint64_t starSeed_=0;
+    std::vector<Triangle> terrainCasters_,objectCasters_;
+    GLuint shadows_=0;
+    Vec3 shadowSun_{};
+    bool shadowDirty_=true,shadowsUsed_=false,stencilWrap_=false;
+    GLint stencilBits_=0;
+    std::size_t starCount_=0,shadowCount_=0;
 };
 } // namespace planet

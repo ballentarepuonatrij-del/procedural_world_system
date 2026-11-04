@@ -32,6 +32,9 @@ struct Options {
     std::optional<StormKind> storm;
     WeatherLayer weatherLayer=WeatherLayer::Clouds;
     bool sound=true;
+    bool sky=true,shadows=true,lookAtSun=false;
+    std::optional<double> solarHour;
+    std::optional<std::array<double,2>> look;
     double volume=.55;
     std::filesystem::path audioCapture;
     SurfaceStyle surfaceStyle=SurfaceStyle::Natural;
@@ -51,6 +54,7 @@ Options parseOptions() {
         const auto saved=loadPreferences(options.settingsPath);options.preferences=saved.value;options.settingsWarning=saved.warning;
         options.config.seed=saved.value.seed;options.volume=saved.value.volume/100.0;
         options.surfaceStyle=saved.value.grid ? SurfaceStyle::Grid : SurfaceStyle::Natural;
+        options.sky=saved.value.sky;options.shadows=saved.value.shadows;
         const auto& modules=saved.value.modules;
         options.detail=modules.requested(Module::SurfaceDetail);options.wind=modules.requested(Module::Wind);
         options.clouds=modules.requested(Module::Clouds);options.water=modules.requested(Module::Hydrology);
@@ -78,6 +82,16 @@ Options parseOptions() {
             } else if(arg==L"--capture") options.capture=next();
             else if(arg==L"--report") options.report=next();
             else if(arg==L"--globe") options.globe=true;
+            else if(arg==L"--no-sky") options.sky=false;
+            else if(arg==L"--no-shadows") options.shadows=false;
+            else if(arg==L"--look-at-sun") options.lookAtSun=true;
+            else if(arg==L"--solar-hour" || arg==L"--look") {
+                const auto number=[&]() {const auto value=next();std::size_t used=0;const double n=std::stod(value,&used);
+                    if(used!=value.size() || !std::isfinite(n)) throw std::invalid_argument("Invalid sky view option");
+                    return n;};
+                if(arg==L"--solar-hour") {const double hour=number();if(hour<0 || hour>24) throw std::invalid_argument("Solar hour must be 0..24");options.solarHour=hour;}
+                else {const double heading=number(),pitch=number();if(heading<0 || heading>360 || std::abs(pitch)>88) throw std::invalid_argument("Look requires heading 0..360 and pitch -88..88 degrees");options.look=std::array{heading,pitch};}
+            }
             else if(arg==L"--no-detail") options.detail=false;
             else if(arg==L"--no-weather") options.wind=false;
             else if(arg==L"--no-sound") options.sound=false;
@@ -180,6 +194,7 @@ public:
         view_.seconds+=simulation_.global.elapsed();view_.weatherLayer=options_.weatherLayer;view_.surfaceStyle=options_.surfaceStyle;
         view_.volume=options_.volume;
         view_.interfaceVisible=options_.preferences.interfaceVisible;
+        view_.skyEnabled=options_.sky;view_.shadowsEnabled=options_.shadows;
         view_.paused=options_.paused; view_.windTracers=options_.windTracers; view_.headlamp=options_.headlamp;
         simulation_.flora.setYoung(options_.youngFlora);simulation_.flora.setRate(options_.growthRate);
         simulation_.flora.advanceDays(world_,options_.growDays);
@@ -206,6 +221,16 @@ public:
             simulation_.advance(world_,explorer_.up(),0); left-=dt;
         }
         view_.globe=options_.globe;
+        if(options_.solarHour) {
+            view_.seconds=solarHourTime(world_.config(),explorer_.up(),view_.seconds,*options_.solarHour);
+            simulation_.setClock(view_.seconds);
+        }
+        if(options_.lookAtSun) {
+            const auto sun=orbit(world_.config(),view_.seconds).sunDirection;
+            const double heading=std::atan2(dot(sun,east(explorer_.up())),dot(sun,north(explorer_.up())));
+            explorer_.look(std::remainder(heading-explorer_.heading(),tau),std::asin(clamp(dot(sun,explorer_.up()),-1.0,1.0))-explorer_.pitch());
+        }
+        if(options_.look) explorer_.look(radians((*options_.look)[0])-explorer_.heading(),radians((*options_.look)[1])-explorer_.pitch());
         view_.globeCamera.center(explorer_.up());
     }
     ~Application() {
@@ -231,7 +256,7 @@ public:
         PIXELFORMATDESCRIPTOR format{};
         format.nSize=sizeof(format); format.nVersion=1;
         format.dwFlags=PFD_DRAW_TO_WINDOW|PFD_SUPPORT_OPENGL|PFD_DOUBLEBUFFER;
-        format.iPixelType=PFD_TYPE_RGBA; format.cColorBits=24; format.cDepthBits=24;
+        format.iPixelType=PFD_TYPE_RGBA; format.cColorBits=24; format.cDepthBits=24;format.cStencilBits=8;
         const int chosen=ChoosePixelFormat(dc_,&format);
         if(!chosen || !SetPixelFormat(dc_,chosen,&format)) throw std::runtime_error("Cannot select OpenGL pixel format");
         context_=wglCreateContext(dc_);
@@ -316,6 +341,14 @@ public:
                 << "\nyoung_flora=" << simulation_.flora.young() << "\nflora_panel=" << view_.floraInfo
                 << "\nflora_plants=" << renderer_->plantCount() << "\nmarine_plants=" << renderer_->marineCount()
                 << "\nflora_species=" << renderer_->plantSpeciesCount() << "\nflora_height_sum_m=" << renderer_->plantHeightSum() << '\n';
+            const auto& light=renderer_->illumination();
+            out << "sky_enabled=" << view_.skyEnabled << "\nshadows_enabled=" << view_.shadowsEnabled
+                << "\nshadow_support=" << renderer_->shadowSupport() << "\nshadows_used=" << renderer_->shadowsUsed()
+                << "\nshadow_volume_triangles=" << renderer_->shadowCount() << "\nstars=" << renderer_->starCount()
+                << "\nsun_elevation_deg=" << degrees(light.elevation) << "\nsun_angular_diameter_deg=" << degrees(light.angularRadius)*2
+                << "\nsun_direct=" << light.direct << "\nsky_cloud_cover=" << light.cloudCover
+                << "\nstar_visibility=" << light.starVisibility << "\nstarlight_lux=" << light.starlightLux
+                << "\nmodel_seconds=" << std::setprecision(15) << view_.seconds << std::setprecision(6) << '\n';
             out << "audio_device_opened=" << audio_->available() << "\naudio_error=" << audio_->error()
                 << "\naudio_frames=" << audio_->frames() << "\naudio_submitted_buffers=" << audio_->submitted()
                 << "\naudio_completed_buffers=" << audio_->completed() << "\naudio_peak_pcm=" << audio_->peak()
@@ -366,6 +399,7 @@ private:
     Preferences currentPreferences() const {
         Preferences p;p.modules=world_.modules();p.grid=view_.surfaceStyle==SurfaceStyle::Grid;
         p.interfaceVisible=view_.interfaceVisible;p.volume=static_cast<unsigned>(std::lround(view_.volume*100));
+        p.sky=view_.skyEnabled;p.shadows=view_.shadowsEnabled;
         p.seed=world_.config().seed;return p;
     }
     void endGlobeDrag() {
@@ -386,6 +420,7 @@ private:
                 savePreferences(options_.settingsPath,next);
                 world_.modules()=next.modules;view_.surfaceStyle=next.grid ? SurfaceStyle::Grid : SurfaceStyle::Natural;
                 view_.interfaceVisible=next.interfaceVisible;view_.volume=next.volume/100.0;
+                view_.skyEnabled=next.sky;view_.shadowsEnabled=next.shadows;
                 simulation_.advance(world_,explorer_.up(),0);
                 explorer_.update(world_,{},.001,&simulation_.water,&simulation_.motion,&simulation_.flora);
                 renderer_->invalidate();++settingsSaved_;

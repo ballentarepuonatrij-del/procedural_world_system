@@ -4,6 +4,8 @@
 #include "planet/sound.hpp"
 #include "planet/preferences.hpp"
 #include "planet/globe_camera.hpp"
+#include "planet/lighting.hpp"
+#include "planet/shadows.hpp"
 #include <chrono>
 #include <fstream>
 #include <functional>
@@ -39,6 +41,114 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
     throw std::runtime_error("Walkable cave route was blocked");
 }
 void registerTests() {
+    test("lighting","Solar visibility and direct light vanish on the night side",[] {
+        Config c;c.obliquity=0;c.eccentricity=0;const Vec3 p{1,0,0};
+        const auto noon=lighting(c,p,solarHourTime(c,p,79*c.day,12));
+        const auto night=lighting(c,p,solarHourTime(c,p,79*c.day,0));
+        near(noon.elevation,pi/2,1e-7,"Solar noon above equator");near(night.elevation,-pi/2,1e-7,"Midnight below globe");
+        require(noon.direct>.7 && noon.starVisibility==0,"Sunlight and daylight hide stars");
+        SkyConditions mountain;mountain.altitude=6000;
+        require(lighting(c,p,solarHourTime(c,p,79*c.day,12),mountain).starVisibility==0,"Daytime stars remain hidden on high mountains");
+        require(night.direct==0 && night.starVisibility>.99,"No direct sunlight at midnight");
+        require(night.ambient.b>night.ambient.r*2 && night.ambient.b<.08,"Weak cold night fill");
+        require(night.starlightLux<.001 && night.starlightLux>0,"Moonless starlight scale");
+    });
+    test("lighting","Solar time selection follows geography and keeps the existing orbital clock",[] {
+        Config c;
+        for(const auto p:std::array{direction(.7,3.13),direction(-.8,-3.13),direction(0,0)}) for(double hour:{0.,6.,9.,12.,18.,24.}) {
+            const double time=solarHourTime(c,p,79*c.day,hour);
+            const double angle=std::remainder(longitude(p)-longitude(orbit(c,time).sunDirection),tau);
+            near(std::remainder(angle-(hour-12)*tau/24,tau),0,1e-10,"Requested apparent hour angle");
+        }
+        const auto a=lighting(c,{1,0,0},0),b=lighting(c,{1,0,0},c.year/2);
+        require(a.angularRadius>b.angularRadius,"Sun is larger at perihelion");
+        near(a.angularRadius*orbit(c,0).distanceAU,.00465047,1e-12,"Physical solar angular radius");
+    });
+    test("lighting","Air mass reddens the Sun and clouds suppress direct light and stars",[] {
+        near(relativeAirMass(pi/2),.99971199,1e-7,"Zenith air mass reference");
+        require(relativeAirMass(0)>35 && relativeAirMass(radians(10))>relativeAirMass(radians(45)),"Longer path near horizon");
+        Config c;c.obliquity=0;c.eccentricity=0;const Vec3 p{1,0,0};const double time=solarHourTime(c,p,0,6.15);
+        const auto clear=lighting(c,p,time);SkyConditions weather;weather.cloudWater=.6;weather.sunCloudWater=.6;weather.rainMmH=30;
+        const auto overcast=lighting(c,p,time,weather);
+        require(clear.sunlight.r>clear.sunlight.b*3,"Atmospheric extinction makes low Sun red");
+        require(overcast.direct<clear.direct*.01,"Clouds remove the direct beam and its shadows");
+        const auto starry=lighting(c,p,solarHourTime(c,p,0,0)),cloudy=lighting(c,p,solarHourTime(c,p,0,0),weather);
+        require(cloudy.starVisibility<starry.starVisibility*.01 && cloudy.starlightLux<starry.starlightLux*.01,"Clouds hide stars and attenuate their illumination");
+    });
+    test("lighting","Sky transitions include blue day warm twilight and airless black",[] {
+        Config c;c.obliquity=0;const Vec3 p{1,0,0};
+        const auto noon=lighting(c,p,solarHourTime(c,p,0,12)),dawn=lighting(c,p,solarHourTime(c,p,0,6));
+        const auto blue=skyColor(noon,p),warm=skyColor(dawn,normalized(dawn.sun-p*dot(p,dawn.sun)));
+        require(blue.b>blue.r && warm.r>warm.b*2,"Day and solar horizon have distinct spectral tendencies");
+        SkyConditions vacuum;vacuum.atmosphere=false;const auto space=lighting(c,p,solarHourTime(c,p,0,12),vacuum);
+        const auto black=skyColor(space,p);require(black.r==0 && black.g==0 && black.b==0 && space.starVisibility==1,"No scattering in vacuum, stars remain visible");
+        const double dusk=solarHourTime(c,p,0,18);
+        const auto a=lighting(c,p,dusk-.01),b=lighting(c,p,dusk+.01);
+        require(std::abs(a.direct-b.direct)<.001 && std::abs(a.ambient.b-b.ambient.b)<.001,"Continuous horizon crossing");
+    });
+    test("lighting","Stars are deterministic isotropic and rotate at the sidereal rate",[] {
+        const auto a=starCatalog(42),b=starCatalog(42),different=starCatalog(43);Vec3 mean{};
+        for(std::size_t i=0;i<a.size();++i) {near(length(a[i].inertialDirection),1,1e-12,"Unit star direction");near(length(a[i].inertialDirection-b[i].inertialDirection),0,0,"Stable catalog");mean+=a[i].inertialDirection;}
+        require(length(mean/static_cast<double>(a.size()))<.04 && length(a[0].inertialDirection-different[0].inertialDirection)>.01,"Sphere coverage and seed variation");
+        Config c;const double period=1/(1/c.day+1/c.year);
+        const auto p=a[18].inertialDirection;
+        near(length(inertialToPlanet(p,c,period)-p),0,1e-12,"One sidereal revolution");
+        require(length(inertialToPlanet({1,0,0},c,c.day)-Vec3{1,0,0})>.01,"Solar day is not sidereal day");
+        near(length(inertialToPlanet({0,1,0},c,123456)-Vec3{0,1,0}),0,0,"Celestial pole is fixed");
+    });
+    test("lighting","Invalid sky controls are rejected",[] {
+        Config c;bool rejected=false;try {(void)solarHourTime(c,{1,0,0},0,25);}catch(const std::invalid_argument&) {rejected=true;}require(rejected,"Invalid hour");
+        rejected=false;try {(void)starCatalog(42,20001);}catch(const std::invalid_argument&) {rejected=true;}require(rejected,"Bounded catalog");
+        SkyConditions bad;bad.sunCloudWater=-1;rejected=false;try {(void)lighting(c,{1,0,0},0,bad);}catch(const std::invalid_argument&) {rejected=true;}require(rejected,"Invalid column water");
+    });
+    test("shadows","A shared-edge square produces a closed prism without an internal wall",[] {
+        const std::array<Triangle,2> square{{{{-1,2,-1},{-1,2,1},{1,2,1}},{{-1,2,-1},{1,2,1},{1,2,-1}}}};
+        const auto volume=shadowVolume(square,{0,1,0},10,0);require(volume.size()==12,"Two caps and four side quads");
+        using Point=std::array<long long,3>;using Edge=std::pair<Point,Point>;std::map<Edge,int> edges;
+        const auto key=[](Vec3 p){return Point{std::llround(p.x*1e6),std::llround(p.y*1e6),std::llround(p.z*1e6)};};
+        for(const auto& t:volume) {const std::array p{key(t.a),key(t.b),key(t.c)};for(unsigned i=0;i<3;++i) {const auto a=p[i],b=p[(i+1)%3];edges[{std::min(a,b),std::max(a,b)}]+=a<b ? 1 : -1;}}
+        require(std::all_of(edges.begin(),edges.end(),[](const auto& e){return e.second==0;}),"Every edge has an opposite winding, including far caps");
+    });
+    test("shadows","Shadow location follows height divided by solar elevation tangent",[] {
+        const std::array<Triangle,2> square{{{{-1,2,-1},{-1,2,1},{1,2,1}},{{-1,2,-1},{1,2,1},{1,2,-1}}}};
+        const auto inside=[](const auto& volume,Vec3 origin) {
+            const Vec3 ray=normalized(Vec3{.31,.72,.53});int winding=0;
+            for(const auto& f:volume) {
+                const auto e1=f.b-f.a,e2=f.c-f.a,h=cross(ray,e2);const double det=dot(e1,h);if(std::abs(det)<1e-10) continue;
+                const auto s=origin-f.a;const double u=dot(s,h)/det;if(u<0 || u>1) continue;
+                const auto q=cross(s,e1);const double v=dot(ray,q)/det,t=dot(e2,q)/det;
+                if(v<0 || u+v>1 || t<=1e-8) continue;
+                winding+=dot(cross(e1,e2),ray)>0 ? 1 : -1;
+            }
+            return winding!=0;
+        };
+        for(double h:{radians(15),radians(45),radians(75)}) {
+            const auto volume=shadowVolume(square,{std::cos(h),std::sin(h),0},30,0);
+            const double offset=2/std::tan(h);
+            require(inside(volume,{-offset,0,.17}),"Shadow lies opposite the Sun at analytic distance");
+            require(!inside(volume,{-offset-2.2,0,.17}) && !inside(volume,{2,0,.17}),"Outside silhouette remains sunlit");
+            require(!inside(volume,{0,3,.17}),"Point above caster is not in shadow");
+            const auto biased=shadowVolume(square,{std::cos(h),std::sin(h),0},30);
+            require(!inside(biased,{0,2,.17}),"Lit surface must not shadow itself after bias");
+            require(inside(biased,{-offset,0,.17}),"Bias preserves the shadow on a receiver below the caster");
+        }
+    });
+    test("shadows","Thin sheets cast on both sides and degenerate inputs are bounded",[] {
+        Triangle leaf{{0,2,0},{1,2,0},{0,2,1},true};
+        require(!shadowVolume(std::span(&leaf,1),{0,1,0}).empty(),"Back-facing leaf still casts a shadow");
+        leaf.twoSided=false;require(shadowVolume(std::span(&leaf,1),{0,1,0}).empty(),"Closed solid uses only light-facing faces");
+        Triangle empty{};require(shadowVolume(std::span(&empty,1),{0,1,0}).empty(),"Degenerate face omitted");
+        bool rejected=false;try {(void)shadowVolume({},{});}catch(const std::invalid_argument&) {rejected=true;}require(rejected,"Zero light direction rejected");
+    });
+    test("shadows","Visible plant and rock meshes have matching closed solid casters",[] {
+        for(const auto kind:{DetailKind::Rock,DetailKind::Tree,DetailKind::Shrub}) {
+            SurfaceObject object;object.id=42;object.kind=kind;object.height=10;object.radius=3;object.evergreen=kind==DetailKind::Tree;
+            object.species=kind==DetailKind::Tree ? Species::Pine : Species::None;
+            const auto mesh=detailMesh(object,{}, {0,1,0},{1,0,0},false);require(!mesh.empty(),"Visible procedural geometry exists");
+            std::vector<Triangle> faces;for(const auto& face:mesh) {faces.push_back(face.triangle);require(length(cross(face.triangle.b-face.triangle.a,face.triangle.c-face.triangle.a))>0,"No zero-area visible face");}
+            const auto volume=shadowVolume(faces,normalized(Vec3{.4,1,.2}));require(!volume.empty(),"Same geometry casts directional shadows");
+        }
+    });
     test("preferences","Seed accepts the complete unsigned 64-bit range without rounding",[] {
         require(parseSeed("0")==0 && parseSeed("42")==42,"Zero and ordinary seed");
         require(parseSeed("18446744073709551615")==std::numeric_limits<std::uint64_t>::max(),"Full 64-bit precision");
@@ -47,14 +157,15 @@ void registerTests() {
     });
     test("preferences","Settings preserve requested dependencies and all user options",[] {
         Preferences p;require(!p.grid && p.interfaceVisible && p.volume==55 && p.seed==42,"First-launch defaults");
-        p.seed=std::numeric_limits<std::uint64_t>::max();p.volume=0;p.grid=true;p.interfaceVisible=false;
+        p.seed=std::numeric_limits<std::uint64_t>::max();p.volume=0;p.grid=true;p.interfaceVisible=false;p.sky=false;p.shadows=false;
         p.modules.set(Module::Atmosphere,false);p.modules.set(Module::Sound,false);
         const auto restored=parsePreferences(serializePreferences(p));
         require(restored.seed==p.seed && restored.grid && !restored.interfaceVisible && restored.volume==0,"Options round-trip");
+        require(!restored.sky && !restored.shadows,"Graphics preferences round-trip");
         for(unsigned i=0;i<moduleCount;++i) require(restored.modules.requested(static_cast<Module>(i))==p.modules.requested(static_cast<Module>(i)),"Requested switches round-trip");
         require(restored.modules.requested(Module::Climate) && !restored.modules.enabled(Module::Climate),"Waiting dependency retains its requested state");
         const auto partial=parsePreferences("# settings\r\n version = 1\r\nfuture_option=abc\r\nvolume=100\r\n");
-        require(partial.volume==100 && !partial.grid,"Unknown keys and omitted defaults");
+        require(partial.volume==100 && !partial.grid && partial.sky && partial.shadows,"Old settings keep the new graphics defaults");
     });
     test("preferences","Malformed settings are rejected instead of applying partial state",[] {
         for(const auto value:{"grid=1", "version=2", "version=1\nvolume=101", "version=1\nvolume=-1", "version=1\ngrid=true", "version=1\nsound=7", "version=1\nseed=18446744073709551616", "version=1\nbroken"}) {

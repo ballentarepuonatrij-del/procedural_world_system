@@ -5,6 +5,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <vector>
+#include <cstring>
+#include <cstdlib>
 
 namespace planet {
 namespace {
@@ -62,138 +64,16 @@ GLuint makeFont(HDC dc,int size,int weight) {
 }
 // Small meshes in metres, generated into one cached display list. The same
 // triangles are reused for the solid and wireframe passes.
-void detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up,Vec3 right,bool simple) {
-    right=rotate(right,up,object.angle);
-    const Vec3 back=cross(right,up);
-    const auto transform=[&](Vec3 p) { return origin+right*p.x+up*p.y+back*p.z; };
-    const auto triangle=[&](Vec3 a,Vec3 b,Vec3 c,Color color) {
-        a=transform(a); b=transform(b); c=transform(c);
-        const Vec3 n=normalized(cross(b-a,c-a));
-        glNormal3d(n.x,n.y,n.z); glColor3f(color.r,color.g,color.b);
-        glVertex3d(a.x,a.y,a.z); glVertex3d(b.x,b.y,b.z); glVertex3d(c.x,c.y,c.z);
-    };
-    const auto tube=[&](Vec3 a,Vec3 b,double base,double tip,Color color) {
-        const Vec3 axis=normalized(b-a);
-        const Vec3 side=normalized(cross(axis,Vec3{0.4,0.1,1})), front=cross(axis,side);
-        for(int i=0;i<6;++i) {
-            const Vec3 u=side*std::cos(tau*i/6)+front*std::sin(tau*i/6);
-            const Vec3 v=side*std::cos(tau*(i+1)/6)+front*std::sin(tau*(i+1)/6);
-            triangle(a+u*base,a+v*base,b+v*tip,color);
-            triangle(a+u*base,b+v*tip,b+u*tip,color);
-        }
-    };
-    const auto crown=[&](Vec3 center,Vec3 scale,Color color,std::uint64_t salt) {
-        const int rings=simple ? 3 : 4, sides=simple ? 6 : 8;
-        const auto vertex=[&](int row,int column) {
-            column%=sides;
-            const double lat=-pi/2+pi*row/rings, angle=tau*column/sides;
-            const double rough=0.82+0.30*randomUnit(object.id+salt+static_cast<std::uint64_t>(row*17+column));
-            return center+Vec3{std::cos(lat)*std::cos(angle)*scale.x*rough,
-                               std::sin(lat)*scale.y,std::cos(lat)*std::sin(angle)*scale.z*rough};
-        };
-        for(int row=0;row<rings;++row) for(int column=0;column<sides;++column) {
-            const float tint=static_cast<float>(0.83+0.22*randomUnit(object.id+salt+static_cast<std::uint64_t>(row*31+column)));
-            const Color shaded{color.r*tint,color.g*tint,color.b*tint};
-            const auto a=vertex(row,column),b=vertex(row,column+1),c=vertex(row+1,column),d=vertex(row+1,column+1);
-            if(row>0) triangle(a,c,b,shaded);
-            if(row+1<rings) triangle(b,c,d,shaded);
-        }
-    };
-    const double h=object.height,r=object.radius;
-    const float variation=static_cast<float>(0.85+0.30*randomUnit(object.id+11));
-    const auto& traits=plantTraits(object.species);
-    const float foliage=static_cast<float>(object.plant.foliage);
-    const Color leaves{(traits.leaves.r*foliage+.38f*(1-foliage))*variation,
-        (traits.leaves.g*foliage+.26f*(1-foliage))*variation,(traits.leaves.b*foliage+.12f*(1-foliage))*variation};
-    if(traits.aquatic || object.species==Species::Fern) {
-        if(object.species==Species::Kelp) {
-            // A holdfast, flexible stipe and alternating broad blades.
-            tube({0,0,0},{r*.4,h,0},h*.009,h*.003,{.34f,.29f,.10f});
-            for(int i=1;i<9;++i) {
-                const double y=h*i/10,side=i%2 ? 1.0 : -1.0;
-                const Vec3 a{r*.4*i/10,y,0},b=a+Vec3{r*side,y*.06,r*.5};
-                triangle(a,b+Vec3{0,h*.12,0},b+Vec3{r*side*.3,0,-r*.4},leaves);
-                triangle(a,b+Vec3{r*side*.3,0,-r*.4},b-Vec3{0,h*.06,0},leaves);
-            }
-        } else if(object.species==Species::Fern) {
-            for(int i=0;i<7;++i) {
-                const Vec3 direction{std::cos(tau*i/7),0,std::sin(tau*i/7)};
-                const Vec3 side=cross(direction,Vec3{0,1,0});
-                for(int j=1;j<6;++j) {
-                    const double f=j/6.0;
-                    const Vec3 a=direction*(r*f)+Vec3{0,h*std::sin(f*pi*.65),0};
-                    const Vec3 b=direction*(r*(f-.2))+Vec3{0,h*std::sin(std::max(0.0,f-.2)*pi*.65),0};
-                    triangle(b,a+side*(r*.23*(1-f)),a,leaves);
-                    triangle(b,a,a-side*(r*.23*(1-f)),leaves);
-                }
-            }
-        } else {
-            const int blades=object.species==Species::Rockweed ? 9 : 7;
-            for(int i=0;i<blades;++i) {
-                const Vec3 side{std::cos(tau*i/blades),0,std::sin(tau*i/blades)};
-                for(int j=0;j<4;++j) {
-                    const auto point=[&](double f) { return side*(r*(.2+.65*f*f))+Vec3{0,h*f*(.65+.35*randomUnit(object.id+static_cast<unsigned>(i))),0}; };
-                    const double a=j/4.0,b=(j+1)/4.0;
-                    const double width=r*(object.species==Species::Rockweed ? .19 : .07);
-                    triangle(point(a)-side*width*(1-a),point(a)+side*width*(1-a),point(b)+side*width*(1-b),leaves);
-                    triangle(point(a)-side*width*(1-a),point(b)+side*width*(1-b),point(b)-side*width*(1-b),leaves);
-                }
-            }
-        }
-        return;
-    }
-    switch(object.kind) {
-        case DetailKind::Rock:
-            crown({0,h*0.32,0},{r,h*0.68,r*0.82},{0.46f*variation,0.43f*variation,0.36f*variation},101);
-            break;
-        case DetailKind::Tree: {
-            const Color bark=object.species==Species::Birch ? Color{.78f,.77f,.69f} : Color{.27f,.19f,.12f};
-            tube({0,-0.4,0},{0,h*0.72,0},h*0.025,h*0.008,bark);
-            if(object.plant.stage==GrowthStage::Dead) {
-                for(int i=0;i<3;++i) tube({0,h*.4,0},{r*std::cos(tau*i/3),h*.75,r*std::sin(tau*i/3)},h*.014,h*.003,bark);
-                break;
-            }
-            if(object.evergreen) {
-                for(int layer=0;layer<3;++layer) {
-                    const double base=h*(0.24+layer*0.20), width=r*(1-layer*0.22);
-                    for(int i=0;i<8;++i) {
-                        const Vec3 a{width*std::cos(tau*i/8),base,width*std::sin(tau*i/8)};
-                        const Vec3 b{width*std::cos(tau*(i+1)/8),base,width*std::sin(tau*(i+1)/8)};
-                        triangle(a,{0,std::min(h,base+h*0.4),0},b,{0.13f,0.29f,0.18f});
-                    }
-                }
-            } else {
-                const bool flat=object.species==Species::Acacia;
-                crown({0,h*(flat ? .86 : .73),0},{r,h*(flat ? .14 : .27),r},leaves,200);
-                if(!simple) for(int i=0;i<3;++i) {
-                    const double angle=tau*i/3+0.4;
-                    const Vec3 branch{std::cos(angle)*r*0.65,h*(0.56+i*0.055),std::sin(angle)*r*0.65};
-                    tube({0,h*0.38,0},branch,h*0.012,h*0.004,bark);
-                    crown(branch,{r*0.62,h*0.17,r*0.62},leaves,static_cast<std::uint64_t>(300+i*80));
-                }
-            }
-            break;
-        }
-        case DetailKind::Shrub:
-            crown({0,h*0.43,0},{r,h*0.57,r},leaves,500);
-            if(object.species==Species::Heather && foliage>.5f && object.plant.stage==GrowthStage::Mature)
-                for(int i=0;i<3;++i) crown({r*.6*std::cos(tau*i/3),h*.8,r*.6*std::sin(tau*i/3)},{r*.24,h*.18,r*.24},{.61f,.32f,.54f},static_cast<unsigned>(700+i));
-            break;
-        case DetailKind::Grass:
-            for(int i=0;i<5;++i) {
-                const double angle=tau*i/5;
-                const Vec3 side{std::cos(angle),0,std::sin(angle)};
-                const Vec3 base=side*(r*0.35);
-                triangle(base-side*0.06,base+side*0.06,base+Vec3{r*0.3,h*(0.6+0.1*i),r*0.2},leaves);
-            }
-            break;
-    }
-}
+
 }
 Renderer::Renderer(HDC dc) {
     font_=makeFont(dc,15,FW_NORMAL); headingFont_=makeFont(dc,28,FW_BOLD);
-    terrain_=glGenLists(1); terrainGrid_=glGenLists(1); globe_=glGenLists(1); objects_=glGenLists(1); caves_=glGenLists(1);weatherMap_=glGenLists(1);
-    if (!terrain_ || !terrainGrid_ || !globe_ || !objects_ || !caves_ || !weatherMap_) throw std::runtime_error("Cannot allocate terrain display lists");
+    terrain_=glGenLists(1); terrainGrid_=glGenLists(1); globe_=glGenLists(1); objects_=glGenLists(1); caves_=glGenLists(1);weatherMap_=glGenLists(1);shadows_=glGenLists(1);
+    if (!terrain_ || !terrainGrid_ || !globe_ || !objects_ || !caves_ || !weatherMap_ || !shadows_) throw std::runtime_error("Cannot allocate terrain display lists");
+    glGetIntegerv(GL_STENCIL_BITS,&stencilBits_);
+    const auto* extensions=reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
+    const auto* version=reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    stencilWrap_=(version && std::atof(version)>=1.4) || (extensions && std::strstr(extensions,"GL_EXT_stencil_wrap"));
     glEnable(GL_DEPTH_TEST); glEnable(GL_NORMALIZE);
     glEnable(GL_COLOR_MATERIAL); glColorMaterial(GL_FRONT_AND_BACK,GL_AMBIENT_AND_DIFFUSE);
     glEnable(GL_LIGHT0);
@@ -243,6 +123,7 @@ Renderer::~Renderer() {
     glDeleteLists(terrainGrid_,1);
     glDeleteLists(objects_,1); glDeleteLists(caves_,1);
     glDeleteLists(weatherMap_,1);
+    glDeleteLists(shadows_,1);
     glDeleteLists(font_,96); glDeleteLists(headingFont_,96);
     glDeleteTextures(1,&detailTexture_);
     glDeleteTextures(1,&cloudTexture_);
@@ -252,6 +133,7 @@ std::string Renderer::device() const {
     return vendor ? reinterpret_cast<const char*>(vendor) : "unknown";
 }
 void Renderer::buildTerrain(const World& world,const Explorer& explorer,const Hydrology& water,double seconds) {
+    terrainCasters_.clear();shadowDirty_=true;
     // Local +Z points south so the rendering basis is right-handed.
     anchor_=explorer.up(); east_=east(anchor_); north_=-north(anchor_);
     const double radius=world.config().radius;
@@ -397,7 +279,11 @@ void Renderer::buildTerrain(const World& world,const Explorer& explorer,const Hy
     for(int y=0;y<rows-1;++y) for(int x=0;x<columns-1;++x) {
         for(const auto& tri:{std::array<Vertex,3>{at(x,y),at(x,y+1),at(x+1,y+1)},std::array<Vertex,3>{at(x,y),at(x+1,y+1),at(x+1,y)}}) {
             const auto polygon=cave ? clip({tri.begin(),tri.end()},1) : std::vector<Vertex>{tri.begin(),tri.end()};
-            for(std::size_t i=1;i+1<polygon.size();++i) { terrainVertex(polygon[0]); terrainVertex(polygon[i]); terrainVertex(polygon[i+1]); }
+            for(std::size_t i=1;i+1<polygon.size();++i) {
+                const auto a=polygon[0].position,b=polygon[i].position,c=polygon[i+1].position;
+                if(std::max({std::hypot(a.x,a.z),std::hypot(b.x,b.z),std::hypot(c.x,c.z)})<1200) terrainCasters_.push_back({a,b,c});
+                terrainVertex(polygon[0]); terrainVertex(polygon[i]); terrainVertex(polygon[i+1]);
+            }
         }
     }
     glEnd(); glEndList();
@@ -476,6 +362,7 @@ void Renderer::buildTerrain(const World& world,const Explorer& explorer,const Hy
     lastTerrainTime_=seconds; dirty_=false;
 }
 void Renderer::buildObjects(const World& world,const Flora& flora) {
+    objectCasters_.clear();shadowDirty_=true;
     glNewList(objects_,GL_COMPILE);glBegin(GL_TRIANGLES);
     detailCount_=0;plantCount_=0;marineCount_=0;plantHeightSum_=0;focusPlant_.reset();
     std::array<bool,speciesCount> species{};double nearest=1e30;
@@ -484,7 +371,13 @@ void Renderer::buildObjects(const World& world,const Flora& flora) {
         const auto object=grownObject(site.object,&flora);
         if(object.height<.015) continue;
         const double distance=length(object.up-anchor_)*world.config().radius;
-        detailMesh(object,site.base,local(object.up),local(east(object.up)),distance>100);
+        const auto mesh=detailMesh(object,site.base,local(object.up),local(east(object.up)),distance>100);
+        for(const auto& face:mesh) {
+            const auto& t=face.triangle;const auto n=normalized(cross(t.b-t.a,t.c-t.a));
+            glNormal3d(n.x,n.y,n.z);glColor3f(face.color.r,face.color.g,face.color.b);
+            for(const auto v:{t.a,t.b,t.c}) glVertex3d(v.x,v.y,v.z);
+            if(distance<=240 && !plantTraits(object.species).aquatic) objectCasters_.push_back(t);
+        }
         ++detailCount_;
         if(object.species!=Species::None) {
             ++plantCount_;species[static_cast<unsigned>(object.species)]=true;plantHeightSum_+=object.height;
@@ -514,28 +407,123 @@ void Renderer::buildGlobe(const World& world,double seconds) {
     }
     glEndList(); lastGlobeTime_=seconds; globeDirty_=false;
 }
+void Renderer::drawSky(const World& world,const Explorer& explorer,const ViewState& view) {
+    starCount_=0;
+    if(!view.skyEnabled || (!view.globe && explorer.underwater())) return;
+    if(stars_.empty() || starSeed_!=world.config().seed) {starSeed_=world.config().seed;stars_=starCatalog(starSeed_);}
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    glDisable(GL_DEPTH_TEST);glDepthMask(GL_FALSE);glDisable(GL_LIGHTING);glDisable(GL_FOG);glDisable(GL_TEXTURE_2D);glDisable(GL_BLEND);
+    glMatrixMode(GL_PROJECTION);glPushMatrix();glMatrixMode(GL_MODELVIEW);glPushMatrix();
+    const double fov=view.globe ? GlobeCamera::fov : radians(72),aspect=static_cast<double>(view.width)/view.height;
+    perspective(fov,aspect,.1,2000);
+    const auto forward=view.globe ? -view.globeCamera.outward : explorer.forward();
+    const auto up=view.globe ? view.globeCamera.up : explorer.up();
+    const auto right=normalized(cross(forward,up)),vertical=normalized(cross(right,forward));
+    camera({},forward,up);
+    if(!view.globe) {
+        glBegin(GL_QUADS);
+        for(int row=0;row<24;++row) for(int col=0;col<64;++col) {
+            for(const auto xy:std::array<std::array<int,2>,4>{{{col,row},{col+1,row},{col+1,row+1},{col,row+1}}}) {
+                const auto p=direction(-pi/2+pi*xy[1]/24,tau*xy[0]/64);const auto color=skyColor(lighting_,p);
+                glColor3f(color.r,color.g,color.b);glVertex3d(p.x*1000,p.y*1000,p.z*1000);
+            }
+        }
+        glEnd();
+    }
+    const double visibility=view.globe ? 1 : lighting_.starVisibility;
+    if(visibility>.001) {
+        glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE);glEnable(GL_POINT_SMOOTH);
+        for(const auto& star:stars_) {
+            const auto p=inertialToPlanet(star.inertialDirection,world.config(),view.seconds);
+            const double height=std::asin(clamp(dot(p,explorer.up()),-1.0,1.0)),depth=dot(p,forward);
+            if(!view.globe && height<lighting_.horizon) continue;
+            if(depth<=0 || std::abs(dot(p,right))>depth*std::tan(fov/2)*aspect || std::abs(dot(p,vertical))>depth*std::tan(fov/2)) continue;
+            const double extinction=view.globe ? 1 : std::exp(-.06*relativeAirMass(height)*lighting_.airDensity);
+            const double strength=visibility*extinction*clamp(std::pow(10.,-.15*(star.magnitude-1)),.08,1.0);
+            glPointSize(static_cast<float>(star.magnitude<1.5 ? 2.7 : (star.magnitude<3 ? 1.8 : 1.0)));
+            glColor4f(star.color.r,star.color.g,star.color.b,static_cast<float>(strength));
+            glBegin(GL_POINTS);glVertex3d(p.x*999,p.y*999,p.z*999);glEnd();++starCount_;
+        }
+        glDisable(GL_POINT_SMOOTH);glDisable(GL_BLEND);
+    }
+    if(view.globe || lighting_.direct>.0001) {
+        const auto sun=lighting_.sun,solarRight=east(sun),solarUp=normalized(cross(solarRight,sun));
+        const double radius=std::tan(lighting_.angularRadius)*998;
+        const double peak=view.globe ? 1 : std::max({lighting_.sunlight.r,lighting_.sunlight.g,lighting_.sunlight.b,.001f});
+        const double intensity=view.globe ? 1 : clamp(lighting_.direct*4,0.0,1.0);
+        const Color color=view.globe ? Color{1,.97f,.90f} : Color{static_cast<float>(lighting_.sunlight.r/peak),static_cast<float>(lighting_.sunlight.g/peak),static_cast<float>(lighting_.sunlight.b/peak)};
+        glBegin(GL_TRIANGLE_FAN);
+        glColor3f(static_cast<float>(color.r*intensity),static_cast<float>(color.g*intensity),static_cast<float>(color.b*intensity));
+        glVertex3d(sun.x*998,sun.y*998,sun.z*998);
+        for(int i=0;i<=40;++i) {
+            const auto p=sun*998+(solarRight*std::cos(tau*i/40)+solarUp*std::sin(tau*i/40))*radius;
+            glColor3f(static_cast<float>(color.r*intensity*.65),static_cast<float>(color.g*intensity*.65),static_cast<float>(color.b*intensity*.65));
+            glVertex3d(p.x,p.y,p.z);
+        }
+        glEnd();
+    }
+    glMatrixMode(GL_MODELVIEW);glPopMatrix();glMatrixMode(GL_PROJECTION);glPopMatrix();glMatrixMode(GL_MODELVIEW);glPopAttrib();
+}
+void Renderer::drawShadows(Vec3 sun,bool textured) {
+    if(shadowDirty_ || length(sun-shadowSun_)>radians(.02)) {
+        std::vector<Triangle> casters=terrainCasters_;casters.insert(casters.end(),objectCasters_.begin(),objectCasters_.end());
+        const auto volume=shadowVolume(casters,sun);shadowCount_=volume.size();
+        glNewList(shadows_,GL_COMPILE);glBegin(GL_TRIANGLES);
+        for(const auto& t:volume) for(const auto p:{t.a,t.b,t.c}) glVertex3d(p.x,p.y,p.z);
+        glEnd();glEndList();shadowSun_=sun;shadowDirty_=false;
+    }
+    if(!shadowCount_) return;
+    shadowsUsed_=true;
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    glDisable(GL_LIGHTING);glDisable(GL_FOG);glDisable(GL_TEXTURE_2D);glDisable(GL_BLEND);glDisable(GL_POLYGON_OFFSET_FILL);
+    glColorMask(GL_FALSE,GL_FALSE,GL_FALSE,GL_FALSE);glDepthMask(GL_FALSE);glDepthFunc(GL_LEQUAL);
+    glEnable(GL_STENCIL_TEST);glStencilMask(255);glClearStencil(0);glClear(GL_STENCIL_BUFFER_BIT);glStencilFunc(GL_ALWAYS,0,255);
+    glEnable(GL_CULL_FACE);glFrontFace(GL_CCW);
+    // Closed-volume depth-fail counting also works with the eye inside a shadow.
+    glCullFace(GL_FRONT);glStencilOp(GL_KEEP,stencilWrap_ ? 0x8507 : GL_INCR,GL_KEEP);glCallList(shadows_);
+    glCullFace(GL_BACK);glStencilOp(GL_KEEP,stencilWrap_ ? 0x8508 : GL_DECR,GL_KEEP);glCallList(shadows_);
+    glPopAttrib();
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    glEnable(GL_STENCIL_TEST);glStencilMask(0);glStencilFunc(GL_NOTEQUAL,0,255);glStencilOp(GL_KEEP,GL_KEEP,GL_KEEP);
+    glDepthMask(GL_FALSE);glDepthFunc(GL_LEQUAL);glDisable(GL_BLEND);glEnable(GL_LIGHTING);glDisable(GL_LIGHT0);
+    if(textured) {glEnable(GL_TEXTURE_2D);glBindTexture(GL_TEXTURE_2D,detailTexture_);}
+    glCallList(terrain_);glDisable(GL_TEXTURE_2D);
+    glLightModeli(GL_LIGHT_MODEL_TWO_SIDE,GL_TRUE);glCallList(objects_);
+    glPopAttrib();
+}
 void Renderer::draw(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view) {
     const auto& water=simulation.water;
     cloudCount_=0;waterCount_=0;rainCount_=0;lightningCount_=0;stormMarkerCount_=0;
     glViewport(0,0,view.width,view.height);
     const auto sun=orbit(world.config(),view.seconds);
-    const auto synoptic=simulation.global.sample(explorer.up());
-    const double daylight=smoothstep(-0.10,0.25,dot(explorer.up(),sun.sunDirection))*(view.globe ? 1 : 1-.62*clamp(synoptic.cloud/3,0.0,1.0));
     const double rain=simulation.weather.sample(explorer.up()).rainRate*3600+simulation.rainExperiment();
     const bool atmosphere=world.modules().enabled(Module::Atmosphere);
+    SkyConditions conditions;conditions.atmosphere=atmosphere;conditions.altitude=explorer.altitude();conditions.rainMmH=rain;
+    if(simulation.weather.cloudsEnabled() && explorer.altitude()<simulation.weather.layerAltitude()) {
+        conditions.cloudWater=simulation.weather.sample(explorer.up()).cloudWater;
+        const auto eye=explorer.up()*(world.config().radius+explorer.altitude());
+        const double shell=world.config().radius+simulation.weather.layerAltitude(),along=dot(eye,sun.sunDirection);
+        const double distance=-along+std::sqrt(std::max(0.0,along*along+shell*shell-dot(eye,eye)));
+        const auto cloudPoint=normalized(eye+sun.sunDirection*distance);const auto air=simulation.weather.sample(cloudPoint);
+        conditions.sunCloudWater=air.available ? air.cloudWater : simulation.global.sample(cloudPoint).cloud;
+    }
+    lighting_=lighting(world.config(),explorer.up(),view.seconds,conditions);shadowsUsed_=false;starCount_=0;
+    const double daylight=lighting_.daylight*(1-.55*lighting_.cloudCover);
     const bool wireframe=view.surfaceStyle==SurfaceStyle::Wireframe && !view.globe;
     const auto liquid=liquidAt(world,&water,&simulation.motion,explorer.up());
     const bool submerged=explorer.underwater() && !view.globe;
     const double diveDepth=submerged ? std::max(0.0,liquid.level-explorer.altitude()) : 0;
-    const double waterLight=std::exp(-0.045*diveDepth)*(0.15+0.85*daylight);
+    const double waterLight=std::exp(-0.045*diveDepth)*(0.015+0.985*daylight);
     const GLfloat waterFog[]{0.015f*static_cast<float>(waterLight),0.14f*static_cast<float>(waterLight),0.19f*static_cast<float>(waterLight),1};
     if(submerged) glClearColor(waterFog[0],waterFog[1],waterFog[2],1);
     else if(wireframe) glClearColor(0.008f,0.014f,0.035f,1);
-    else if(view.globe || !atmosphere) glClearColor(0.015f,0.023f,0.038f,1);
-    else glClearColor(static_cast<float>(0.015+0.43*daylight),static_cast<float>(0.025+0.57*daylight),static_cast<float>(0.06+0.64*daylight),1);
-    glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+    else glClearColor(0,0,0,1);
+    glStencilMask(255);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT);
+    drawSky(world,explorer,view);
     glEnable(GL_DEPTH_TEST); glEnable(GL_LIGHTING); glDisable(GL_BLEND); glDisable(GL_LIGHT1);
-    const GLfloat sunColor[]{static_cast<float>(submerged ? 0.35*waterLight : 1),static_cast<float>(submerged ? 0.75*waterLight : 1),static_cast<float>(submerged ? waterLight : 1),1};
+    const GLfloat sunColor[]{view.globe ? 1.f : lighting_.sunlight.r*static_cast<float>(submerged ? .35*waterLight : 1),
+        view.globe ? .98f : lighting_.sunlight.g*static_cast<float>(submerged ? .75*waterLight : 1),
+        view.globe ? .95f : lighting_.sunlight.b*static_cast<float>(submerged ? waterLight : 1),1};
     glLightfv(GL_LIGHT0,GL_DIFFUSE,sunColor);
     if(view.globe) {
         if(globeDirty_ || std::abs(view.seconds-lastGlobeTime_)>3600) buildGlobe(world,view.seconds);
@@ -543,7 +531,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
         camera(view.globeCamera.outward*GlobeCamera::distance,-view.globeCamera.outward,view.globeCamera.up);
         const GLfloat light[]{static_cast<float>(sun.sunDirection.x),static_cast<float>(sun.sunDirection.y),static_cast<float>(sun.sunDirection.z),0};
         glLightfv(GL_LIGHT0,GL_POSITION,light);
-        const GLfloat ambient[]{0.12f,0.14f,0.16f,1};
+        const GLfloat ambient[]{0.006f,0.010f,0.018f,1};
         glLightModelfv(GL_LIGHT_MODEL_AMBIENT,ambient);
         glDisable(GL_FOG); glCallList(globe_); glDisable(GL_LIGHTING);
         drawGlobalWeather(simulation.global,view);
@@ -576,14 +564,15 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
         const Vec3 localSun=local(sun.sunDirection);
         const GLfloat light[]{static_cast<float>(localSun.x),static_cast<float>(localSun.y),static_cast<float>(localSun.z),0};
         glLightfv(GL_LIGHT0,GL_POSITION,light);
-        const GLfloat ambient[]{static_cast<float>(0.025+0.20*daylight),static_cast<float>(0.03+0.22*daylight),static_cast<float>(0.045+0.25*daylight),1};
+        const GLfloat ambient[]{lighting_.ambient.r,lighting_.ambient.g,lighting_.ambient.b,1};
         glLightModelfv(GL_LIGHT_MODEL_AMBIENT,ambient);
         if(submerged) {
             const GLfloat dim[]{0.02f,static_cast<float>(0.10*waterLight),static_cast<float>(0.15*waterLight),1}; glLightModelfv(GL_LIGHT_MODEL_AMBIENT,dim);
             glEnable(GL_FOG); glFogfv(GL_FOG_COLOR,waterFog); glFogi(GL_FOG_MODE,GL_EXP);
             glFogf(GL_FOG_DENSITY,static_cast<float>(0.045+std::min(0.3,liquid.sediment*0.01)));
         } else if(atmosphere && !wireframe) {
-            const GLfloat fog[]{static_cast<float>(0.08+0.47*daylight),static_cast<float>(0.1+0.53*daylight),static_cast<float>(0.15+0.56*daylight),1};
+            const auto color=skyColor(lighting_,normalized(explorer.forward()-explorer.up()*dot(explorer.forward(),explorer.up())));
+            const GLfloat fog[]{color.r,color.g,color.b,1};
             glEnable(GL_FOG); glFogfv(GL_FOG_COLOR,fog); glFogi(GL_FOG_MODE,GL_EXP2);
             glFogf(GL_FOG_DENSITY,static_cast<float>((.000025+.000018*std::sqrt(rain))*std::exp(-std::max(explorer.altitude(),0.0)/8500)));
         } else glDisable(GL_FOG);
@@ -601,6 +590,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
         glCallList(objects_);
         glLightModeli(GL_LIGHT_MODEL_TWO_SIDE,GL_FALSE);
         if(caveCount_>0) {
+            glPushAttrib(GL_ENABLE_BIT|GL_LIGHTING_BIT);
             glDisable(GL_LIGHT0); glDisable(GL_FOG);
             const GLfloat dark[]{0.008f,0.010f,0.014f,1}; glLightModelfv(GL_LIGHT_MODEL_AMBIENT,dark);
             if(view.headlamp) {
@@ -612,8 +602,10 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
                 glLightf(GL_LIGHT1,GL_QUADRATIC_ATTENUATION,0.0018f);
             }
             glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D,detailTexture_); glCallList(caves_); glDisable(GL_TEXTURE_2D);
-            glDisable(GL_LIGHT1); glEnable(GL_LIGHT0); glLightModelfv(GL_LIGHT_MODEL_AMBIENT,ambient);
+            glPopAttrib(); // Restore the outdoor fog and light before the shadow receiver pass.
         }
+        if(view.shadowsEnabled && shadowSupport() && !submerged && lighting_.direct>.002 && dot(sun.sunDirection,explorer.up())>0)
+            drawShadows(localSun,!wireframe);
         glDisable(GL_POLYGON_OFFSET_FILL); glEnable(GL_COLOR_MATERIAL);
         glDisable(GL_TEXTURE_2D); if(!submerged) glDisable(GL_FOG); glDisable(GL_LIGHTING);
         if(showGrid) {
@@ -637,21 +629,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
             glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
         }
         drawWater(world,explorer,simulation,view,daylight);
-        if(!submerged) {
-        // Angular solar disk: approximately 0.53 degrees at 1 AU.
-        const Vec3 center=eye+localSun*180000;
-        const Vec3 solarRight=normalized(cross(localSun,Vec3{0,1,0}));
-        const Vec3 solarUp=cross(solarRight,localSun);
-        glColor3f(1.0f,0.94f,0.72f);
-        glBegin(GL_TRIANGLE_FAN); glVertex3d(center.x,center.y,center.z);
-        for(int i=0;i<=32;++i) {
-            const double angle=tau*i/32;
-            const Vec3 v=center+(solarRight*std::cos(angle)+solarUp*std::sin(angle))*(835/sun.distanceAU);
-            glVertex3d(v.x,v.y,v.z);
-        }
-        glEnd();
-        drawWeather(world,explorer,simulation,view,daylight);
-        }
+        if(!submerged) drawWeather(world,explorer,simulation,view,daylight);
     }
     drawHud(world,explorer,simulation,view);
 }
@@ -680,14 +658,15 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
         const double incidence=std::abs(dot(normal,towardEye));
         const double fresnel=0.02+0.98*std::pow(1-incidence,5);
         const Vec3 reflected=normal*(2*dot(normal,sun))-sun;
-        const double shine=explorer.underwater() ? 0 : std::pow(std::max(0.0,dot(reflected,towardEye)),72)*daylight;
+        const double shine=explorer.underwater() ? 0 : std::pow(std::max(0.0,dot(reflected,towardEye)),72);
         const double mud=ground.available ? 1-std::exp(-ground.sedimentKgM3/12) : 0;
-        const double light=0.20+0.80*daylight;
-        const Color clear{0.025f,0.29f,0.37f},silt{0.39f,0.29f,0.12f},sky{0.40f,0.61f,0.73f};
+        const double light=.025+.975*daylight;
+        const Color clear{0.025f,0.29f,0.37f},silt{0.39f,0.29f,0.12f};
+        const auto sky=skyColor(lighting_,normal*(2*dot(normal,towardEye))-towardEye);
         Color color=wire ? Color{0.035f,0.11f,0.18f} : Color{
-            static_cast<float>((mix(mix(clear.r,silt.r,mud),sky.r,fresnel)+shine*0.75)*light),
-            static_cast<float>((mix(mix(clear.g,silt.g,mud),sky.g,fresnel)+shine*0.72)*light),
-            static_cast<float>((mix(mix(clear.b,silt.b,mud),sky.b,fresnel)+shine*0.60)*light)};
+            static_cast<float>(mix(mix(clear.r,silt.r,mud)*light,sky.r,fresnel)+shine*lighting_.sunlight.r*.75),
+            static_cast<float>(mix(mix(clear.g,silt.g,mud)*light,sky.g,fresnel)+shine*lighting_.sunlight.g*.75),
+            static_cast<float>(mix(mix(clear.b,silt.b,mud)*light,sky.b,fresnel)+shine*lighting_.sunlight.b*.75)};
         const double alpha=(0.20+0.75*(1-std::exp(-std::max(0.0,depth)*0.2))+0.45*fresnel)*smoothstep(0,0.035,depth);
         vertices[i]={local(position-origin),color,static_cast<float>(clamp(alpha,0.0,0.98)),depth};
     }
@@ -819,9 +798,8 @@ void Renderer::drawWeather(const World& world,const Explorer& explorer,const Sim
     glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D,cloudTexture_);
     glBegin(GL_QUADS);
     for(const auto& s:sprites) {
-        const float light=static_cast<float>(0.10+0.90*daylight)*s.shade;
         if(wire) glColor4f(0.12f,0.46f,0.62f,s.alpha*0.70f);
-        else glColor4f(light,light,static_cast<float>(0.13+0.87*daylight)*s.shade,s.alpha);
+        else glColor4f(lighting_.cloudColor.r*s.shade,lighting_.cloudColor.g*s.shade,lighting_.cloudColor.b*s.shade,s.alpha);
         const Vec3 horizontal=right*s.size,vertical=up*(s.size*0.68);
         const auto emit=[](Vec3 p,double u,double v) { glTexCoord2d(u,v); glVertex3d(p.x,p.y,p.z); };
         emit(s.center-horizontal-vertical,0,0); emit(s.center+horizontal-vertical,1,0);
@@ -843,8 +821,9 @@ void Renderer::drawWeather(const World& world,const Explorer& explorer,const Sim
             const double y=wrap(randomUnit(id+2)*60-7*time,60);
             const auto position=eye+east(explorer.up())*x+north(explorer.up())*z+vertical*y;
             const auto head=local(position-origin),tail=local(position-origin-(wind-vertical*7)*.08);
-            glColor4f(.62f,.79f,.92f,.43f);glVertex3d(head.x,head.y,head.z);
-            glColor4f(.7f,.84f,1,.06f);glVertex3d(tail.x,tail.y,tail.z);++rainCount_;
+            const float light=static_cast<float>(.025+.975*daylight);
+            glColor4f(.62f*light,.79f*light,.92f*light,.43f);glVertex3d(head.x,head.y,head.z);
+            glColor4f(.7f*light,.84f*light,light,.06f);glVertex3d(tail.x,tail.y,tail.z);++rainCount_;
         }
         glEnd();
     }
@@ -1015,6 +994,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
     }
     text(w/2-80,60,!world.modules().enabled(Module::Sound) ? "SOUND OFF" :
         (!view.audioAvailable ? "SOUND / NO DEVICE" : "SOUND "+fixed(view.volume*100,0)+"%"),muted);
+    if(view.shadowsEnabled && !shadowSupport()) text(w/2-115,80,"SHADOWS: NO STENCIL BUFFER",muted);
     glDisable(GL_BLEND);
 }
 bool globeHudHit(const ViewState& view,int x,int y) {

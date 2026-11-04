@@ -45,11 +45,13 @@ Preferences parsePreferences(std::string_view text) {
             preferences.volume=static_cast<unsigned>(*volume);
         } else {
             const auto module=std::find(keys.begin(),keys.end(),key);
-            if(key!="grid" && key!="interface" && module==keys.end()) continue;
+            if(key!="grid" && key!="interface" && key!="sky" && key!="shadows" && module==keys.end()) continue;
             if(value!="0" && value!="1") throw std::invalid_argument("Invalid settings switch");
             const bool enabled=value=="1";
             if(key=="grid") preferences.grid=enabled;
             else if(key=="interface") preferences.interfaceVisible=enabled;
+            else if(key=="sky") preferences.sky=enabled;
+            else if(key=="shadows") preferences.shadows=enabled;
             else preferences.modules.set(static_cast<Module>(module-keys.begin()),enabled);
         }
     }
@@ -59,7 +61,7 @@ Preferences parsePreferences(std::string_view text) {
 std::string serializePreferences(const Preferences& p) {
     if(p.volume>100) throw std::invalid_argument("Volume must be 0..100");
     std::ostringstream out;out << "version=1\nseed=" << p.seed << "\ngrid=" << p.grid
-        << "\ninterface=" << p.interfaceVisible << "\nvolume=" << p.volume << '\n';
+        << "\ninterface=" << p.interfaceVisible << "\nvolume=" << p.volume << "\nsky=" << p.sky << "\nshadows=" << p.shadows << '\n';
     for(unsigned i=0;i<moduleCount;++i) out << keys[i] << '=' << p.modules.requested(static_cast<Module>(i)) << '\n';
     return out.str();
 }

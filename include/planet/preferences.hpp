@@ -7,6 +7,7 @@ namespace planet {
 struct Preferences {
     Modules modules;
     bool grid=false,interfaceVisible=true;
+    bool sky=true,shadows=true;
     unsigned volume=55;
     std::uint64_t seed=42;
 };

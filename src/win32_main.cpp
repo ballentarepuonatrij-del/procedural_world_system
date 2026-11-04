@@ -17,6 +17,8 @@ struct Options {
     std::optional<Landform> landmark;
     std::optional<double> waterWind,diveDepth;
     bool coast=false,waterMotion=true;
+    bool youngFlora=false,plantGrowth=true,grove=false;
+    double growDays=0,growthRate=1;
     SurfaceStyle surfaceStyle=SurfaceStyle::Grid;
     std::filesystem::path capture, report;
 };
@@ -54,6 +56,16 @@ Options parseOptions() {
             else if(arg==L"--no-headlamp") options.headlamp=false;
             else if(arg==L"--coast") options.coast=true;
             else if(arg==L"--no-water-motion") options.waterMotion=false;
+            else if(arg==L"--young-flora") options.youngFlora=true;
+            else if(arg==L"--grove") options.grove=true;
+            else if(arg==L"--no-growth") options.plantGrowth=false;
+            else if(arg==L"--grow-days" || arg==L"--growth-rate") {
+                const auto value=next();std::size_t used=0;const double number=std::stod(value,&used);
+                const bool rate=arg==L"--growth-rate";
+                if(used!=value.size() || !std::isfinite(number) || number<(rate ? 1 : 0) || number>(rate ? 2592000 : 365250))
+                    throw std::invalid_argument("Growth days must be 0..365250; rate 1..2592000");
+                if(rate) options.growthRate=number; else options.growDays=number;
+            }
             else if(arg==L"--wind-m-s" || arg==L"--dive-depth") {
                 const auto value=next(); std::size_t used=0; const double number=std::stod(value,&used);
                 if(used!=value.size() || !std::isfinite(number) || number<0 || number>(arg==L"--wind-m-s" ? 40 : 200))
@@ -106,11 +118,15 @@ public:
         world_.modules().set(Module::Hydrology,options_.water); world_.modules().set(Module::Erosion,options_.erosion);
         world_.modules().set(Module::Landforms,options_.landforms); world_.modules().set(Module::Caves,options_.caves);
         world_.modules().set(Module::WaterMotion,options_.waterMotion);
+        world_.modules().set(Module::PlantGrowth,options_.plantGrowth);
+        simulation_.flora.setYoung(options_.youngFlora);simulation_.flora.setRate(options_.growthRate);
+        simulation_.flora.advanceDays(world_,options_.growDays);
         simulation_.setRainExperiment(options_.rainMmH);
         simulation_.advance(world_,explorer_.up(),0);
         explorer_.teleport(world_,explorer_.up(),&simulation_.water);
         orientLanding(); noon();
         if(options_.landmark) visitLandmark(*options_.landmark);
+        if(options_.grove) visitGrove();
         if(options_.coast || options_.diveDepth) visitCoast(options_.diveDepth.has_value());
         simulation_.advance(world_,explorer_.up(),0);
         for(double remaining=options_.weatherSeconds;remaining>1e-9;) {
@@ -123,7 +139,7 @@ public:
             explorer_.look(heading,radians(-18));
         }
         for(double left=options_.walkSeconds;left>1e-9;) {
-            const double dt=std::min(left,0.1); explorer_.update(world_,{1,0,0,false,false},dt,&simulation_.water,&simulation_.motion);
+            const double dt=std::min(left,0.1); explorer_.update(world_,{1,0,0,false,false},dt,&simulation_.water,&simulation_.motion,&simulation_.flora);
             simulation_.advance(world_,explorer_.up(),0); left-=dt;
         }
     }
@@ -186,7 +202,7 @@ public:
                 input.vertical=static_cast<double>(down(VK_SPACE))-static_cast<double>(down(VK_CONTROL));
                 input.sprint=down(VK_SHIFT); input.jump=down(VK_SPACE);
             }
-            explorer_.update(world_,input,dt,&simulation_.water,&simulation_.motion);
+            explorer_.update(world_,input,dt,&simulation_.water,&simulation_.motion,&simulation_.flora);
             simulation_.advance(world_,explorer_.up(),modelDt);
             const auto renderStart=Clock::now();
             renderer_->draw(world_,explorer_,simulation_,view_);
@@ -217,6 +233,10 @@ public:
                 << "\ncloud_sprites=" << renderer_->cloudCount() << "\nweather_steps=" << simulation_.weather.steps()
                 << "\nwind_tracers=" << view_.windTracers << "\npaused=" << view_.paused
                 << "\nrender_mean_ms=" << renderTime/std::max(1,frames) << "\nrender_max_ms=" << longestRender << '\n';
+            out << "flora_days=" << simulation_.flora.days() << "\nflora_rate=" << simulation_.flora.rate()
+                << "\nyoung_flora=" << simulation_.flora.young() << "\nflora_panel=" << view_.floraInfo
+                << "\nflora_plants=" << renderer_->plantCount() << "\nmarine_plants=" << renderer_->marineCount()
+                << "\nflora_species=" << renderer_->plantSpeciesCount() << "\nflora_height_sum_m=" << renderer_->plantHeightSum() << '\n';
             const auto air=simulation_.weather.sample(explorer_.up()); const auto water=simulation_.weather.budget();
             out << "weather_time_s=" << simulation_.weather.seconds() << "\nwind_m_s=" << length(air.velocity)
                 << "\nwind_east_m_s=" << air.wind.east << "\nwind_north_m_s=" << air.wind.north
@@ -251,6 +271,14 @@ public:
         return 0;
     }
 private:
+    void visitGrove() {
+        const auto place=findGrove(world_);
+        explorer_.teleport(world_,place.position);simulation_.advance(world_,place.position,0);
+        explorer_.teleport(world_,place.position,&simulation_.water);
+        const auto look=normalized(place.lookToward-place.position);
+        explorer_.look(std::atan2(dot(look,east(place.position)),dot(look,north(place.position))),radians(3));
+        view_.globe=false;noon();if(renderer_) renderer_->invalidate();
+    }
     double maximumTimeScale() const {
         if(explorer_.swimming()) return 1;
         if(world_.modules().enabled(Module::WaterMotion)) return 120;
@@ -323,7 +351,15 @@ private:
         else if(key=='V') view_.windTracers=!view_.windTracers;
         else if(key=='U') view_.waterTracers=!view_.waterTracers;
         else if(key=='L') view_.headlamp=!view_.headlamp;
+        else if(key=='E') view_.floraInfo=!view_.floraInfo;
+        else if(key=='I') world_.modules().toggle(Module::PlantGrowth);
+        else if(key=='Y') simulation_.flora.setRate(simulation_.flora.rate()<86400 ? 86400 : (simulation_.flora.rate()<2592000 ? 2592000 : 1));
+        else if(key=='Z') {
+            const double rate=simulation_.flora.rate();simulation_.flora=Flora{};
+            simulation_.flora.setYoung(true);simulation_.flora.setRate(rate);renderer_->invalidate();
+        }
         else if(key=='O') visitCoast();
+        else if(key=='X') visitGrove();
         else if(key=='N') {
             const auto wind=simulation_.motion.windExperiment();
             simulation_.motion.setWindExperiment(!wind ? std::optional<double>{8} : (*wind<12 ? std::optional<double>{16} : std::nullopt));
@@ -354,7 +390,9 @@ private:
             world_=World(config); world_.modules()=modules;
             explorer_=Explorer(world_);
             const double rain=simulation_.rainExperiment(); const auto wind=simulation_.motion.windExperiment();
+            const double growth=simulation_.flora.rate();const bool young=simulation_.flora.young();
             simulation_=Simulation(world_,explorer_.up(),view_.seconds,wind); simulation_.setRainExperiment(rain);
+            simulation_.flora.setRate(growth);simulation_.flora.setYoung(young);
             explorer_.teleport(world_,explorer_.up(),&simulation_.water); orientLanding(); noon(); renderer_->invalidate();
         } else if((key>='1' && key<='9') || key=='0') {
             const auto module=static_cast<Module>(key=='0' ? 9 : key-'1');

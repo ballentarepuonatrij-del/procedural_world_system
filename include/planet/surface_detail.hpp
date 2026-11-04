@@ -1,5 +1,5 @@
 #pragma once
-#include "planet/model.hpp"
+#include "planet/flora.hpp"
 #include <vector>
 
 namespace planet {
@@ -10,6 +10,9 @@ struct SurfaceObject {
     Vec3 up{};
     double elevation{}, height{}, radius{}, angle{};
     bool evergreen{};
+    Species species=Species::None;
+    double suitability=0;
+    PlantState plant;
     double collisionRadius() const;
     double collisionHeight() const;
 };
@@ -17,5 +20,10 @@ struct SurfaceObject {
 // seed and fixed cube-face cells, never on the observer or query order.
 // Radius is limited to 600 m to bound work and memory; ground cover to 80 m.
 std::vector<SurfaceObject> surfaceObjects(const World& world, Vec3 center,
-                                        double radius, bool groundCover=true);
+                                        double radius, bool groundCover=true,const Flora* flora=nullptr);
+// Fixed sites include dormant seeds. Geometry caches can age these without
+// regenerating the planet or moving roots as the observer moves.
+std::vector<SurfaceObject> surfaceSites(const World& world,Vec3 center,double radius,bool groundCover=true);
+SurfaceObject grownObject(SurfaceObject site,const Flora* flora=nullptr);
+Landmark findGrove(const World& world);
 } // namespace planet

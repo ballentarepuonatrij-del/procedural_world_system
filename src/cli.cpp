@@ -1,4 +1,5 @@
 #include "planet/hydrology.hpp"
+#include "planet/surface_detail.hpp"
 #include <charconv>
 #include <cstdlib>
 #include <fstream>
@@ -23,6 +24,8 @@ int main(int argc, char** argv) {
         std::optional<double> weatherSeconds,waterSeconds;
         std::optional<double> waterWind;
         double rainMmH=0;
+        bool floraOutput=false,youngFlora=false,grove=false;
+        double growDays=0;
         std::optional<planet::Landform> landmark;
         std::string mapPath;
         bool sample = false,coast=false;
@@ -40,6 +43,13 @@ int main(int argc, char** argv) {
             else if (arg == "--day") day = number(next());
             else if (arg == "--map") mapPath = next();
             else if (arg == "--coast") coast=true;
+            else if(arg=="--flora") floraOutput=true;
+            else if(arg=="--grove") { grove=true;floraOutput=true; }
+            else if(arg=="--young-flora") { youngFlora=true;floraOutput=true; }
+            else if(arg=="--grow-days") {
+                growDays=number(next());floraOutput=true;
+                if(growDays<0 || growDays>365250) throw std::invalid_argument("Growth days must be 0..365250");
+            }
             else if (arg == "--wind-m-s") {
                 waterWind=number(next());
                 if(*waterWind<0 || *waterWind>40) throw std::invalid_argument("Water wind must be in [0,40] m/s");
@@ -61,7 +71,7 @@ int main(int argc, char** argv) {
                 if(!landmark) throw std::invalid_argument("Landmark must be cave, canyon, mountains or gorge");
             }
             else if (arg == "--help") {
-                std::cout << "planet_cli [--seed uint64] [--sample latitude longitude] [--day days_since_perihelion] [--map world.ppm] [--weather 0..3600_seconds] [--water 0..3600_seconds] [--rain-mm-h 0..200] [--landmark cave|canyon|mountains|gorge] [--coast] [--wind-m-s 0..40]\n";
+                std::cout << "planet_cli [--seed uint64] [--sample latitude longitude] [--day days_since_perihelion] [--map world.ppm] [--weather 0..3600_seconds] [--water 0..3600_seconds] [--rain-mm-h 0..200] [--landmark cave|canyon|mountains|gorge] [--coast] [--wind-m-s 0..40] [--flora] [--grove] [--young-flora] [--grow-days 0..365250]\n";
                 return 0;
             } else throw std::invalid_argument("Unknown option: " + arg);
         }
@@ -71,6 +81,9 @@ int main(int argc, char** argv) {
         if(rainMmH>0 && !waterSeconds) throw std::invalid_argument("--rain-mm-h requires --water duration");
         const double duration=waterSeconds.value_or(weatherSeconds.value_or(0));
         const planet::World world(config);
+        if(floraOutput && !sample && !coast && !landmark) {
+            const auto p=world.findLand();lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
+        }
         if(landmark) {
             const auto place=world.findLandmark(*landmark,world.findLand());
             lat=planet::degrees(planet::latitude(place.position)); lon=planet::degrees(planet::longitude(place.position)); sample=true;
@@ -78,6 +91,10 @@ int main(int argc, char** argv) {
         if(coast) {
             const auto p=world.findCoast().lookToward;
             lat=planet::degrees(planet::latitude(p)); lon=planet::degrees(planet::longitude(p)); sample=true;
+        }
+        if(grove && !coast) {
+            const auto p=planet::findGrove(world).position;
+            lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
         }
         const auto location=planet::direction(planet::radians(lat),planet::radians(lon));
         const double finalTime=day*86400+duration;
@@ -94,6 +111,30 @@ int main(int argc, char** argv) {
                       << ",\n  \"insolation_W_m2\": " << s.insolation
                       << ",\n  \"landform\": \"" << planet::landformName(s.landform) << '"'
                       << ",\n  \"biome\": \"" << planet::biomeName(s.biome) << '"';
+            if(floraOutput) {
+                planet::Flora flora;flora.setYoung(youngFlora);flora.advanceDays(world,std::min(365250.0,growDays+duration/86400));
+                auto plants=planet::surfaceObjects(world,location,80,true,&flora);
+                std::erase_if(plants,[](const auto& o) { return o.species==planet::Species::None; });
+                std::sort(plants.begin(),plants.end(),[&](const auto& a,const auto& b) { return planet::length(a.up-location)<planet::length(b.up-location); });
+                std::array<unsigned,planet::speciesCount> counts{};
+                double heightSum=0;unsigned marine=0;
+                for(const auto& p:plants) { ++counts[static_cast<unsigned>(p.species)];heightSum+=p.height;if(planet::plantTraits(p.species).aquatic) ++marine; }
+                std::cout << ",\n  \"flora\": {\n    \"elapsed_days\": " << flora.days() << ",\n    \"plants\": " << plants.size()
+                    << ",\n    \"marine_plants\": " << marine << ",\n    \"height_sum_m\": " << heightSum << ",\n    \"species\": [";
+                bool comma=false;
+                for(unsigned i=1;i<counts.size();++i) if(counts[i]) {
+                    if(comma) std::cout << ',';
+                    std::cout << "{\"name\": \"" << planet::plantTraits(static_cast<planet::Species>(i)).name << "\", \"count\": " << counts[i] << '}';comma=true;
+                }
+                std::cout << "],\n    \"nearest\": [";
+                for(std::size_t i=0;i<std::min<std::size_t>(plants.size(),8);++i) {
+                    const auto& p=plants[i];if(i) std::cout << ',';
+                    std::cout << "{\"site_id\": \"" << p.id << "\", \"species\": \"" << planet::plantTraits(p.species).name
+                        << "\", \"stage\": \"" << planet::stageName(p.plant.stage) << "\", \"age_days\": " << p.plant.ageDays
+                        << ", \"height_m\": " << p.height << ", \"generation\": " << p.plant.generation << '}';
+                }
+                std::cout << "]\n  }";
+            }
             if(weatherSeconds || waterSeconds || waterWind || coast) {
                 planet::Simulation simulation(world,location,day*86400,waterWind); simulation.setRainExperiment(rainMmH);
                 for(double remaining=duration;remaining>1e-9;) {

@@ -319,6 +319,7 @@ void Simulation::advance(const World& world,Vec3 observer,double seconds) {
     if(!std::isfinite(seconds) || seconds<0 || seconds>(active ? 120 : 86400))
         throw std::invalid_argument("Simulation timestep exceeds its supported range");
     water.synchronize(world,observer); weather.advance(world,observer,0);
+    flora.advance(world,seconds);
     motion.synchronize(world,weather,observer); motion.advanceClock(seconds);
     if(!active) { weather.setClock(weather.seconds()+pending_+seconds); pending_=0; return; }
     pending_+=seconds;

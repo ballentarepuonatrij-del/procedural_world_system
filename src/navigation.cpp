@@ -24,7 +24,7 @@ void Explorer::look(double horizontal, double vertical) {
     heading_ = normalized(rotate(heading_,up_,-horizontal));
     pitch_ = clamp(pitch_+vertical,-radians(88),radians(88));
 }
-void Explorer::update(const World& world, const Input& input, double dt,const Hydrology* water,const WaterMotion* motion) {
+void Explorer::update(const World& world, const Input& input, double dt,const Hydrology* water,const WaterMotion* motion,const Flora* flora) {
     if (!std::isfinite(dt) || dt < 0 || dt > 10) throw std::invalid_argument("Invalid navigation timestep");
     cave_=world.caveSite(up_);
     unsigned modules=0;
@@ -36,18 +36,21 @@ void Explorer::update(const World& world, const Input& input, double dt,const Hy
     // Physics stays stable after slow frames. The desktop caps elapsed time at 0.1 s.
     while (dt > 1e-10) {
         const double slice = std::min(dt,1.0/120.0);
-        step(world,input,slice,water,motion); dt -= slice;
+        step(world,input,slice,water,motion,flora); dt -= slice;
     }
     jumpHeld_ = input.jump;
 }
-void Explorer::refreshObstacles(const World& world,const Hydrology* water) {
-    if(length(up_-obstacleAnchor_)*world.config().radius<12) return;
-    obstacles_=surfaceObjects(world,up_,32,false);
+void Explorer::refreshObstacles(const World& world,const Hydrology* water,const Flora* flora) {
+    const double day=flora ? flora->days() : 0;
+    const bool young=flora && flora->young();
+    if(length(up_-obstacleAnchor_)*world.config().radius<12 && std::abs(day-obstacleFloraDay_)<.25 && young==obstacleYoung_) return;
+    obstacles_=surfaceObjects(world,up_,32,false,flora);
     if(water) for(auto& object:obstacles_) object.elevation=water->ground(world,object.up);
     obstacleAnchor_=up_;
+    obstacleFloraDay_=day; obstacleYoung_=young;
 }
-void Explorer::step(const World& world, const Input& input, double dt,const Hydrology* water,const WaterMotion* motion) {
-    if(!flying) refreshObstacles(world,water);
+void Explorer::step(const World& world, const Input& input, double dt,const Hydrology* water,const WaterMotion* motion,const Flora* flora) {
+    if(!flying) refreshObstacles(world,water,flora);
     auto liquid=liquidAt(world,water,motion,up_);
     const double immersed=liquid.present ? clamp((liquid.level-altitude_+eyeHeight)/eyeHeight,0.0,1.0) : 0;
     swimming_=!flying && liquid.depth>1.1 && immersed>0.55;

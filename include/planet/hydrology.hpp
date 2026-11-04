@@ -1,6 +1,7 @@
 #pragma once
 #include "planet/weather.hpp"
 #include "planet/water_motion.hpp"
+#include "planet/flora.hpp"
 #include <map>
 #include <deque>
 
@@ -103,6 +104,7 @@ public:
     Weather weather;
     Hydrology water;
     WaterMotion motion;
+    Flora flora;
 private:
     double pending_=0,experimentRain_=0;
 };

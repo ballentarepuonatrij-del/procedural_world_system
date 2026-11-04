@@ -101,14 +101,58 @@ void detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up,Vec3 right,bool 
     };
     const double h=object.height,r=object.radius;
     const float variation=static_cast<float>(0.85+0.30*randomUnit(object.id+11));
-    const Color leaves{0.22f*variation,0.39f*variation,0.12f*variation};
+    const auto& traits=plantTraits(object.species);
+    const float foliage=static_cast<float>(object.plant.foliage);
+    const Color leaves{(traits.leaves.r*foliage+.38f*(1-foliage))*variation,
+        (traits.leaves.g*foliage+.26f*(1-foliage))*variation,(traits.leaves.b*foliage+.12f*(1-foliage))*variation};
+    if(traits.aquatic || object.species==Species::Fern) {
+        if(object.species==Species::Kelp) {
+            // A holdfast, flexible stipe and alternating broad blades.
+            tube({0,0,0},{r*.4,h,0},h*.009,h*.003,{.34f,.29f,.10f});
+            for(int i=1;i<9;++i) {
+                const double y=h*i/10,side=i%2 ? 1.0 : -1.0;
+                const Vec3 a{r*.4*i/10,y,0},b=a+Vec3{r*side,y*.06,r*.5};
+                triangle(a,b+Vec3{0,h*.12,0},b+Vec3{r*side*.3,0,-r*.4},leaves);
+                triangle(a,b+Vec3{r*side*.3,0,-r*.4},b-Vec3{0,h*.06,0},leaves);
+            }
+        } else if(object.species==Species::Fern) {
+            for(int i=0;i<7;++i) {
+                const Vec3 direction{std::cos(tau*i/7),0,std::sin(tau*i/7)};
+                const Vec3 side=cross(direction,Vec3{0,1,0});
+                for(int j=1;j<6;++j) {
+                    const double f=j/6.0;
+                    const Vec3 a=direction*(r*f)+Vec3{0,h*std::sin(f*pi*.65),0};
+                    const Vec3 b=direction*(r*(f-.2))+Vec3{0,h*std::sin(std::max(0.0,f-.2)*pi*.65),0};
+                    triangle(b,a+side*(r*.23*(1-f)),a,leaves);
+                    triangle(b,a,a-side*(r*.23*(1-f)),leaves);
+                }
+            }
+        } else {
+            const int blades=object.species==Species::Rockweed ? 9 : 7;
+            for(int i=0;i<blades;++i) {
+                const Vec3 side{std::cos(tau*i/blades),0,std::sin(tau*i/blades)};
+                for(int j=0;j<4;++j) {
+                    const auto point=[&](double f) { return side*(r*(.2+.65*f*f))+Vec3{0,h*f*(.65+.35*randomUnit(object.id+static_cast<unsigned>(i))),0}; };
+                    const double a=j/4.0,b=(j+1)/4.0;
+                    const double width=r*(object.species==Species::Rockweed ? .19 : .07);
+                    triangle(point(a)-side*width*(1-a),point(a)+side*width*(1-a),point(b)+side*width*(1-b),leaves);
+                    triangle(point(a)-side*width*(1-a),point(b)+side*width*(1-b),point(b)-side*width*(1-b),leaves);
+                }
+            }
+        }
+        return;
+    }
     switch(object.kind) {
         case DetailKind::Rock:
             crown({0,h*0.32,0},{r,h*0.68,r*0.82},{0.46f*variation,0.43f*variation,0.36f*variation},101);
             break;
         case DetailKind::Tree: {
-            const Color bark{0.27f,0.19f,0.12f};
+            const Color bark=object.species==Species::Birch ? Color{.78f,.77f,.69f} : Color{.27f,.19f,.12f};
             tube({0,-0.4,0},{0,h*0.72,0},h*0.025,h*0.008,bark);
+            if(object.plant.stage==GrowthStage::Dead) {
+                for(int i=0;i<3;++i) tube({0,h*.4,0},{r*std::cos(tau*i/3),h*.75,r*std::sin(tau*i/3)},h*.014,h*.003,bark);
+                break;
+            }
             if(object.evergreen) {
                 for(int layer=0;layer<3;++layer) {
                     const double base=h*(0.24+layer*0.20), width=r*(1-layer*0.22);
@@ -119,7 +163,8 @@ void detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up,Vec3 right,bool 
                     }
                 }
             } else {
-                crown({0,h*0.73,0},{r,h*0.27,r},leaves,200);
+                const bool flat=object.species==Species::Acacia;
+                crown({0,h*(flat ? .86 : .73),0},{r,h*(flat ? .14 : .27),r},leaves,200);
                 if(!simple) for(int i=0;i<3;++i) {
                     const double angle=tau*i/3+0.4;
                     const Vec3 branch{std::cos(angle)*r*0.65,h*(0.56+i*0.055),std::sin(angle)*r*0.65};
@@ -131,6 +176,8 @@ void detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up,Vec3 right,bool 
         }
         case DetailKind::Shrub:
             crown({0,h*0.43,0},{r,h*0.57,r},leaves,500);
+            if(object.species==Species::Heather && foliage>.5f && object.plant.stage==GrowthStage::Mature)
+                for(int i=0;i<3;++i) crown({r*.6*std::cos(tau*i/3),h*.8,r*.6*std::sin(tau*i/3)},{r*.24,h*.18,r*.24},{.61f,.32f,.54f},static_cast<unsigned>(700+i));
             break;
         case DetailKind::Grass:
             for(int i=0;i<5;++i) {
@@ -404,12 +451,9 @@ void Renderer::buildTerrain(const World& world,const Explorer& explorer,const Hy
         if(x+1<columns && y+1<rows) edge(x,y,x+1,y+1,true);
     }
     glEnd(); glEndList();
-    glNewList(objects_,GL_COMPILE);
-    detailCount_=0;
+    objectSites_.clear();lastFloraDay_=-1e30;
     if(aboveGround<1800) {
-        const auto objects=surfaceObjects(world,anchor_,420,aboveGround<100);
-        const auto local=[&](Vec3 p) { return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)}; };
-        glBegin(GL_TRIANGLES);
+        const auto objects=surfaceSites(world,anchor_,420,aboveGround<100);
         for(const auto& object:objects) {
             const double distance=length(object.up-anchor_)*radius;
             const double range=object.kind==DetailKind::Tree ? 420 : (object.kind==DetailKind::Rock ? 220 : 80);
@@ -425,13 +469,31 @@ void Renderer::buildTerrain(const World& world,const Explorer& explorer,const Hy
             const Vec3 a=at(ix,iy).position,d=at(ix+1,iy+1).position;
             const Vec3 base=tx>=ty ? a*(1-tx)+at(ix+1,iy).position*(tx-ty)+d*ty
                                   : a*(1-ty)+at(ix,iy+1).position*(ty-tx)+d*tx;
-            detailMesh(object,base,local(object.up),local(east(object.up)),distance>100 || aboveGround>100);
-            ++detailCount_;
+            objectSites_.push_back({object,base});
         }
-        glEnd();
     }
-    glEndList();
     lastTerrainTime_=seconds; dirty_=false;
+}
+void Renderer::buildObjects(const World& world,const Flora& flora) {
+    glNewList(objects_,GL_COMPILE);glBegin(GL_TRIANGLES);
+    detailCount_=0;plantCount_=0;marineCount_=0;plantHeightSum_=0;focusPlant_.reset();
+    std::array<bool,speciesCount> species{};double nearest=1e30;
+    const auto local=[&](Vec3 p) { return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)}; };
+    for(const auto& site:objectSites_) {
+        const auto object=grownObject(site.object,&flora);
+        if(object.height<.015) continue;
+        const double distance=length(object.up-anchor_)*world.config().radius;
+        detailMesh(object,site.base,local(object.up),local(east(object.up)),distance>100);
+        ++detailCount_;
+        if(object.species!=Species::None) {
+            ++plantCount_;species[static_cast<unsigned>(object.species)]=true;plantHeightSum_+=object.height;
+            if(plantTraits(object.species).aquatic) ++marineCount_;
+            if(distance<nearest) { nearest=distance;focusPlant_=object; }
+        }
+    }
+    glEnd();glEndList();
+    plantSpeciesCount_=static_cast<std::size_t>(std::count(species.begin(),species.end(),true));
+    lastFloraDay_=flora.days();lastYoung_=flora.young();
 }
 void Renderer::buildGlobe(const World& world,double seconds) {
     constexpr int latitudes=100,longitudes=200;
@@ -495,6 +557,8 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
            std::abs(explorer.altitude()-terrainEyeHeight_)>std::max(32.0,terrainStep_*4) ||
            terrainSpacing(world,explorer)!=terrainStep_ || std::abs(view.seconds-lastTerrainTime_)>900)
             buildTerrain(world,explorer,water,view.seconds);
+        if(std::abs(simulation.flora.days()-lastFloraDay_)>=.25 || simulation.flora.young()!=lastYoung_)
+            buildObjects(world,simulation.flora);
         perspective(radians(72),static_cast<double>(view.width)/view.height,explorer.underground() || submerged ? 0.08 : 0.25,400000);
         const auto local=[&](Vec3 p) { return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)}; };
         const Vec3 eye=local(explorer.up()*(world.config().radius+explorer.altitude())-anchor_*world.config().radius);
@@ -528,7 +592,10 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
         } else { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D,detailTexture_); }
         glCallList(terrain_);
         glDisable(GL_TEXTURE_2D);
+        // Leaves and marine blades are thin sheets, lit from either side.
+        glLightModeli(GL_LIGHT_MODEL_TWO_SIDE,GL_TRUE);
         glCallList(objects_);
+        glLightModeli(GL_LIGHT_MODEL_TWO_SIDE,GL_FALSE);
         if(caveCount_>0) {
             glDisable(GL_LIGHT0); glDisable(GL_FOG);
             const GLfloat dark[]{0.008f,0.010f,0.014f,1}; glLightModelfv(GL_LIGHT_MODEL_AMBIENT,dark);
@@ -775,7 +842,17 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(40,215,simulation.motion.windExperiment() ? "WATER WIND "+fixed(*simulation.motion.windExperiment(),0)+" m/s [EXPERIMENT]" : "V wind tracers: "+std::string(view.windTracers ? "ON" : "OFF"),muted);
     }
     const auto liquid=liquidAt(world,&water,&simulation.motion,explorer.up());
-    if(liquid.ocean) {
+    if(view.floraInfo && !view.globe) {
+        rect(22,238,292,120,panel,.90f);
+        text(40,259,"FLORA / nearest; "+std::to_string(plantSpeciesCount_)+" kinds",mint);
+        if(focusPlant_) {
+            const auto& p=*focusPlant_;
+            text(40,280,std::string(plantTraits(p.species).name)+" / "+std::string(stageName(p.plant.stage)),white);
+            text(40,301,"AGE "+fixed(p.plant.ageDays/365.25,2)+" y  HEIGHT "+fixed(p.height,2)+" m",white);
+        } else text(40,284,"No visible plants nearby",muted);
+        text(40,323,"BIO +"+fixed(simulation.flora.days(),1)+" d  "+(simulation.flora.rate()==1 ? "1x" : fixed(simulation.flora.rate()/86400,0)+"d/s [EXP]"),white);
+        text(40,346,"Y speed / I growth / E water",muted);
+    } else if(liquid.ocean) {
         rect(22,238,292,120,panel,0.90f);
         text(40,261,"OCEAN / WIND AND WAVES",mint);
         text(40,283,"HS "+fixed(simulation.motion.significantHeight(),2)+" m   FLOW "+fixed(length(liquid.current),3)+" m/s",white);
@@ -809,28 +886,28 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(40,h-104,"AIR     " + fixed(sample.density,3) + " kg/m3",muted);
     } else text(40,h-126,"ATMOSPHERE DISABLED",muted);
     text(40,h-82,"RAIN    " + (world.modules().enabled(Module::Climate) ? fixed(sample.precipitation,0)+" mm/y (estimate)" : "--"),muted);
-    rect(w-288,98,266,266,panel,0.90f);
+    rect(w-288,98,266,274,panel,0.90f);
     text(w-272,123,"SIMULATION MODULES",mint);
     for(unsigned i=0;i<moduleCount;++i) {
         const auto m=static_cast<Module>(i);
         const bool on=world.modules().enabled(m);
         const float y=145+16*static_cast<float>(i);
-        const std::string key=i<10 ? std::to_string((i+1)%10) : (i==10 ? "M" : (i==11 ? "C" : "K"));
+        const std::string key=i<10 ? std::to_string((i+1)%10) : (i==10 ? "M" : (i==11 ? "C" : (i==12 ? "K" : "I")));
         text(w-272,y,"["+key+"] "+std::string(moduleNames[i]),on?white:muted);
         text(w-90,y,on ? "ON" : (world.modules().requested(m) ? "WAIT" : "OFF"),on?mint:muted);
     }
-    text(w-272,353,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
+    text(w-272,367,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
     rect(22,h-51,w-44,29,panel,0.9f);
-    text(35,h-31,(view.captured ? "ESC release mouse" : "CLICK to look") + std::string("   WASD move   F fly   G grid   O coast   J sites   H help"),white);
+    text(35,h-31,(view.captured ? "ESC release mouse" : "CLICK to look") + std::string("   WASD move  F fly  G grid  O coast  Z seedlings  Y grow  H help"),white);
     if(view.help) {
         rect(w-358,h-232,336,165,panel,0.9f);
         text(w-340,h-208,explorer.flying ? "FLIGHT / "+fixed(explorer.flightSpeed,0)+" m/s" : (explorer.swimming() ? "SWIM / 1.6 m/s + CURRENT" : "WALK / 2.5 m/s"),mint);
         text(w-340,h-185,"SHIFT faster   SPACE jump / up",white);
         text(w-340,h-164,"CTRL down      WHEEL flight speed",white);
         text(w-340,h-143,"+ / - time     P pause",white);
-        text(w-340,h-122,"HOME landing  1-9/0 M/C/K modules",white);
+        text(w-340,h-122,"HOME landing  1-9/0 M/C/K/I",white);
         text(w-340,h-101,"G surface: "+std::string(surfaceStyleName(view.surfaceStyle)),mint);
-        text(w-340,h-80,"O coast  N wind  L lamp  T noon",muted);
+        text(w-340,h-80,"X grove  O coast  Y grow  E panel",muted);
     }
     if(!view.globe) {
         const float cx=w/2,cy=h/2;

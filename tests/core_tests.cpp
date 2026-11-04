@@ -34,6 +34,117 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
     throw std::runtime_error("Walkable cave route was blocked");
 }
 void registerTests() {
+    test("flora","Species traits cover distinct land and marine growth strategies",[] {
+        unsigned marine=0,woody=0;
+        for(unsigned i=1;i<speciesCount;++i) {
+            const auto& t=plantTraits(static_cast<Species>(i));
+            require(t.height>0 && t.widthRatio>0 && t.maturityDays>0 && t.lifespanDays>t.maturityDays && t.decayDays>0,"Valid biological dimensions and timescales");
+            if(t.aquatic) ++marine;
+            if(t.woody) ++woody;
+        }
+        require(marine==3 && woody==6,"Three marine archetypes and six woody forms");
+        require(plantTraits(Species::Oak).maturityDays>plantTraits(Species::MeadowGrass).maturityDays*50,"Trees take years, herbs months");
+    });
+    test("flora","Growth is continuous bounded and follows its analytic size curve",[] {
+        for(unsigned i=1;i<speciesCount;++i) {
+            const auto species=static_cast<Species>(i);const auto& t=plantTraits(species);
+            const auto a=plantState(species,71,0,1,true),b=plantState(species,71,t.maturityDays/2,1,true);
+            require(b.size>a.size && b.size<1 && a.stage==GrowthStage::Seedling,"Seeds grow rather than appearing mature");
+            near(b.size,1-std::exp(-3*b.ageDays/t.maturityDays),1e-12,"Analytic growth law");
+            const auto c=plantState(species,71,t.maturityDays/2+.0001,1,true);
+            require(std::abs(c.size-b.size)<.00001,"Continuous dimensions");
+            require(plantState(species,71,t.maturityDays/2,.3,true).size<b.size,"Poor habitat slows growth");
+        }
+    });
+    test("flora","Senescence decay and local seed bank renew a site without mature spawn",[] {
+        const auto& t=plantTraits(Species::Kelp);const auto initial=plantState(Species::Kelp,24,0,1,true).ageDays;
+        const auto dying=plantState(Species::Kelp,24,t.lifespanDays*.95-initial,1,true);
+        require(dying.stage==GrowthStage::Senescent && dying.foliage<1,"Senescence before death");
+        const auto dead=plantState(Species::Kelp,24,t.lifespanDays+1-initial,1,true);
+        const auto decayed=plantState(Species::Kelp,24,t.lifespanDays+t.decayDays*.9-initial,1,true);
+        require(dead.stage==GrowthStage::Dead && decayed.size<dead.size,"Biomass geometry decays");
+        const auto seed=plantState(Species::Kelp,24,t.lifespanDays+t.decayDays+10-initial,1,true);
+        require(seed.stage==GrowthStage::Seed && seed.size==0,"Dormant seed/spore interval");
+        const auto next=plantState(Species::Kelp,24,t.lifespanDays+t.decayDays+91-initial,1,true);
+        require(next.generation==1 && next.stage==GrowthStage::Seedling && next.size<.02,"Next cohort emerges small at the same site");
+    });
+    test("flora","Habitat filters temperature moisture substrate and underwater light",[] {
+        Sample s;s.temperature=288;s.precipitation=900;s.elevation=100;
+        require(plantSuitability(Species::Oak,s,.1,.5,0)>0,"Temperate oak habitat");
+        require(plantSuitability(Species::TropicalTree,s,.1,.5,0)==0,"No tropical tree in a cold habitat");
+        s.precipitation=100;require(plantSuitability(Species::Oak,s,.1,.5,0)==0,"Too dry for oak");
+        s.ocean=true;s.elevation=-4;
+        const double shallow=plantSuitability(Species::Kelp,s,.1,.8,0);require(shallow>0,"Kelp on lit rock");
+        s.elevation=-20;require(plantSuitability(Species::Kelp,s,.1,.8,0)<shallow,"Light declines with depth");
+        require(plantSuitability(Species::Seagrass,s,.1,.9,0)==0,"Seagrass excludes rocky substrate");
+        require(plantSuitability(Species::Oak,s,.1,.2,0)==0,"No underwater oak");
+        s.elevation=-50;require(plantSuitability(Species::Kelp,s,.1,.8,0)==0,"No deep dark kelp");
+    });
+    test("flora","Stable plant sites grow independently of query order and observer",[] {
+        World w;const auto p=w.findLand(),q=normalized(p+east(p)*(12/w.config().radius));
+        Flora young;young.setYoung(true);Flora old=young;old.advanceDays(w,700);
+        const auto a=surfaceObjects(w,p,180,false,&young),b=surfaceObjects(w,q,180,false,&old);
+        std::map<std::uint64_t,SurfaceObject> aged;for(const auto& o:b) aged.emplace(o.id,o);
+        unsigned compared=0;
+        for(const auto& o:a) if(o.kind==DetailKind::Tree && length(o.up-q)*w.config().radius<170) {
+            require(aged.contains(o.id),"Same plant still exists after return");const auto& other=aged.at(o.id);
+            require(o.species==other.species && other.height>o.height,"Same species and larger dimensions");
+            near(length(o.up-other.up),0,0,"Root coordinates unchanged");++compared;
+        }
+        require(compared>3,"Several trees compared");
+        const auto again=surfaceObjects(w,p,180,false,&young);require(a.size()==again.size(),"Query has no hidden simulation side effects");
+    });
+    test("flora","Coasts contain rooted marine vegetation but the abyss does not",[] {
+        World w;const auto coast=w.findCoast();const auto plants=surfaceObjects(w,coast.lookToward,80);
+        unsigned count=0;
+        for(const auto& p:plants) if(p.species!=Species::None) {
+            require(plantTraits(p.species).aquatic,"Marine types only at offshore fixture");
+            require(p.elevation<0 && p.elevation+p.height<0,"Roots on bed, crowns below mean sea level");++count;
+        }
+        require(count>15,"A visible coastal meadow or kelp stand");
+        w.modules().set(Module::Ocean,false);
+        for(const auto& p:surfaceObjects(w,coast.lookToward,80)) require(!plantTraits(p.species).aquatic,"Marine plants require seawater");
+    });
+    test("flora","Biological clock respects pause modules and frame partition",[] {
+        World w;Flora a,b;a.setRate(86400);b.setRate(86400);
+        a.advance(w,60);for(int i=0;i<240;++i)b.advance(w,.25);
+        near(a.days(),b.days(),1e-12,"Frame independent biological age");
+        a.advance(w,0);near(a.days(),60,0,"Pause freezes age");
+        w.modules().set(Module::PlantGrowth,false);a.advance(w,120);near(a.days(),60,0,"I freezes growth but retains age");
+        w.modules().set(Module::PlantGrowth,true);a.advance(w,2);near(a.days(),62,0,"Growth resumes");
+        w.modules().set(Module::Biomes,false);require(!w.modules().enabled(Module::PlantGrowth),"Growth waits for habitat dependencies");
+        a.advance(w,10);near(a.days(),62,0,"Unavailable habitat freezes growth");
+    });
+    test("flora","Growth acceleration leaves atmospheric and water clocks unchanged",[] {
+        World w;const auto p=w.findLand();Simulation a(w,p,0),b(w,p,0);
+        b.flora.setRate(30*86400);a.advance(w,p,2);b.advance(w,p,2);
+        near(b.flora.days(),60,1e-12,"Biological experiment advances sixty days");
+        near(a.weather.seconds(),b.weather.seconds(),0,"Weather time unchanged by biological multiplier");
+        near(a.water.budget().storedWaterM3,b.water.budget().storedWaterM3,0,"No hidden water source");
+        b.setClock(10000);near(b.flora.days(),60,0,"Noon clock change does not age plants");
+    });
+    test("flora","Navigation invalidates growing trunk collisions without movement",[] {
+        World w;Flora f;f.setYoung(true);const auto sites=surfaceSites(w,w.findLand(),180,false);
+        const auto tree=std::find_if(sites.begin(),sites.end(),[](const auto& o){return o.kind==DetailKind::Tree && o.suitability>.4;});
+        require(tree!=sites.end(),"A growing trunk fixture");
+        const Vec3 start=normalized(tree->up-north(tree->up)*(2/w.config().radius));
+        Explorer e(w);e.teleport(w,start);e.update(w,{},.01,nullptr,nullptr,&f);
+        f.advanceDays(w,8000);const auto grown=grownObject(*tree,&f);
+        e.update(w,{1,0,0,false,false},1.1,nullptr,nullptr,&f);
+        require(length(e.up()-tree->up)*w.config().radius>=grown.collisionRadius()+.28,"New trunk radius blocks walking after age change");
+    });
+    test("flora","Biology validates inputs and bounds long time horizons",[] {
+        World w;Flora f;
+        for(double days:{-1.0,365251.0,std::numeric_limits<double>::infinity()}) {
+            bool rejected=false;try{f.advanceDays(w,days);}catch(const std::invalid_argument&){rejected=true;}require(rejected,"Invalid age rejected");
+        }
+        bool rejected=false;try{f.setRate(0);}catch(const std::invalid_argument&){rejected=true;}require(rejected,"Invalid rate rejected");
+        f.setRate(2592000);f.advance(w,86400);near(f.days(),365250,0,"Maximum supported horizon saturates safely");
+        for(unsigned i=1;i<speciesCount;++i) {
+            const auto s=plantState(static_cast<Species>(i),29,f.days(),.5);
+            require(std::isfinite(s.size) && s.size>=0 && s.size<=1,"Finite long-term state");
+        }
+    });
     test("water_motion","Bulk wind stress has physical units and opposes relative motion",[] {
         const auto a=windStress({10,0}); near(a.east,0.177625,1e-12,"Ten metre reference wind stress in Pa"); near(a.north,0,0,"No crosswind force");
         const auto b=windStress({-10,0}); near(b.east,-a.east,1e-12,"Reversing wind reverses force");
@@ -540,9 +651,9 @@ void registerTests() {
             for(const auto& o:objects) {
                 ++counts[static_cast<std::size_t>(o.kind)];
                 const auto s=w.climatology(o.up);
-                require(!s.ocean,"No underwater decorations");
+                require(s.ocean==plantTraits(o.species).aquatic,"Plants match terrestrial or marine habitat");
                 near(o.elevation,w.elevation(o.up),1e-8,"Objects meet the collision surface");
-                if(o.kind!=DetailKind::Rock) {
+                if(o.kind!=DetailKind::Rock && !plantTraits(o.species).aquatic) {
                     require(s.temperature>267 && s.temperature<315 && s.precipitation>180,"Plant climate envelope");
                     require(s.elevation>c.seaLevel+2,"Plants avoid shoreline");
                     const double dx=(w.elevation(normalized(o.up+east(o.up)*(2/c.radius)))-s.elevation)/2;

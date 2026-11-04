@@ -20,6 +20,7 @@ struct ViewState {
     double seconds=79*86400.0, timeScale=1, fps=0;
     bool globe=false, help=true, captured=false, paused=false;
     bool windTracers=false,waterTracers=true,headlamp=true;
+    bool floraInfo=true;
     SurfaceStyle surfaceStyle=SurfaceStyle::Grid;
 };
 class Renderer {
@@ -36,9 +37,14 @@ public:
     std::size_t cloudCount() const { return cloudCount_; }
     std::size_t waterCount() const { return waterCount_; }
     std::size_t caveCount() const { return caveCount_; }
+    std::size_t plantCount() const { return plantCount_; }
+    std::size_t marineCount() const { return marineCount_; }
+    std::size_t plantSpeciesCount() const { return plantSpeciesCount_; }
+    double plantHeightSum() const { return plantHeightSum_; }
 private:
     void buildTerrain(const World& world,const Explorer& explorer,const Hydrology& water,double seconds);
     void buildGlobe(const World& world,double seconds);
+    void buildObjects(const World& world,const Flora& flora);
     void drawWeather(const World& world,const Explorer& explorer,const Weather& weather,const ViewState& view,double daylight);
     void drawWater(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight);
     void drawHud(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view);
@@ -47,6 +53,12 @@ private:
     GLuint objects_=0,caves_=0;
     std::size_t caveCount_=0;
     std::size_t detailCount_=0;
+    struct PlantSite { SurfaceObject object; Vec3 base; };
+    std::vector<PlantSite> objectSites_;
+    std::optional<SurfaceObject> focusPlant_;
+    std::size_t plantCount_=0,marineCount_=0,plantSpeciesCount_=0;
+    double plantHeightSum_=0,lastFloraDay_=-1e30;
+    bool lastYoung_=false;
     GLuint cloudTexture_=0;
     std::size_t cloudCount_=0;
     struct WaterVertex { Vec3 up,position; double altitude; bool available; double spacing; };

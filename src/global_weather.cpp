@@ -242,8 +242,21 @@ Vec3 GlobalWeather::observation(StormKind kind) const {
     return kind==StormKind::Thunderstorm ? s->center : normalized(s->center+east(s->center)*(s->radius/config_.radius));
 }
 double GlobalWeather::flash(Vec3 p) const {
-    const auto s=sample(p);if(s.convection<.25) return 0;
-    const double interval=12,phase=std::fmod(effects_,interval);
-    return phase<.35 ? (1-phase/.35)*s.convection : 0;
+    const double phase=std::fmod(effects_,12.0);if(phase>=.35) return 0;
+    double intensity=0;
+    for(const auto& strike:lightning()) {
+        const double distance=length(normalized(p)-strike.direction)*config_.radius;
+        if(distance<25000) intensity=std::max(intensity,strike.strength*std::exp(-.5*std::pow(distance/39200,2)));
+    }
+    return (1-phase/.35)*intensity;
+}
+std::vector<LightningStrike> GlobalWeather::lightning() const {
+    std::vector<LightningStrike> strikes;
+    if(!enabled_ || !cloudsEnabled_) return strikes;
+    const auto cycle=static_cast<std::uint64_t>(effects_/12);
+    for(const auto& storm:storms_) if(storm.kind==StormKind::Thunderstorm && storm.deficit>50)
+        strikes.push_back({storm.id,storm.generation,cycle,normalized(storm.center+east(storm.center)*(700/config_.radius)),
+            static_cast<double>(cycle)*12,clamp(storm.deficit/250,0.0,1.4)});
+    return strikes;
 }
 } // namespace planet

@@ -30,6 +30,11 @@ struct GlobalSample {
 struct GlobalColumn {
     double vapour=0,cloud=0,temperature=280,rainRate=0;
 };
+struct LightningStrike {
+    std::uint64_t id=0,generation=0,cycle=0;
+    Vec3 direction{};
+    double time=0,strength=0;
+};
 class GlobalWeather {
 public:
     static constexpr int columns=72,rows=36;
@@ -42,6 +47,7 @@ public:
     Vec3 observation(StormKind kind) const;
     std::optional<Storm> strongest(StormKind kind) const;
     double flash(Vec3 direction) const;
+    std::vector<LightningStrike> lightning() const;
     double elapsed() const { return elapsed_+pending_; }
     double effectsTime() const { return effects_; }
     std::uint64_t steps() const { return steps_; }

@@ -27,6 +27,8 @@ struct ViewState {
     bool floraInfo=true;
     SurfaceStyle surfaceStyle=SurfaceStyle::Grid;
     WeatherLayer weatherLayer=WeatherLayer::Clouds;
+    double volume=.55;
+    bool audioAvailable=false;
 };
 class Renderer {
 public:

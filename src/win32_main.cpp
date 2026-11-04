@@ -1,4 +1,5 @@
 #include "planet/renderer.hpp"
+#include "planet/win32_audio.hpp"
 #include <shellapi.h>
 #include <chrono>
 #include <fstream>
@@ -23,6 +24,9 @@ struct Options {
     double globalHours=0;
     std::optional<StormKind> storm;
     WeatherLayer weatherLayer=WeatherLayer::Clouds;
+    bool sound=true;
+    double volume=.55;
+    std::filesystem::path audioCapture;
     SurfaceStyle surfaceStyle=SurfaceStyle::Grid;
     std::filesystem::path capture, report;
 };
@@ -52,6 +56,13 @@ Options parseOptions() {
             else if(arg==L"--globe") options.globe=true;
             else if(arg==L"--no-detail") options.detail=false;
             else if(arg==L"--no-weather") options.wind=false;
+            else if(arg==L"--no-sound") options.sound=false;
+            else if(arg==L"--audio-capture") options.audioCapture=next();
+            else if(arg==L"--volume") {
+                const auto value=next();std::size_t used=0;const double volume=std::stod(value,&used);
+                if(used!=value.size() || !std::isfinite(volume) || volume<0 || volume>100) throw std::invalid_argument("Volume must be 0..100 percent");
+                options.volume=volume/100;
+            }
             else if(arg==L"--no-global-weather") options.globalWeather=false;
             else if(arg==L"--storm") {
                 const auto value=next();options.storm=stormKind(std::string(value.begin(),value.end()));
@@ -136,12 +147,13 @@ World configuredWorld(const Options& options) {
     modules.set(Module::Hydrology,options.water);modules.set(Module::Erosion,options.erosion);
     modules.set(Module::Landforms,options.landforms);modules.set(Module::Caves,options.caves);
     modules.set(Module::WaterMotion,options.waterMotion);modules.set(Module::PlantGrowth,options.plantGrowth);
-    modules.set(Module::GlobalWeather,options.globalWeather);return world;
+    modules.set(Module::GlobalWeather,options.globalWeather);modules.set(Module::Sound,options.sound);return world;
 }
 class Application {
 public:
     explicit Application(Options options) : options_(std::move(options)), world_(configuredWorld(options_)), explorer_(world_), simulation_(world_,explorer_.up(),view_.seconds,options_.waterWind,options_.globalHours) {
         view_.seconds+=simulation_.global.elapsed();view_.weatherLayer=options_.weatherLayer;view_.surfaceStyle=options_.surfaceStyle;
+        view_.volume=options_.volume;
         view_.paused=options_.paused; view_.windTracers=options_.windTracers; view_.headlamp=options_.headlamp;
         simulation_.flora.setYoung(options_.youngFlora);simulation_.flora.setRate(options_.growthRate);
         simulation_.flora.advanceDays(world_,options_.growDays);
@@ -170,6 +182,7 @@ public:
         view_.globe=options_.globe;
     }
     ~Application() {
+        audio_.reset();
         captureMouse(false); renderer_.reset();
         if(context_) { wglMakeCurrent(nullptr,nullptr); wglDeleteContext(context_); }
         if(dc_ && window_) ReleaseDC(window_,dc_);
@@ -197,6 +210,8 @@ public:
         context_=wglCreateContext(dc_);
         if(!context_ || !wglMakeCurrent(dc_,context_)) throw std::runtime_error("Cannot create OpenGL context");
         renderer_=std::make_unique<Renderer>(dc_);
+        audio_=std::make_unique<WavePlayer>(!options_.audioCapture.empty());
+        audio_->update(soundScene(world_,simulation_,explorer_,view_.volume,view_.paused,view_.globe));
         RAWINPUTDEVICE mouse{0x01,0x02,0,window_};
         if(!RegisterRawInputDevices(&mouse,1,sizeof(mouse))) throw std::runtime_error("Cannot register raw mouse input");
         ShowWindow(window_,show); UpdateWindow(window_);
@@ -211,7 +226,7 @@ public:
                 TranslateMessage(&message); DispatchMessageW(&message);
             }
             if(!running_) break;
-            if(IsIconic(window_)) { Sleep(50); last=Clock::now(); continue; }
+            if(IsIconic(window_)) {SoundScene quiet;audio_->update(quiet);Sleep(50);last=Clock::now();continue;}
             const auto now=Clock::now();
             const double elapsed=std::chrono::duration<double>(now-last).count();
             last=now;
@@ -230,6 +245,9 @@ public:
             }
             explorer_.update(world_,input,dt,&simulation_.water,&simulation_.motion,&simulation_.flora);
             simulation_.advance(world_,explorer_.up(),modelDt);
+            auto acoustics=soundScene(world_,simulation_,explorer_,view_.volume,view_.paused,view_.globe);
+            if(!focused_) acoustics.audible=false;
+            audio_->update(acoustics);view_.audioAvailable=audio_->available();
             const auto renderStart=Clock::now();
             renderer_->draw(world_,explorer_,simulation_,view_);
             const double renderMs=std::chrono::duration<double,std::milli>(Clock::now()-renderStart).count();
@@ -244,6 +262,7 @@ public:
             if(!SwapBuffers(dc_)) throw std::runtime_error("SwapBuffers failed");
             Sleep(8);
         }
+        audio_->stop();if(!options_.audioCapture.empty()) audio_->saveCapture(options_.audioCapture);
         if(!options_.report.empty()) {
             std::ofstream out(options_.report);
             if(!out) throw std::runtime_error("Cannot open smoke report");
@@ -263,6 +282,10 @@ public:
                 << "\nyoung_flora=" << simulation_.flora.young() << "\nflora_panel=" << view_.floraInfo
                 << "\nflora_plants=" << renderer_->plantCount() << "\nmarine_plants=" << renderer_->marineCount()
                 << "\nflora_species=" << renderer_->plantSpeciesCount() << "\nflora_height_sum_m=" << renderer_->plantHeightSum() << '\n';
+            out << "audio_device_opened=" << audio_->available() << "\naudio_error=" << audio_->error()
+                << "\naudio_frames=" << audio_->frames() << "\naudio_submitted_buffers=" << audio_->submitted()
+                << "\naudio_completed_buffers=" << audio_->completed() << "\naudio_peak_pcm=" << audio_->peak()
+                << "\naudio_thunder_events=" << audio_->thunderCount() << "\naudio_volume=" << view_.volume << '\n';
             const auto air=simulation_.weather.sample(explorer_.up()); const auto water=simulation_.weather.budget();
             const auto synoptic=simulation_.global.sample(explorer_.up());const auto globalWater=simulation_.global.budget();
             out << "global_enabled=" << simulation_.global.enabled() << "\nglobal_elapsed_s=" << simulation_.global.elapsed()
@@ -400,6 +423,9 @@ private:
         else if(key=='E') view_.floraInfo=!view_.floraInfo;
         else if(key=='I') world_.modules().toggle(Module::PlantGrowth);
         else if(key=='Q') world_.modules().toggle(Module::GlobalWeather);
+        else if(key==VK_F4) world_.modules().toggle(Module::Sound);
+        else if(key==VK_F5) view_.volume=std::max(0.0,view_.volume-.1);
+        else if(key==VK_F6) view_.volume=std::min(1.0,view_.volume+.1);
         else if(key==VK_F3) view_.weatherLayer=static_cast<WeatherLayer>((static_cast<unsigned>(view_.weatherLayer)+1)%4);
         else if(key==VK_F2) {
             constexpr std::array<StormKind,3> tour{StormKind::Hurricane,StormKind::Cyclone,StormKind::Thunderstorm};
@@ -469,7 +495,7 @@ private:
                 auto* info=reinterpret_cast<MINMAXINFO*>(lParam);
                 info->ptMinTrackSize={960,640}; return 0;
             }
-            case WM_ACTIVATEAPP: if(!wParam) app->captureMouse(false); return 0;
+            case WM_ACTIVATEAPP: app->focused_=wParam!=0;if(!wParam) app->captureMouse(false);return 0;
             case WM_LBUTTONDOWN: app->captureMouse(true); return 0;
             case WM_KEYDOWN:
                 if(!(lParam&(1LL<<30)) && app->renderer_) app->key(wParam);
@@ -497,7 +523,9 @@ private:
     HDC dc_=nullptr;
     HGLRC context_=nullptr;
     std::unique_ptr<Renderer> renderer_;
+    std::unique_ptr<WavePlayer> audio_;
     bool running_=true;
+    bool focused_=true;
     std::size_t landmarkIndex_=0;
     std::size_t stormIndex_=0;
 };

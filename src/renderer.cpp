@@ -851,15 +851,15 @@ void Renderer::drawWeather(const World& world,const Explorer& explorer,const Sim
     const double flash=simulation.global.flash(explorer.up());
     if(flash>0) {
         glDisable(GL_FOG);glLineWidth(3);glColor4f(.82f,.88f,1,static_cast<float>(std::min(1.0,flash*2)));
-        for(const auto& storm:simulation.global.storms()) {
-            if(storm.kind!=StormKind::Thunderstorm || storm.deficit<50 || length(storm.center-explorer.up())*world.config().radius>25000) continue;
-            const auto strike=normalized(storm.center+east(storm.center)*(700/world.config().radius));
+        for(const auto& event:simulation.global.lightning()) {
+            if(length(event.direction-explorer.up())*world.config().radius>25000) continue;
+            const auto strike=event.direction;
             const double ground=world.surface(strike);glBegin(GL_LINE_STRIP);
-            const auto tick=static_cast<std::uint64_t>(simulation.global.effectsTime()/12);
+            const auto tick=event.cycle;
             for(unsigned i=0;i<=18;++i) {
                 const double height=3000*(1-static_cast<double>(i)/18),jitter=i==18 ? 0 : 110;
                 const auto p=local(strike*(world.config().radius+ground+height)-origin+
-                    east(strike)*((randomUnit(storm.id+tick*31+i)-.5)*jitter)+north(strike)*((randomUnit(storm.id+tick*31+i+91)-.5)*jitter));
+                    east(strike)*((randomUnit(event.id+tick*31+i)-.5)*jitter)+north(strike)*((randomUnit(event.id+tick*31+i+91)-.5)*jitter));
                 glVertex3d(p.x,p.y,p.z);if(i) ++lightningCount_;
             }
             glEnd();
@@ -989,19 +989,19 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         const auto m=static_cast<Module>(i);
         const bool on=world.modules().enabled(m);
         const float y=145+14*static_cast<float>(i);
-        const std::string key=i<10 ? std::to_string((i+1)%10) : (i==10 ? "M" : (i==11 ? "C" : (i==12 ? "K" : (i==13 ? "I" : "Q"))));
+        const std::string key=i<10 ? std::to_string((i+1)%10) : (i==10 ? "M" : (i==11 ? "C" : (i==12 ? "K" : (i==13 ? "I" : (i==14 ? "Q" : "F4")))));
         text(w-272,y,"["+key+"] "+std::string(moduleNames[i]),on?white:muted);
         text(w-90,y,on ? "ON" : (world.modules().requested(m) ? "WAIT" : "OFF"),on?mint:muted);
     }
     text(w-272,367,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
     rect(22,h-51,w-44,29,panel,0.9f);
-    text(35,h-31,(view.captured ? "ESC release mouse" : "CLICK to look") + std::string("   WASD move  F fly  G grid  TAB globe  F2 storms  F3 map  H help"),white);
+    text(35,h-31,(view.captured ? "ESC release mouse" : "CLICK to look") + std::string("   WASD  F fly  G grid  TAB globe  F2 storms  F3 map  F4 sound"),white);
     if(view.help) {
         rect(w-358,h-232,336,165,panel,0.9f);
         text(w-340,h-208,explorer.flying ? "FLIGHT / "+fixed(explorer.flightSpeed,0)+" m/s" : (explorer.swimming() ? "SWIM / 1.6 m/s + CURRENT" : "WALK / 2.5 m/s"),mint);
         text(w-340,h-185,"SHIFT faster   SPACE jump / up",white);
         text(w-340,h-164,"CTRL down      WHEEL flight speed",white);
-        text(w-340,h-143,"+ / - time     P pause",white);
+        text(w-340,h-143,"+/- time  P pause  F5/F6 volume",white);
         text(w-340,h-122,"HOME landing  1-9/0 M/C/K/I/Q",white);
         text(w-340,h-101,"G surface: "+std::string(surfaceStyleName(view.surfaceStyle)),mint);
         text(w-340,h-80,"X grove  O coast  Y grow  E panel",muted);
@@ -1012,6 +1012,8 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         rect(cx,cy-7,1,5,white,0.7f); rect(cx,cy+3,1,5,white,0.7f);
         text(cx-50,38,"AZ " + fixed(std::fmod(degrees(explorer.heading())+360,360),0) + " deg",white);
     }
+    text(w/2-90,60,!world.modules().enabled(Module::Sound) ? "F4 SOUND OFF" :
+        (!view.audioAvailable ? "SOUND / NO DEVICE" : "SOUND "+fixed(view.volume*100,0)+"% / F5 F6"),muted);
     glDisable(GL_BLEND);
 }
 void Renderer::capture(const std::filesystem::path& path,int width,int height) const {

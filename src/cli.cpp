@@ -1,5 +1,6 @@
 #include "planet/hydrology.hpp"
 #include "planet/surface_detail.hpp"
+#include "planet/sound.hpp"
 #include <charconv>
 #include <cstdlib>
 #include <fstream>
@@ -31,6 +32,9 @@ int main(int argc, char** argv) {
         std::optional<planet::StormKind> storm;
         std::optional<planet::Landform> landmark;
         std::string mapPath;
+        std::string audioPath;
+        double audioSeconds=10,volume=.55;
+        bool audioDurationSet=false,soundEnabled=true;
         bool sample = false,coast=false;
         for (int i=1; i<argc; ++i) {
             const std::string arg = argv[i];
@@ -45,6 +49,16 @@ int main(int argc, char** argv) {
             } else if (arg == "--sample") { lat = number(next()); lon = number(next()); sample = true; }
             else if (arg == "--day") day = number(next());
             else if (arg == "--map") mapPath = next();
+            else if(arg=="--audio") audioPath=next();
+            else if(arg=="--no-sound") soundEnabled=false;
+            else if(arg=="--volume") {
+                volume=number(next())/100;
+                if(volume<0 || volume>1) throw std::invalid_argument("Volume must be 0..100 percent");
+            }
+            else if(arg=="--audio-seconds") {
+                audioSeconds=number(next());audioDurationSet=true;
+                if(audioSeconds<.1 || audioSeconds>60) throw std::invalid_argument("Audio duration must be 0.1..60 seconds");
+            }
             else if (arg == "--coast") coast=true;
             else if(arg=="--no-global-weather") {globalEnabled=false;globalOutput=true;}
             else if(arg=="--storm") {
@@ -85,6 +99,7 @@ int main(int argc, char** argv) {
             else if (arg == "--help") {
                 std::cout << "planet_cli [--seed uint64] [--sample latitude longitude] [--day days_since_perihelion] [--map world.ppm] [--weather 0..3600_seconds] [--water 0..3600_seconds] [--rain-mm-h 0..200] [--landmark cave|canyon|mountains|gorge] [--coast] [--wind-m-s 0..40] [--flora] [--grove] [--young-flora] [--grow-days 0..365250]\n";
                 std::cout << "Global weather: [--storm cyclone|hurricane|thunderstorm] [--global-hours 0..240] [--no-global-weather]\n";
+                std::cout << "Procedural audio: [--audio output.wav] [--audio-seconds 0.1..60] [--volume 0..100] [--no-sound]\n";
                 return 0;
             } else throw std::invalid_argument("Unknown option: " + arg);
         }
@@ -92,8 +107,10 @@ int main(int argc, char** argv) {
         if(weatherSeconds && waterSeconds && *weatherSeconds!=*waterSeconds)
             throw std::invalid_argument("Weather and water share one duration; supply the same seconds");
         if(rainMmH>0 && !waterSeconds) throw std::invalid_argument("--rain-mm-h requires --water duration");
+        if(audioDurationSet && audioPath.empty()) throw std::invalid_argument("--audio-seconds requires --audio output.wav");
         const double duration=waterSeconds.value_or(weatherSeconds.value_or(0));
         planet::World world(config);world.modules().set(planet::Module::GlobalWeather,globalEnabled);
+        world.modules().set(planet::Module::Sound,soundEnabled);
         if(floraOutput && !sample && !coast && !landmark) {
             const auto p=world.findLand();lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
         }
@@ -112,7 +129,7 @@ int main(int argc, char** argv) {
         auto location=planet::direction(planet::radians(lat),planet::radians(lon));
         std::optional<planet::Simulation> model;
         double previewSeconds=0;
-        if(weatherSeconds || waterSeconds || waterWind || coast || globalOutput) {
+        if(weatherSeconds || waterSeconds || waterWind || coast || globalOutput || !audioPath.empty()) {
             model.emplace(world,location,day*86400,waterWind,globalHours);previewSeconds=model->global.elapsed();
             if(storm) {
                 if(!model->global.strongest(*storm)) throw std::runtime_error("No active storm of the requested kind on this planet");
@@ -124,7 +141,21 @@ int main(int argc, char** argv) {
                 const double step=std::min(60.0,remaining);model->advance(world,location,step);remaining-=step;
             }
         }
-        const double finalTime=day*86400+previewSeconds+duration;
+        std::uint64_t audioFrames=0,thunderEvents=0;unsigned audioPeak=0;
+        if(!audioPath.empty()) {
+            planet::Explorer listener(world);listener.teleport(world,location,&model->water);
+            planet::SoundSynth synth(config.seed);audioFrames=static_cast<std::uint64_t>(std::llround(audioSeconds*planet::SoundSynth::sampleRate));
+            std::vector<std::int16_t> pcm(static_cast<std::size_t>(audioFrames*2));
+            for(std::size_t offset=0;offset<pcm.size();) {
+                const auto count=std::min<std::size_t>(2048,pcm.size()-offset);
+                synth.setScene(planet::soundScene(world,*model,listener,volume));synth.render(std::span(pcm).subspan(offset,count));
+                model->advance(world,location,static_cast<double>(count)/(2*planet::SoundSynth::sampleRate));offset+=count;
+            }
+            for(const auto value:pcm) audioPeak=std::max(audioPeak,static_cast<unsigned>(std::abs(static_cast<int>(value))));
+            thunderEvents=synth.thunderCount();planet::writeWave(audioPath,pcm);
+        }
+        const double totalDuration=duration+static_cast<double>(audioFrames)/planet::SoundSynth::sampleRate;
+        const double finalTime=day*86400+previewSeconds+totalDuration;
         if (sample || mapPath.empty() || model) {
             const auto s = world.sample(location,finalTime);
             std::cout << std::fixed << std::setprecision(6)
@@ -138,8 +169,11 @@ int main(int argc, char** argv) {
                       << ",\n  \"insolation_W_m2\": " << s.insolation
                       << ",\n  \"landform\": \"" << planet::landformName(s.landform) << '"'
                       << ",\n  \"biome\": \"" << planet::biomeName(s.biome) << '"';
+            if(!audioPath.empty()) std::cout << ",\n  \"audio\": {\"sample_rate_hz\": " << planet::SoundSynth::sampleRate
+                << ", \"channels\": 2, \"frames\": " << audioFrames << ", \"peak_pcm\": " << audioPeak
+                << ", \"thunder_events\": " << thunderEvents << ", \"volume\": " << volume << '}';
             if(floraOutput) {
-                planet::Flora flora;flora.setYoung(youngFlora);flora.advanceDays(world,std::min(365250.0,growDays+duration/86400));
+                planet::Flora flora;flora.setYoung(youngFlora);flora.advanceDays(world,std::min(365250.0,growDays+totalDuration/86400));
                 auto plants=planet::surfaceObjects(world,location,80,true,&flora);
                 std::erase_if(plants,[](const auto& o) { return o.species==planet::Species::None; });
                 std::sort(plants.begin(),plants.end(),[&](const auto& a,const auto& b) { return planet::length(a.up-location)<planet::length(b.up-location); });
@@ -187,7 +221,7 @@ int main(int argc, char** argv) {
                           << ",\n    \"current_east_m_s\": " << planet::dot(liquid.current,planet::east(location))
                           << ",\n    \"current_north_m_s\": " << planet::dot(liquid.current,planet::north(location)) << "\n  }";
                 const auto air=weather.sample(location); const auto water=weather.budget();
-                std::cout << ",\n  \"weather\": {\n    \"elapsed_s\": " << duration
+                std::cout << ",\n  \"weather\": {\n    \"elapsed_s\": " << totalDuration
                           << ",\n    \"layer_altitude_m\": " << weather.layerAltitude()
                           << ",\n    \"wind_east_m_s\": " << air.wind.east << ",\n    \"wind_north_m_s\": " << air.wind.north
                           << ",\n    \"relative_humidity\": " << air.humidity << ",\n    \"cloud_water_kg_m2\": " << air.cloudWater
@@ -202,7 +236,7 @@ int main(int argc, char** argv) {
                         maximumDepth=std::max(maximumDepth,c.water);
                         maximumChange=std::max(maximumChange,std::abs(c.soil-c.initialSoil));
                     }
-                    std::cout << ",\n  \"surface_water\": {\n    \"elapsed_s\": " << duration
+                    std::cout << ",\n  \"surface_water\": {\n    \"elapsed_s\": " << totalDuration
                         << ",\n    \"experiment_rain_mm_h\": " << rainMmH
                         << ",\n    \"depth_m\": " << ground.depth << ",\n    \"maximum_depth_m\": " << maximumDepth
                         << ",\n    \"flow_east_m_s\": " << ground.velocity.east << ",\n    \"flow_north_m_s\": " << ground.velocity.north

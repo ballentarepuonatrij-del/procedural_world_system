@@ -1,6 +1,7 @@
 #include "planet/navigation.hpp"
 #include "planet/weather.hpp"
 #include "planet/hydrology.hpp"
+#include "planet/sound.hpp"
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -34,6 +35,102 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
     throw std::runtime_error("Walkable cave route was blocked");
 }
 void registerTests() {
+    test("sound","Acoustic propagation uses temperature and distance with physical units",[] {
+        near(speedOfSound(293.15),343.23369365,.000001,"Dry-air sound speed at 20 C");
+        near(thunderDelay(1000,293.15),1000/speedOfSound(293.15),1e-12,"Propagation in seconds");
+        require(thunderDelay(1000,270)>thunderDelay(1000,310),"Cold air gives later thunder");
+        for(double t:{149.,371.,std::numeric_limits<double>::quiet_NaN()}) {
+            bool rejected=false;try {(void)speedOfSound(t);}catch(const std::invalid_argument&){rejected=true;}require(rejected,"Invalid temperature rejected");
+        }
+    });
+    test("sound","Synthesis is deterministic and independent of output buffer partition",[] {
+        SoundScene s;s.audible=true;s.wind=.8;s.rain=.6;s.water=.5;s.rustle=.4;
+        SoundSynth a,b;a.setScene(s);b.setScene(s);std::vector<std::int16_t> x(48000),y(x.size());a.render(x);
+        for(std::size_t i=0;i<y.size();) {const auto n=std::min<std::size_t>(734,y.size()-i);b.render(std::span(y).subspan(i,n));i+=n;}
+        require(x==y,"Exactly the same PCM for different block lengths");
+        s.seed=73;SoundSynth c(s.seed);c.setScene(s);c.render(y);require(x!=y,"Seed changes procedural microstructure");
+    });
+    test("sound","Quiet controls produce silence and the maximum mix stays below PCM clipping",[] {
+        SoundSynth synth;std::vector<std::int16_t> pcm(96000);synth.render(pcm);
+        require(std::all_of(pcm.begin(),pcm.end(),[](auto n){return n==0;}),"Initial scene is silent");
+        SoundScene s;s.audible=true;s.volume=1;s.wind=s.rain=s.water=s.rustle=1;
+        for(unsigned i=1;i<=8;++i) s.strikes.push_back({i,0,0,2,0});
+        synth.setScene(s);synth.render(pcm);int peak=0;for(auto v:pcm)peak=std::max(peak,std::abs(static_cast<int>(v)));
+        require(peak>1000 && peak<29491,"Audible bounded mix with eight overlapping thunder voices");
+        require(synth.activeThunder()<=8,"Voice count is bounded");
+    });
+    test("sound","Wind intensity follows the physical control instead of a fixed recording",[] {
+        const auto energy=[](const auto& pcm) {double sum=0;for(auto v:pcm) sum+=static_cast<double>(v)*v;return sum;};
+        SoundScene s;s.audible=true;s.wind=.1;SoundSynth quiet;quiet.setScene(s);std::vector<std::int16_t> low(96000),high(low.size());quiet.render(low);
+        s.wind=1;SoundSynth storm;storm.setScene(s);storm.render(high);
+        require(energy(high)>energy(low)*25,"Strong wind has substantially greater energy");
+    });
+    test("sound","Stereo direction follows listener orientation",[] {
+        SoundScene s;s.audible=true;s.wind=1;s.windPan=1;SoundSynth synth;synth.setScene(s);std::vector<std::int16_t> pcm(192000);synth.render(pcm);
+        double left=0,right=0;for(std::size_t i=48000;i<pcm.size();i+=2){left+=static_cast<double>(pcm[i])*pcm[i];right+=static_cast<double>(pcm[i+1])*pcm[i+1];}
+        require(right>left*1.8,"Wind on the right has greater right-channel energy");
+        s.windPan=-1;SoundSynth reversed;reversed.setScene(s);reversed.render(pcm);left=right=0;
+        for(std::size_t i=48000;i<pcm.size();i+=2){left+=static_cast<double>(pcm[i])*pcm[i];right+=static_cast<double>(pcm[i+1])*pcm[i+1];}
+        require(left>right*1.8,"Turning changes the stereo balance");
+    });
+    test("sound","Underwater filtering reduces high frequencies beyond simple attenuation",[] {
+        SoundScene s;s.audible=true;s.rain=1;s.volume=1;SoundSynth dry;dry.setScene(s);std::vector<std::int16_t> a(192000),b(a.size());dry.render(a);
+        s.underwater=true;SoundSynth wet;wet.setScene(s);wet.render(b);
+        const auto spectrum=[](const auto& pcm) {double energy=0,difference=0;for(std::size_t i=48002;i<pcm.size();i+=2) {
+            const double v=pcm[i],d=v-pcm[i-2];energy+=v*v;difference+=d*d;}return std::array{energy,difference/energy};};
+        const auto x=spectrum(a),y=spectrum(b);require(y[0]<x[0]*.1 && y[1]<x[1]*.15,"Water attenuates and removes high-frequency energy");
+    });
+    test("sound","Thunder arrives after travel time and repeated snapshots cannot replay it",[] {
+        SoundScene s;s.audible=true;s.volume=1;s.temperature=293.15;s.strikes.push_back({91,speedOfSound(s.temperature),.7,1,0});
+        SoundSynth synth;synth.setScene(s);std::vector<std::int16_t> pcm(192000);synth.render(pcm);
+        require(std::all_of(pcm.begin(),pcm.begin()+96000,[](auto n){return n==0;}),"No sound before one-second propagation delay");
+        auto first=std::find_if(pcm.begin(),pcm.end(),[](auto n){return n!=0;});require(first!=pcm.end(),"Thunder becomes audible");
+        require(std::distance(pcm.begin(),first)<98000,"Attack starts promptly after arrival");
+        synth.setScene(s);require(synth.thunderCount()==1,"Same strike has one audio voice");
+        s.strikes[0].key=92;s.strikes[0].age=10;synth.setScene(s);require(synth.thunderCount()==1,"Missed old thunder is not replayed after a fast clock or teleport");
+    });
+    test("sound","Muting fades to exact silence and removes pending thunder",[] {
+        SoundScene s;s.audible=true;s.wind=1;s.strikes.push_back({71,3000,0,1,0});SoundSynth synth;synth.setScene(s);
+        std::vector<std::int16_t> pcm(96000);synth.render(pcm);s.audible=false;synth.setScene(s);synth.render(pcm);
+        require(synth.activeThunder()==0,"Pending thunder is cancelled on mute or pause");
+        require(std::all_of(pcm.begin()+72000,pcm.end(),[](auto n){return n==0;}),"Fade settles to digital silence");
+        s.audible=true;s.volume=0;synth.setScene(s);synth.render(pcm);require(std::all_of(pcm.begin(),pcm.end(),[](auto n){return n==0;}),"Zero volume stays silent");
+        s.strikes[0].key=72;synth.setScene(s);require(synth.activeThunder()==1,"New strike can be queued");
+        s.thunderEnabled=false;synth.setScene(s);require(synth.activeThunder()==0,"Turning off the cloud/global source cancels queued thunder");
+    });
+    test("sound","Sound scene follows weather water and module dependencies",[] {
+        World w;GlobalWeather catalog(w);const auto p=catalog.observation(StormKind::Hurricane);Simulation sim(w,p,0);Explorer e(w);e.teleport(w,p,&sim.water);
+        auto s=soundScene(w,sim,e);require(s.audible && s.wind>.8 && s.rain>0 && s.water>.5,"Storm drives all ambient controls");
+        require(!soundScene(w,sim,e,.5,true).audible && !soundScene(w,sim,e,.5,false,true).audible,"Pause and orbital view are silent");
+        w.modules().set(Module::Sound,false);require(!soundScene(w,sim,e).audible,"Sound module can be disabled independently");
+        w.modules().set(Module::Sound,true);w.modules().set(Module::Clouds,false);sim.advance(w,p,0);s=soundScene(w,sim,e);
+        require(s.rain==0 && s.wind>0,"Cloud switch silences rain while retaining wind");
+        w.modules().set(Module::Atmosphere,false);sim.advance(w,p,0);require(!soundScene(w,sim,e).audible,"No airborne ambience in vacuum");
+    });
+    test("sound","Thunder references the same world strike as the lightning renderer",[] {
+        World w;GlobalWeather catalog(w);const auto p=catalog.observation(StormKind::Thunderstorm);Simulation sim(w,p,0);Explorer e(w);e.teleport(w,p,&sim.water);
+        const auto s=soundScene(w,sim,e);require(!s.strikes.empty(),"Local convective strike is audible");
+        require(s.strikes.front().distance>690 && s.strikes.front().distance<1000,"Nearby lightning foot includes terrain and eye height");
+        near(s.strikes.front().distance,length(s.strikes.front().source-s.listener),0,"Three-dimensional propagation distance");
+        const double oldPan=s.strikes.front().pan;e.look(pi,0);const auto other=soundScene(w,sim,e);
+        near(other.strikes.front().pan,-oldPan,1e-9,"Turning reverses the world-fixed source direction");
+        near(other.strikes.front().distance,s.strikes.front().distance,0,"Turning does not alter travel distance");
+    });
+    test("sound","An existing thunder voice stays fixed in the world when the listener turns",[] {
+        SoundScene s;s.audible=true;s.volume=1;s.strikes.push_back({0,1000,1,1,0,{1000,0,0}});
+        SoundSynth synth;synth.setScene(s);std::vector<std::int16_t> before(336000),after(48000);synth.render(before);
+        s.right={-1,0,0};synth.setScene(s);synth.render(after);
+        double l=0,r=0;for(std::size_t i=24000;i<after.size();i+=2){l+=static_cast<double>(after[i])*after[i];r+=static_cast<double>(after[i+1])*after[i+1];}
+        require(l>r*10,"Sound moves from right to left after a half turn");require(synth.thunderCount()==1,"Zero event key is valid and deduplicated");
+    });
+    test("sound","Invalid acoustic controls and malformed buffers are rejected",[] {
+        SoundSynth synth;SoundScene s;
+        for(double volume:{-1.,2.,std::numeric_limits<double>::quiet_NaN()}) {
+            s.volume=volume;bool rejected=false;try{synth.setScene(s);}catch(const std::invalid_argument&){rejected=true;}require(rejected,"Invalid volume rejected");
+        }
+        std::array<std::int16_t,3> broken{};bool rejected=false;try{synth.render(broken);}catch(const std::invalid_argument&){rejected=true;}
+        require(rejected,"Incomplete stereo frame rejected");
+    });
     test("global_weather","Spherical areas cover the planet including polar caps",[] {
         constexpr double radius=6371000;double area=0;
         for(int y=0;y<36;++y) {const double a=sphericalCellArea(y,72,36,radius);require(a>0,"Positive polar area");area+=72*a;}

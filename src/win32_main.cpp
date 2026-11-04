@@ -1,9 +1,13 @@
 #include "planet/renderer.hpp"
 #include "planet/win32_audio.hpp"
+#include "planet/win32_dialogs.hpp"
 #include <shellapi.h>
+#include <windowsx.h>
 #include <chrono>
 #include <fstream>
 #include <memory>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -11,6 +15,9 @@ namespace {
 using namespace planet;
 struct Options {
     Config config;
+    Preferences preferences;
+    std::filesystem::path settingsPath;
+    std::string settingsWarning;
     int frames=0;
     bool globe=false, detail=true, wind=true, clouds=true, water=true, erosion=true, paused=false, windTracers=false;
     double weatherSeconds=0, rainMmH=0,walkSeconds=0;
@@ -27,7 +34,7 @@ struct Options {
     bool sound=true;
     double volume=.55;
     std::filesystem::path audioCapture;
-    SurfaceStyle surfaceStyle=SurfaceStyle::Grid;
+    SurfaceStyle surfaceStyle=SurfaceStyle::Natural;
     std::filesystem::path capture, report;
 };
 Options parseOptions() {
@@ -36,17 +43,34 @@ Options parseOptions() {
     if(!argv) throw std::runtime_error("Cannot parse command line");
     Options options;
     try {
+        options.settingsPath=defaultPreferencesPath();
+        for(int i=1;i<argc;++i) if(std::wstring_view(argv[i])==L"--settings") {
+            if(++i>=argc || std::wstring_view(argv[i]).empty()) throw std::invalid_argument("Missing settings path");
+            options.settingsPath=argv[i];
+        }
+        const auto saved=loadPreferences(options.settingsPath);options.preferences=saved.value;options.settingsWarning=saved.warning;
+        options.config.seed=saved.value.seed;options.volume=saved.value.volume/100.0;
+        options.surfaceStyle=saved.value.grid ? SurfaceStyle::Grid : SurfaceStyle::Natural;
+        const auto& modules=saved.value.modules;
+        options.detail=modules.requested(Module::SurfaceDetail);options.wind=modules.requested(Module::Wind);
+        options.clouds=modules.requested(Module::Clouds);options.water=modules.requested(Module::Hydrology);
+        options.erosion=modules.requested(Module::Erosion);options.landforms=modules.requested(Module::Landforms);
+        options.caves=modules.requested(Module::Caves);options.waterMotion=modules.requested(Module::WaterMotion);
+        options.plantGrowth=modules.requested(Module::PlantGrowth);options.globalWeather=modules.requested(Module::GlobalWeather);
+        options.sound=modules.requested(Module::Sound);
         for(int i=1;i<argc;++i) {
             const std::wstring arg=argv[i];
             const auto next=[&]() -> std::wstring {
                 if(++i>=argc) throw std::invalid_argument("Missing command-line value");
                 return argv[i];
             };
-            if(arg==L"--seed") {
-                const auto value=next(); std::size_t used=0;
-                if(value.empty() || value.front()==L'-') throw std::invalid_argument("Invalid seed");
-                options.config.seed=std::stoull(value,&used);
-                if(used!=value.size()) throw std::invalid_argument("Invalid seed");
+            if(arg==L"--settings") { (void)next(); }
+            else if(arg==L"--seed") {
+                const auto value=next();
+                if(value.find_first_not_of(L"0123456789")!=value.npos) throw std::invalid_argument("Invalid seed");
+                const auto seed=parseSeed(std::string(value.begin(),value.end()));
+                if(!seed) throw std::invalid_argument("Invalid seed");
+                options.config.seed=*seed;
             } else if(arg==L"--frames") {
                 const auto value=next(); std::size_t used=0;
                 options.frames=std::stoi(value,&used);
@@ -143,6 +167,7 @@ Options parseOptions() {
 }
 World configuredWorld(const Options& options) {
     World world(options.config);auto& modules=world.modules();
+    modules=options.preferences.modules;
     modules.set(Module::SurfaceDetail,options.detail);modules.set(Module::Wind,options.wind);modules.set(Module::Clouds,options.clouds);
     modules.set(Module::Hydrology,options.water);modules.set(Module::Erosion,options.erosion);
     modules.set(Module::Landforms,options.landforms);modules.set(Module::Caves,options.caves);
@@ -154,6 +179,7 @@ public:
     explicit Application(Options options) : options_(std::move(options)), world_(configuredWorld(options_)), explorer_(world_), simulation_(world_,explorer_.up(),view_.seconds,options_.waterWind,options_.globalHours) {
         view_.seconds+=simulation_.global.elapsed();view_.weatherLayer=options_.weatherLayer;view_.surfaceStyle=options_.surfaceStyle;
         view_.volume=options_.volume;
+        view_.interfaceVisible=options_.preferences.interfaceVisible;
         view_.paused=options_.paused; view_.windTracers=options_.windTracers; view_.headlamp=options_.headlamp;
         simulation_.flora.setYoung(options_.youngFlora);simulation_.flora.setRate(options_.growthRate);
         simulation_.flora.advanceDays(world_,options_.growDays);
@@ -180,6 +206,7 @@ public:
             simulation_.advance(world_,explorer_.up(),0); left-=dt;
         }
         view_.globe=options_.globe;
+        view_.globeCamera.center(explorer_.up());
     }
     ~Application() {
         audio_.reset();
@@ -215,6 +242,8 @@ public:
         RAWINPUTDEVICE mouse{0x01,0x02,0,window_};
         if(!RegisterRawInputDevices(&mouse,1,sizeof(mouse))) throw std::runtime_error("Cannot register raw mouse input");
         ShowWindow(window_,show); UpdateWindow(window_);
+        if(!options_.settingsWarning.empty() && options_.frames==0)
+            MessageBoxW(window_,L"Не удалось прочитать настройки. Использованы стандартные значения. Исходный файл будет заменён только при нажатии ОК в настройках.",L"PlanetLab — Настройки",MB_OK|MB_ICONWARNING);
         using Clock=std::chrono::steady_clock;
         auto last=Clock::now();
         int frames=0;
@@ -228,6 +257,7 @@ public:
             if(!running_) break;
             if(IsIconic(window_)) {SoundScene quiet;audio_->update(quiet);Sleep(50);last=Clock::now();continue;}
             const auto now=Clock::now();
+            if(resetFrameClock_) {last=now;resetFrameClock_=false;}
             const double elapsed=std::chrono::duration<double>(now-last).count();
             last=now;
             const double dt=clamp(elapsed,0.0,0.1);
@@ -243,7 +273,7 @@ public:
                 input.vertical=static_cast<double>(down(VK_SPACE))-static_cast<double>(down(VK_CONTROL));
                 input.sprint=down(VK_SHIFT); input.jump=down(VK_SPACE);
             }
-            explorer_.update(world_,input,dt,&simulation_.water,&simulation_.motion,&simulation_.flora);
+            explorer_.update(world_,input,view_.globe ? 0 : dt,&simulation_.water,&simulation_.motion,&simulation_.flora);
             simulation_.advance(world_,explorer_.up(),modelDt);
             auto acoustics=soundScene(world_,simulation_,explorer_,view_.volume,view_.paused,view_.globe);
             if(!focused_) acoustics.audible=false;
@@ -271,6 +301,10 @@ public:
                 << "\nlongitude=" << degrees(longitude(explorer_.up())) << "\naltitude_m=" << explorer_.altitude()
                 << "\nheading_deg=" << degrees(explorer_.heading()) << "\npitch_deg=" << degrees(explorer_.pitch())
                 << "\nflight=" << explorer_.flying << "\nglobe=" << view_.globe
+                << "\ncursor_captured=" << view_.captured << "\ninterface_visible=" << view_.interfaceVisible
+                << "\nglobe_latitude=" << degrees(latitude(view_.globeCamera.outward)) << "\nglobe_longitude=" << degrees(longitude(view_.globeCamera.outward))
+                << "\nsettings_opened=" << settingsOpened_ << "\nsettings_saved=" << settingsSaved_
+                << "\nteleport_requests=" << teleportRequests_ << "\nteleports_confirmed=" << teleportsConfirmed_ << "\nseed_changes=" << seedChanges_
                 << "\nunderground=" << explorer_.underground() << "\nheadlamp=" << view_.headlamp
                 << "\ncave_triangles=" << renderer_->caveCount() << "\nlandform=" << landformName(world_.relief(explorer_.up()).type)
                 << "\nsurface_style=" << surfaceStyleName(view_.surfaceStyle)
@@ -329,6 +363,68 @@ public:
         return 0;
     }
 private:
+    Preferences currentPreferences() const {
+        Preferences p;p.modules=world_.modules();p.grid=view_.surfaceStyle==SurfaceStyle::Grid;
+        p.interfaceVisible=view_.interfaceVisible;p.volume=static_cast<unsigned>(std::lround(view_.volume*100));
+        p.seed=world_.config().seed;return p;
+    }
+    void endGlobeDrag() {
+        globeDragging_=false;globeClick_.reset();
+        if(!view_.captured && GetCapture()==window_) ReleaseCapture();
+    }
+    void modalAction(const std::function<void()>& action) {
+        endGlobeDrag();captureMouse(false);
+        if(audio_) audio_->update(soundScene(world_,simulation_,explorer_,view_.volume,true,view_.globe));
+        try {action();}
+        catch(const std::exception& error) {MessageBoxA(window_,error.what(),"PlanetLab",MB_OK|MB_ICONERROR);}
+        resetFrameClock_=true;
+    }
+    void openSettings() {
+        modalAction([&] {
+            ++settingsOpened_;
+            settingsDialog(window_,currentPreferences(),[&](const Preferences& next) {
+                savePreferences(options_.settingsPath,next);
+                world_.modules()=next.modules;view_.surfaceStyle=next.grid ? SurfaceStyle::Grid : SurfaceStyle::Natural;
+                view_.interfaceVisible=next.interfaceVisible;view_.volume=next.volume/100.0;
+                simulation_.advance(world_,explorer_.up(),0);
+                explorer_.update(world_,{},.001,&simulation_.water,&simulation_.motion,&simulation_.flora);
+                renderer_->invalidate();++settingsSaved_;
+            });
+        });
+    }
+    void openSeed() {
+        modalAction([&] {
+            seedDialog(window_,world_.config().seed,[&](std::uint64_t seed) {
+                auto preferences=currentPreferences();preferences.seed=seed;
+                if(seed==world_.config().seed) {savePreferences(options_.settingsPath,preferences);return;}
+                // Prepare the new world before replacing either live state or saved settings.
+                auto config=world_.config();config.seed=seed;World nextWorld(config);nextWorld.modules()=world_.modules();
+                Explorer nextExplorer(nextWorld);
+                Simulation nextSimulation(nextWorld,nextExplorer.up(),view_.seconds,simulation_.motion.windExperiment());
+                nextSimulation.setRainExperiment(simulation_.rainExperiment());
+                nextSimulation.flora.setRate(simulation_.flora.rate());nextSimulation.flora.setYoung(simulation_.flora.young());
+                savePreferences(options_.settingsPath,preferences);
+                world_=std::move(nextWorld);explorer_=std::move(nextExplorer);simulation_=std::move(nextSimulation);
+                explorer_.teleport(world_,explorer_.up(),&simulation_.water);orientLanding();noon();
+                view_.globeCamera.center(explorer_.up());renderer_->invalidate();++seedChanges_;
+            });
+        });
+    }
+    void globeTravel(int x,int y) {
+        if(globeHudHit(view_,x,y)) return;
+        const auto target=view_.globeCamera.pick(x,y,view_.width,view_.height);if(!target) return;
+        modalAction([&] {
+            ++teleportRequests_;
+            std::wostringstream text;text << std::fixed << std::setprecision(4)
+                << L"Исследователь будет перенесён в выбранную точку.\n\nШирота: " << degrees(latitude(*target))
+                << L"°\nДолгота: " << degrees(longitude(*target)) << L"°\n"
+                << (world_.climatology(*target).ocean ? L"Место: океан. Вы окажетесь у поверхности воды." : L"Место: суша. Вы окажетесь на поверхности.")
+                << L"\n\nПродолжить перемещение?";
+            if(MessageBoxW(window_,text.str().c_str(),L"PlanetLab — Перемещение",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES) return;
+            simulation_.advance(world_,*target,0);explorer_.flying=false;explorer_.teleport(world_,*target,&simulation_.water);
+            orientLanding();view_.globe=false;renderer_->invalidate();++teleportsConfirmed_;
+        });
+    }
     bool visitStorm(StormKind kind) {
         if(!simulation_.global.strongest(kind)) return false;
         const auto p=simulation_.global.observation(kind);
@@ -410,22 +506,28 @@ private:
             ClientToScreen(window_,&top); ClientToScreen(window_,&bottom);
             RECT screen{top.x,top.y,bottom.x,bottom.y}; ClipCursor(&screen);
             ShowCursor(FALSE);
-        } else { ReleaseCapture(); ClipCursor(nullptr); ShowCursor(TRUE); }
+        } else { if(GetCapture()==window_) ReleaseCapture(); ClipCursor(nullptr); ShowCursor(TRUE); }
     }
     void key(WPARAM key) {
-        if(key==VK_ESCAPE) captureMouse(false);
+        if((GetKeyState(VK_CONTROL)&0x8000)!=0) {
+            if(key=='U') view_.interfaceVisible=!view_.interfaceVisible;
+            else if(key=='S') openSeed();
+            return;
+        }
+        if(key==VK_ESCAPE) {
+            if(view_.captured) captureMouse(false);
+            else openSettings();
+        }
         else if(key=='F') explorer_.flying=!explorer_.flying;
-        else if(key==VK_TAB) view_.globe=!view_.globe;
+        else if(key==VK_TAB) {
+            endGlobeDrag();captureMouse(false);view_.globe=!view_.globe;
+            if(view_.globe) view_.globeCamera.center(explorer_.up());
+        }
         else if(key=='H') view_.help=!view_.help;
         else if(key=='V') view_.windTracers=!view_.windTracers;
         else if(key=='U') view_.waterTracers=!view_.waterTracers;
         else if(key=='L') view_.headlamp=!view_.headlamp;
         else if(key=='E') view_.floraInfo=!view_.floraInfo;
-        else if(key=='I') world_.modules().toggle(Module::PlantGrowth);
-        else if(key=='Q') world_.modules().toggle(Module::GlobalWeather);
-        else if(key==VK_F4) world_.modules().toggle(Module::Sound);
-        else if(key==VK_F5) view_.volume=std::max(0.0,view_.volume-.1);
-        else if(key==VK_F6) view_.volume=std::min(1.0,view_.volume+.1);
         else if(key==VK_F3) view_.weatherLayer=static_cast<WeatherLayer>((static_cast<unsigned>(view_.weatherLayer)+1)%4);
         else if(key==VK_F2) {
             constexpr std::array<StormKind,3> tour{StormKind::Hurricane,StormKind::Cyclone,StormKind::Thunderstorm};
@@ -446,37 +548,12 @@ private:
             constexpr std::array<Landform,4> tour{Landform::Karst,Landform::Canyon,Landform::Mountains,Landform::Gorge};
             visitLandmark(tour[landmarkIndex_++%tour.size()]);
         }
-        else if(key=='M' || key=='C' || key=='K') {
-            world_.modules().toggle(key=='M' ? Module::Landforms : (key=='C' ? Module::Caves : Module::WaterMotion)); renderer_->invalidate();
-        }
         else if(key=='B') simulation_.setRainExperiment(simulation_.rainExperiment()<1 ? 30 : (simulation_.rainExperiment()<60 ? 80 : 0));
-        else if(key=='G') {
-            switch(view_.surfaceStyle) {
-                case SurfaceStyle::Grid: view_.surfaceStyle=SurfaceStyle::Wireframe; break;
-                case SurfaceStyle::Wireframe: view_.surfaceStyle=SurfaceStyle::Natural; break;
-                default: view_.surfaceStyle=SurfaceStyle::Grid; break;
-            }
-        }
         else if(key=='P') view_.paused=!view_.paused;
         else if(key=='T') noon();
         else if(key==VK_OEM_PLUS || key==VK_ADD) view_.timeScale=std::min(maximumTimeScale(),view_.timeScale*2);
         else if(key==VK_OEM_MINUS || key==VK_SUBTRACT) view_.timeScale=std::max(1.0,view_.timeScale/2);
         else if(key==VK_HOME) { explorer_.teleport(world_,world_.findLand()); simulation_.advance(world_,explorer_.up(),0); explorer_.teleport(world_,explorer_.up(),&simulation_.water); orientLanding(); }
-        else if(key=='R') {
-            auto config=world_.config(); ++config.seed;
-            const auto modules=world_.modules();
-            world_=World(config); world_.modules()=modules;
-            explorer_=Explorer(world_);
-            const double rain=simulation_.rainExperiment(); const auto wind=simulation_.motion.windExperiment();
-            const double growth=simulation_.flora.rate();const bool young=simulation_.flora.young();
-            simulation_=Simulation(world_,explorer_.up(),view_.seconds,wind); simulation_.setRainExperiment(rain);
-            simulation_.flora.setRate(growth);simulation_.flora.setYoung(young);
-            explorer_.teleport(world_,explorer_.up(),&simulation_.water); orientLanding(); noon(); renderer_->invalidate();
-        } else if((key>='1' && key<='9') || key=='0') {
-            const auto module=static_cast<Module>(key=='0' ? 9 : key-'1');
-            world_.modules().toggle(module);
-            if(module<Module::Wind || module==Module::Hydrology) renderer_->invalidate();
-        }
     }
     static LRESULT CALLBACK procedure(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
         Application* app=reinterpret_cast<Application*>(GetWindowLongPtrW(window,GWLP_USERDATA));
@@ -495,8 +572,39 @@ private:
                 auto* info=reinterpret_cast<MINMAXINFO*>(lParam);
                 info->ptMinTrackSize={960,640}; return 0;
             }
-            case WM_ACTIVATEAPP: app->focused_=wParam!=0;if(!wParam) app->captureMouse(false);return 0;
-            case WM_LBUTTONDOWN: app->captureMouse(true); return 0;
+            case WM_ACTIVATEAPP:
+                app->focused_=wParam!=0;
+                if(!wParam) {app->captureMouse(false);app->endGlobeDrag();}return 0;
+            case WM_CAPTURECHANGED:
+                app->globeDragging_=false;app->globeClick_.reset();
+                if(app->view_.captured) app->captureMouse(false);
+                return 0;
+            case WM_LBUTTONDOWN:
+                if(app->view_.globe) {
+                    if(!app->globeDragging_) app->globeClick_=POINT{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};
+                } else app->captureMouse(true);
+                return 0;
+            case WM_LBUTTONUP: {
+                const auto start=app->globeClick_;app->globeClick_.reset();
+                const int x=GET_X_LPARAM(lParam),y=GET_Y_LPARAM(lParam);
+                if(app->view_.globe && !app->globeDragging_ && start && std::abs(x-start->x)<=4 && std::abs(y-start->y)<=4)
+                    app->globeTravel(x,y);
+                return 0;
+            }
+            case WM_RBUTTONDOWN:
+                if(app->view_.globe) {
+                    app->globeClick_.reset();app->globeDragging_=true;
+                    app->globeMouse_={GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};SetCapture(window);
+                }
+                return 0;
+            case WM_RBUTTONUP: app->endGlobeDrag();return 0;
+            case WM_MOUSEMOVE:
+                if(app->globeDragging_) {
+                    if(!(wParam&MK_RBUTTON)) {app->endGlobeDrag();return 0;}
+                    const POINT point{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};
+                    app->view_.globeCamera.drag(point.x-app->globeMouse_.x,point.y-app->globeMouse_.y);app->globeMouse_=point;
+                }
+                return 0;
             case WM_KEYDOWN:
                 if(!(lParam&(1LL<<30)) && app->renderer_) app->key(wParam);
                 return 0;
@@ -526,6 +634,10 @@ private:
     std::unique_ptr<WavePlayer> audio_;
     bool running_=true;
     bool focused_=true;
+    bool resetFrameClock_=false,globeDragging_=false;
+    POINT globeMouse_{};
+    std::optional<POINT> globeClick_;
+    unsigned settingsOpened_=0,settingsSaved_=0,teleportRequests_=0,teleportsConfirmed_=0,seedChanges_=0;
     std::size_t landmarkIndex_=0;
     std::size_t stormIndex_=0;
 };

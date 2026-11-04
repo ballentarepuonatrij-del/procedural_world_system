@@ -539,8 +539,8 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
     glLightfv(GL_LIGHT0,GL_DIFFUSE,sunColor);
     if(view.globe) {
         if(globeDirty_ || std::abs(view.seconds-lastGlobeTime_)>3600) buildGlobe(world,view.seconds);
-        perspective(radians(44),static_cast<double>(view.width)/view.height,0.1,20);
-        camera(explorer.up()*3.25,-explorer.up(),north(explorer.up()));
+        perspective(GlobeCamera::fov,static_cast<double>(view.width)/view.height,0.1,20);
+        camera(view.globeCamera.outward*GlobeCamera::distance,-view.globeCamera.outward,view.globeCamera.up);
         const GLfloat light[]{static_cast<float>(sun.sunDirection.x),static_cast<float>(sun.sunDirection.y),static_cast<float>(sun.sunDirection.z),0};
         glLightfv(GL_LIGHT0,GL_POSITION,light);
         const GLfloat ambient[]{0.12f,0.14f,0.16f,1};
@@ -898,6 +898,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
     const float w=static_cast<float>(view.width), h=static_cast<float>(view.height);
     if(!view.globe && !explorer.underwater() && !explorer.underground())
         rect(0,0,w,h,{.75f,.82f,1},static_cast<float>(simulation.global.flash(explorer.up())*.15));
+    if(!view.interfaceVisible) {glDisable(GL_BLEND);return;}
     rect(22,22,292,86,panel,0.9f); rect(22,22,3,86,mint);
     text(40,57,"PLANETLAB",white,true);
     text(41,80,"PROCEDURAL FIELD OBSERVATORY",muted);
@@ -948,14 +949,14 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
             text(40,301,"AGE "+fixed(p.plant.ageDays/365.25,2)+" y  HEIGHT "+fixed(p.height,2)+" m",white);
         } else text(40,284,"No visible plants nearby",muted);
         text(40,323,"BIO +"+fixed(simulation.flora.days(),1)+" d  "+(simulation.flora.rate()==1 ? "1x" : fixed(simulation.flora.rate()/86400,0)+"d/s [EXP]"),white);
-        text(40,346,"Y speed / I growth / E water",muted);
+        text(40,346,"Y growth speed / E water",muted);
     } else if(liquid.ocean) {
         rect(22,238,292,120,panel,0.90f);
         text(40,261,"OCEAN / WIND AND WAVES",mint);
         text(40,283,"HS "+fixed(simulation.motion.significantHeight(),2)+" m   FLOW "+fixed(length(liquid.current),3)+" m/s",white);
         text(40,305,"WIND10 "+fixed(length(simulation.motion.forcingWind()),1)+" m/s "+(simulation.motion.windExperiment() ? "[EXPERIMENT]" : "[ESTIMATE]"),white);
         text(40,327,"N wind: natural / 8 / 16 m/s",white);
-        text(40,351,"K motion | U current tracers",muted);
+        text(40,351,"U current tracers / ESC settings",muted);
     } else if(water.enabled() && water.sample(explorer.up()).available) {
         const auto ground=water.sample(explorer.up());
         rect(22,238,292,120,panel,0.90f);
@@ -989,21 +990,21 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         const auto m=static_cast<Module>(i);
         const bool on=world.modules().enabled(m);
         const float y=145+14*static_cast<float>(i);
-        const std::string key=i<10 ? std::to_string((i+1)%10) : (i==10 ? "M" : (i==11 ? "C" : (i==12 ? "K" : (i==13 ? "I" : (i==14 ? "Q" : "F4")))));
-        text(w-272,y,"["+key+"] "+std::string(moduleNames[i]),on?white:muted);
+        text(w-272,y,std::string(moduleNames[i]),on?white:muted);
         text(w-90,y,on ? "ON" : (world.modules().requested(m) ? "WAIT" : "OFF"),on?mint:muted);
     }
     text(w-272,367,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
     rect(22,h-51,w-44,29,panel,0.9f);
-    text(35,h-31,(view.captured ? "ESC release mouse" : "CLICK to look") + std::string("   WASD  F fly  G grid  TAB globe  F2 storms  F3 map  F4 sound"),white);
+    text(35,h-31,view.globe ? "RMB drag: rotate   LMB: travel   TAB surface   ESC settings   CTRL+U interface" :
+        (view.captured ? "ESC release mouse" : "CLICK look / ESC settings") + std::string("   WASD  F fly  TAB globe  CTRL+U interface"),white);
     if(view.help) {
         rect(w-358,h-232,336,165,panel,0.9f);
         text(w-340,h-208,explorer.flying ? "FLIGHT / "+fixed(explorer.flightSpeed,0)+" m/s" : (explorer.swimming() ? "SWIM / 1.6 m/s + CURRENT" : "WALK / 2.5 m/s"),mint);
         text(w-340,h-185,"SHIFT faster   SPACE jump / up",white);
         text(w-340,h-164,"CTRL down      WHEEL flight speed",white);
-        text(w-340,h-143,"+/- time  P pause  F5/F6 volume",white);
-        text(w-340,h-122,"HOME landing  1-9/0 M/C/K/I/Q",white);
-        text(w-340,h-101,"G surface: "+std::string(surfaceStyleName(view.surfaceStyle)),mint);
+        text(w-340,h-143,"+/- time  P pause  CTRL+S seed",white);
+        text(w-340,h-122,"ESC settings / HOME landing",white);
+        text(w-340,h-101,"Surface: "+std::string(surfaceStyleName(view.surfaceStyle)),mint);
         text(w-340,h-80,"X grove  O coast  Y grow  E panel",muted);
     }
     if(!view.globe) {
@@ -1012,9 +1013,17 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         rect(cx,cy-7,1,5,white,0.7f); rect(cx,cy+3,1,5,white,0.7f);
         text(cx-50,38,"AZ " + fixed(std::fmod(degrees(explorer.heading())+360,360),0) + " deg",white);
     }
-    text(w/2-90,60,!world.modules().enabled(Module::Sound) ? "F4 SOUND OFF" :
-        (!view.audioAvailable ? "SOUND / NO DEVICE" : "SOUND "+fixed(view.volume*100,0)+"% / F5 F6"),muted);
+    text(w/2-80,60,!world.modules().enabled(Module::Sound) ? "SOUND OFF" :
+        (!view.audioAvailable ? "SOUND / NO DEVICE" : "SOUND "+fixed(view.volume*100,0)+"%"),muted);
     glDisable(GL_BLEND);
+}
+bool globeHudHit(const ViewState& view,int x,int y) {
+    if(!view.interfaceVisible) return false;
+    const auto inside=[&](int left,int top,int width,int height) {return x>=left && x<left+width && y>=top && y<top+height;};
+    return inside(22,22,292,86) || inside(22,120,292,238) || inside(22,view.height-242,292,174) ||
+        inside(view.width-288,22,266,58) || inside(view.width-288,98,266,274) ||
+        inside(view.width/2-90,45,180,20) ||
+        inside(22,view.height-51,view.width-44,29) || (view.help && inside(view.width-358,view.height-232,336,165));
 }
 void Renderer::capture(const std::filesystem::path& path,int width,int height) const {
     std::vector<unsigned char> pixels(static_cast<std::size_t>(width*height*3));

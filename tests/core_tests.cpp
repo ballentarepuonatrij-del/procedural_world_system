@@ -2,6 +2,10 @@
 #include "planet/weather.hpp"
 #include "planet/hydrology.hpp"
 #include "planet/sound.hpp"
+#include "planet/preferences.hpp"
+#include "planet/globe_camera.hpp"
+#include <chrono>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -35,6 +39,90 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
     throw std::runtime_error("Walkable cave route was blocked");
 }
 void registerTests() {
+    test("preferences","Seed accepts the complete unsigned 64-bit range without rounding",[] {
+        require(parseSeed("0")==0 && parseSeed("42")==42,"Zero and ordinary seed");
+        require(parseSeed("18446744073709551615")==std::numeric_limits<std::uint64_t>::max(),"Full 64-bit precision");
+        for(const auto value:{"","-1","+1"," 42","42 ","1.2","1e3","18446744073709551616","184467440737095516150","seed"})
+            require(!parseSeed(value),"Invalid or overflowing seed must not be truncated");
+    });
+    test("preferences","Settings preserve requested dependencies and all user options",[] {
+        Preferences p;require(!p.grid && p.interfaceVisible && p.volume==55 && p.seed==42,"First-launch defaults");
+        p.seed=std::numeric_limits<std::uint64_t>::max();p.volume=0;p.grid=true;p.interfaceVisible=false;
+        p.modules.set(Module::Atmosphere,false);p.modules.set(Module::Sound,false);
+        const auto restored=parsePreferences(serializePreferences(p));
+        require(restored.seed==p.seed && restored.grid && !restored.interfaceVisible && restored.volume==0,"Options round-trip");
+        for(unsigned i=0;i<moduleCount;++i) require(restored.modules.requested(static_cast<Module>(i))==p.modules.requested(static_cast<Module>(i)),"Requested switches round-trip");
+        require(restored.modules.requested(Module::Climate) && !restored.modules.enabled(Module::Climate),"Waiting dependency retains its requested state");
+        const auto partial=parsePreferences("# settings\r\n version = 1\r\nfuture_option=abc\r\nvolume=100\r\n");
+        require(partial.volume==100 && !partial.grid,"Unknown keys and omitted defaults");
+    });
+    test("preferences","Malformed settings are rejected instead of applying partial state",[] {
+        for(const auto value:{"grid=1", "version=2", "version=1\nvolume=101", "version=1\nvolume=-1", "version=1\ngrid=true", "version=1\nsound=7", "version=1\nseed=18446744073709551616", "version=1\nbroken"}) {
+            bool rejected=false;try {(void)parsePreferences(value);}catch(const std::invalid_argument&) {rejected=true;}
+            require(rejected,"Malformed settings rejected");
+        }
+        bool rejected=false;try {(void)parsePreferences(std::string(17000,' '));}catch(const std::invalid_argument&) {rejected=true;}
+        require(rejected,"Bounded configuration file size");
+    });
+    test("preferences","Disk replacement survives invalid saves and reports unreadable data",[] {
+        struct Directory {
+            std::filesystem::path path=std::filesystem::temp_directory_path()/std::filesystem::path("planet-prefs-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+            ~Directory(){std::error_code ignored;std::filesystem::remove_all(path,ignored);}
+        } directory;
+        const auto file=directory.path/"nested/settings.ini";
+        require(loadPreferences(file).warning.empty(),"Absent first-run file uses defaults");
+        Preferences p;p.grid=true;p.volume=23;savePreferences(file,p);
+        auto read=loadPreferences(file);require(read.warning.empty() && read.value.grid && read.value.volume==23,"Write and reopen");
+        p.seed=0;p.volume=100;savePreferences(file,p);read=loadPreferences(file);
+        require(read.warning.empty() && read.value.seed==0 && read.value.volume==100,"Replace existing file");
+        p.volume=101;bool rejected=false;try {savePreferences(file,p);}catch(const std::exception&) {rejected=true;}
+        require(rejected && loadPreferences(file).value.volume==100,"Failed validation preserves old file");
+        p.volume=11;const auto blocked=directory.path/"blocked";std::filesystem::create_directory(blocked);
+        {std::ofstream marker(blocked/"keep");marker << "keep";}
+        rejected=false;try {savePreferences(blocked,p);}catch(const std::exception&) {rejected=true;}
+        require(rejected && std::filesystem::exists(blocked/"keep"),"Failed replacement preserves existing destination");
+        for(const auto& entry:std::filesystem::directory_iterator(directory.path)) require(entry.path().filename().string().find(".tmp-")==std::string::npos,"Temporary files cleaned after failure");
+        {std::ofstream out(file);out << "version=1\ngrid=1\nvolume=bad\n";}
+        read=loadPreferences(file);require(!read.warning.empty() && !read.value.grid && read.value.volume==55,"Corrupt file returns full defaults and a warning");
+        std::ifstream untouched(file);std::string content((std::istreambuf_iterator<char>(untouched)),{});
+        require(content.find("volume=bad")!=std::string::npos,"Load does not overwrite corrupt input");
+    });
+    test("globe_camera","Center picking matches the observer including both poles",[] {
+        for(const auto p:std::array<Vec3,5>{{{0,1,0},{0,-1,0},{1,0,0},{-1,0,0},direction(.4,2.9)}}) {
+            GlobeCamera camera;camera.center(p);
+            for(const auto size:std::array<std::array<int,2>,3>{{{1280,800},{952,606},{600,900}}}) {
+                const auto hit=camera.pick(size[0]/2.,size[1]/2.,size[0],size[1]);
+                require(hit.has_value(),"Center hits planet");near(length(*hit-normalized(p)),0,1e-12,"Correct geographic center");
+                near(dot(camera.outward,camera.up),0,1e-12,"Polar camera remains orthogonal");
+            }
+        }
+    });
+    test("globe_camera","Picking inverts the same perspective after rotation and resize",[] {
+        for(const auto size:std::array<std::array<int,2>,2>{{{1280,800},{952,606}}}) {
+            GlobeCamera camera;camera.center(direction(.3,-2.4));camera.drag(190,-110);
+            unsigned hits=0;
+            for(int i=0;i<300;++i) {
+                const auto p=point(i,300);if(dot(p,camera.outward)<.4) continue;
+                const auto relative=p-camera.outward*GlobeCamera::distance;
+                const double depth=dot(relative,-camera.outward),scale=std::tan(GlobeCamera::fov/2);
+                const double x=(1+dot(relative,camera.right())/(depth*scale*size[0]/size[1]))*size[0]/2;
+                const double y=(1-dot(relative,camera.up)/(depth*scale))*size[1]/2;
+                const auto hit=camera.pick(x,y,size[0],size[1]);require(hit.has_value(),"Projected visible point is selectable");
+                near(length(*hit-p),0,1e-10,"Cursor returns the front surface, not the opposite hemisphere");++hits;
+            }
+            require(hits>50,"Broad geographic coverage");
+        }
+    });
+    test("globe_camera","Dragging across poles remains stable and background cannot teleport",[] {
+        GlobeCamera camera;const auto before=camera.outward;camera.drag(100,80);
+        require(length(camera.outward-before)>.1,"Drag rotates camera");
+        for(int i=0;i<20000;++i) camera.drag(i%2 ? 7 : -4,5);
+        near(length(camera.outward),1,1e-12,"No radius drift");near(length(camera.up),1,1e-12,"Unit up vector");
+        near(dot(camera.outward,camera.up),0,1e-12,"Orthonormal after many pole crossings");
+        for(const auto xy:std::array<std::array<double,2>,4>{{{0,0},{1279,799},{-1,400},{1280,400}}})
+            require(!camera.pick(xy[0],xy[1],1280,800),"Empty space and out-of-client clicks miss");
+        require(!camera.pick(1,1,0,0) && !camera.pick(std::numeric_limits<double>::quiet_NaN(),0,1280,800),"Invalid viewport/input rejected");
+    });
     test("sound","Acoustic propagation uses temperature and distance with physical units",[] {
         near(speedOfSound(293.15),343.23369365,.000001,"Dry-air sound speed at 20 C");
         near(thunderDelay(1000,293.15),1000/speedOfSound(293.15),1e-12,"Propagation in seconds");

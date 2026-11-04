@@ -1,6 +1,7 @@
 #pragma once
 #include "planet/navigation.hpp"
 #include "planet/hydrology.hpp"
+#include "planet/globe_camera.hpp"
 #include <windows.h>
 #include <GL/gl.h>
 #include <filesystem>
@@ -25,11 +26,14 @@ struct ViewState {
     bool globe=false, help=true, captured=false, paused=false;
     bool windTracers=false,waterTracers=true,headlamp=true;
     bool floraInfo=true;
-    SurfaceStyle surfaceStyle=SurfaceStyle::Grid;
+    SurfaceStyle surfaceStyle=SurfaceStyle::Natural;
     WeatherLayer weatherLayer=WeatherLayer::Clouds;
     double volume=.55;
     bool audioAvailable=false;
+    bool interfaceVisible=true;
+    GlobeCamera globeCamera;
 };
+bool globeHudHit(const ViewState& view,int x,int y);
 class Renderer {
 public:
     explicit Renderer(HDC dc);

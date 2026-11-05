@@ -1,5 +1,6 @@
 #include "planet/landforms.hpp"
 #include "planet/model.hpp"
+#include "planet/rivers.hpp"
 #include <limits>
 
 namespace planet {
@@ -117,6 +118,10 @@ std::optional<CaveSite> World::caveSite(Vec3 p,double reach,bool requireEnabled)
 }
 Relief World::relief(Vec3 p) const {
     auto result=rawRelief(p);
+    if(modules_.enabled(Module::Rivers)) {
+        const auto river=waterNetwork()->sample(p,result.elevation);
+        if(river.channel) result.elevation=river.bed;
+    }
     if(const auto site=caveSite(p,550,false)) {
         const double h=site->cover(p,result.elevation);
         if(std::abs(h-result.elevation)>0.1 || site->protectedGround(p)) result.type=Landform::Karst;

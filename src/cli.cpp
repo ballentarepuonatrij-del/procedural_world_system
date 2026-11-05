@@ -1,6 +1,7 @@
 #include "planet/hydrology.hpp"
 #include "planet/surface_detail.hpp"
 #include "planet/sound.hpp"
+#include "planet/rivers.hpp"
 #include <charconv>
 #include <cstdlib>
 #include <fstream>
@@ -36,6 +37,7 @@ int main(int argc, char** argv) {
         double audioSeconds=10,volume=.55;
         bool audioDurationSet=false,soundEnabled=true;
         bool sample = false,coast=false;
+        bool riverOutput=false,riversEnabled=true;std::optional<planet::RiverKind> riverSite;
         for (int i=1; i<argc; ++i) {
             const std::string arg = argv[i];
             const auto next = [&]() -> std::string {
@@ -47,6 +49,9 @@ int main(int argc, char** argv) {
                 const auto [end,error] = std::from_chars(value.data(),value.data()+value.size(),config.seed);
                 if (error != std::errc{} || end != value.data()+value.size()) throw std::invalid_argument("Invalid seed");
             } else if (arg == "--sample") { lat = number(next()); lon = number(next()); sample = true; }
+            else if(arg=="--rivers") riverOutput=true;
+            else if(arg=="--no-rivers") {riversEnabled=false;riverOutput=true;}
+            else if(arg=="--river") {riverSite=planet::riverKind(next());riverOutput=true;if(!riverSite) throw std::invalid_argument("River must be stream, river or major");}
             else if (arg == "--day") day = number(next());
             else if (arg == "--map") mapPath = next();
             else if(arg=="--audio") audioPath=next();
@@ -99,6 +104,7 @@ int main(int argc, char** argv) {
             else if (arg == "--help") {
                 std::cout << "planet_cli [--seed uint64] [--sample latitude longitude] [--day days_since_perihelion] [--map world.ppm] [--weather 0..3600_seconds] [--water 0..3600_seconds] [--rain-mm-h 0..200] [--landmark cave|canyon|mountains|gorge] [--coast] [--wind-m-s 0..40] [--flora] [--grove] [--young-flora] [--grow-days 0..365250]\n";
                 std::cout << "Global weather: [--storm cyclone|hurricane|thunderstorm] [--global-hours 0..240] [--no-global-weather]\n";
+                std::cout << "Global water: [--rivers] [--river stream|river|major] [--no-rivers]\n";
                 std::cout << "Procedural audio: [--audio output.wav] [--audio-seconds 0.1..60] [--volume 0..100] [--no-sound]\n";
                 return 0;
             } else throw std::invalid_argument("Unknown option: " + arg);
@@ -111,6 +117,7 @@ int main(int argc, char** argv) {
         const double duration=waterSeconds.value_or(weatherSeconds.value_or(0));
         planet::World world(config);world.modules().set(planet::Module::GlobalWeather,globalEnabled);
         world.modules().set(planet::Module::Sound,soundEnabled);
+        world.modules().set(planet::Module::Rivers,riversEnabled);
         if(floraOutput && !sample && !coast && !landmark) {
             const auto p=world.findLand();lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
         }
@@ -124,6 +131,11 @@ int main(int argc, char** argv) {
         }
         if(grove && !coast) {
             const auto p=planet::findGrove(world).position;
+            lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
+        }
+        if(riverSite) {
+            if(!riversEnabled) throw std::invalid_argument("--river requires enabled rivers");
+            const auto p=world.waterNetwork()->find(*riverSite,world.findLand()).center;
             lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
         }
         auto location=planet::direction(planet::radians(lat),planet::radians(lon));
@@ -169,6 +181,18 @@ int main(int argc, char** argv) {
                       << ",\n  \"insolation_W_m2\": " << s.insolation
                       << ",\n  \"landform\": \"" << planet::landformName(s.landform) << '"'
                       << ",\n  \"biome\": \"" << planet::biomeName(s.biome) << '"';
+            if(riverOutput) {
+                const auto atlas=world.waterNetwork();const auto river=riversEnabled ? atlas->sample(location) : planet::RiverSample{};
+                const auto current=atlas->oceanCurrent(location);
+                std::cout << ",\n  \"rivers\": {\"enabled\": " << (riversEnabled ? "true" : "false")
+                    << ", \"wet\": " << (river.wet ? "true" : "false") << ", \"reaches\": " << atlas->reaches().size()
+                    << ", \"runoff_m3_s\": " << atlas->runoff() << ", \"outlet_discharge_m3_s\": " << atlas->oceanDischarge()
+                    << ", \"width_m\": " << river.width << ", \"depth_m\": " << river.depth << ", \"level_m\": " << river.level
+                    << ", \"discharge_m3_s\": " << river.discharge << ", \"speed_m_s\": " << river.speed
+                    << ", \"flow_east_m_s\": " << planet::dot(river.downstream,planet::east(location))*river.speed
+                    << ", \"flow_north_m_s\": " << planet::dot(river.downstream,planet::north(location))*river.speed
+                    << ", \"ocean_current_m_s\": " << planet::length(current) << ", \"circulation_residual\": " << atlas->circulationResidual() << '}';
+            }
             if(!audioPath.empty()) std::cout << ",\n  \"audio\": {\"sample_rate_hz\": " << planet::SoundSynth::sampleRate
                 << ", \"channels\": 2, \"frames\": " << audioFrames << ", \"peak_pcm\": " << audioPeak
                 << ", \"thunder_events\": " << thunderEvents << ", \"volume\": " << volume << '}';

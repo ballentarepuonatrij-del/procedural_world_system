@@ -10,7 +10,7 @@ Wind2 advanceSlab(Wind2 current,Wind2 stress,double mixedDepth,double coriolis,d
 double waterPressure(double airPressure,double depth,bool ocean,double gravity=standardGravity);
 struct WaveSurface { double height{}; Vec3 gradient{}; };
 struct LiquidSample {
-    bool present=false,ocean=false;
+    bool present=false,ocean=false,river=false;
     double bed{},level{},depth{},sediment{};
     Vec3 current{};
 };
@@ -42,6 +42,8 @@ private:
     std::optional<double> experiment_;
     double time_=0,mixedDepth_=15,fetch_=5000;
     bool enabled_=false,initialized_=false,oceanHere_=false;
+    std::shared_ptr<const RiverNetwork> circulation_;
+    bool globalFlow_=false;
 };
 LiquidSample liquidAt(const World& world,const Hydrology* water,const WaterMotion* motion,Vec3 unit);
 } // namespace planet

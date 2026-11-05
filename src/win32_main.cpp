@@ -33,6 +33,8 @@ struct Options {
     WeatherLayer weatherLayer=WeatherLayer::Clouds;
     bool sound=true;
     bool sky=true,shadows=true,lookAtSun=false;
+    bool rivers=true;
+    std::optional<RiverKind> riverSite;
     std::optional<double> solarHour;
     std::optional<std::array<double,2>> look;
     double volume=.55;
@@ -62,6 +64,7 @@ Options parseOptions() {
         options.caves=modules.requested(Module::Caves);options.waterMotion=modules.requested(Module::WaterMotion);
         options.plantGrowth=modules.requested(Module::PlantGrowth);options.globalWeather=modules.requested(Module::GlobalWeather);
         options.sound=modules.requested(Module::Sound);
+        options.rivers=modules.requested(Module::Rivers);
         for(int i=1;i<argc;++i) {
             const std::wstring arg=argv[i];
             const auto next=[&]() -> std::wstring {
@@ -84,6 +87,8 @@ Options parseOptions() {
             else if(arg==L"--globe") options.globe=true;
             else if(arg==L"--no-sky") options.sky=false;
             else if(arg==L"--no-shadows") options.shadows=false;
+            else if(arg==L"--no-rivers") options.rivers=false;
+            else if(arg==L"--river") {const auto value=next();options.riverSite=riverKind(std::string(value.begin(),value.end()));if(!options.riverSite) throw std::invalid_argument("River must be stream, river or major");}
             else if(arg==L"--look-at-sun") options.lookAtSun=true;
             else if(arg==L"--solar-hour" || arg==L"--look") {
                 const auto number=[&]() {const auto value=next();std::size_t used=0;const double n=std::stod(value,&used);
@@ -116,8 +121,10 @@ Options parseOptions() {
                 if(value==L"clouds") options.weatherLayer=WeatherLayer::Clouds;
                 else if(value==L"pressure") options.weatherLayer=WeatherLayer::Pressure;
                 else if(value==L"wind") options.weatherLayer=WeatherLayer::Wind;
+                else if(value==L"rivers") options.weatherLayer=WeatherLayer::Rivers;
+                else if(value==L"currents") options.weatherLayer=WeatherLayer::Currents;
                 else if(value==L"off") options.weatherLayer=WeatherLayer::Off;
-                else throw std::invalid_argument("Weather layer must be clouds, pressure, wind or off");
+                else throw std::invalid_argument("Layer must be clouds, pressure, wind, rivers, currents or off");
             }
             else if(arg==L"--no-clouds") options.clouds=false;
             else if(arg==L"--no-water") options.water=false;
@@ -186,7 +193,7 @@ World configuredWorld(const Options& options) {
     modules.set(Module::Hydrology,options.water);modules.set(Module::Erosion,options.erosion);
     modules.set(Module::Landforms,options.landforms);modules.set(Module::Caves,options.caves);
     modules.set(Module::WaterMotion,options.waterMotion);modules.set(Module::PlantGrowth,options.plantGrowth);
-    modules.set(Module::GlobalWeather,options.globalWeather);modules.set(Module::Sound,options.sound);return world;
+    modules.set(Module::GlobalWeather,options.globalWeather);modules.set(Module::Sound,options.sound);modules.set(Module::Rivers,options.rivers);return world;
 }
 class Application {
 public:
@@ -205,6 +212,7 @@ public:
         if(options_.landmark) visitLandmark(*options_.landmark);
         if(options_.grove) visitGrove();
         if(options_.coast || options_.diveDepth) visitCoast(options_.diveDepth.has_value());
+        if(options_.riverSite) visitRiver(*options_.riverSite,options_.diveDepth.has_value());
         if(options_.storm && !visitStorm(*options_.storm)) throw std::runtime_error("No active storm of the requested kind on this planet");
         simulation_.advance(world_,explorer_.up(),0);
         for(double remaining=options_.weatherSeconds;remaining>1e-9;) {
@@ -342,6 +350,10 @@ public:
                 << "\nflora_plants=" << renderer_->plantCount() << "\nmarine_plants=" << renderer_->marineCount()
                 << "\nflora_species=" << renderer_->plantSpeciesCount() << "\nflora_height_sum_m=" << renderer_->plantHeightSum() << '\n';
             const auto& light=renderer_->illumination();
+            const auto river=world_.modules().enabled(Module::Rivers) ? world_.waterNetwork()->sample(explorer_.up()) : RiverSample{};
+            out << "river_wet=" << river.wet << "\nriver_width_m=" << river.width << "\nriver_depth_m=" << river.depth
+                << "\nriver_level_m=" << river.level << "\nriver_discharge_m3_s=" << river.discharge << "\nriver_speed_m_s=" << river.speed
+                << "\nriver_triangles=" << renderer_->riverTriangles() << '\n';
             out << "sky_enabled=" << view_.skyEnabled << "\nshadows_enabled=" << view_.shadowsEnabled
                 << "\nshadow_support=" << renderer_->shadowSupport() << "\nshadows_used=" << renderer_->shadowsUsed()
                 << "\nshadow_volume_triangles=" << renderer_->shadowCount() << "\nstars=" << renderer_->starCount()
@@ -479,6 +491,17 @@ private:
         explorer_.look(std::atan2(dot(look,east(place.position)),dot(look,north(place.position))),radians(3));
         view_.globe=false;noon();if(renderer_) renderer_->invalidate();
     }
+    void visitRiver(RiverKind kind,bool inWater=false) {
+        if(!world_.modules().enabled(Module::Rivers)) {
+            if(!window_) throw std::runtime_error("Enable Rivers to visit a river");
+            MessageBoxW(window_,L"Включите модуль «Реки» и «Рельеф» в настройках.",L"PlanetLab — Реки",MB_OK|MB_ICONINFORMATION);return;
+        }
+        const auto place=world_.waterNetwork()->find(kind,world_.findLand());const auto p=inWater ? place.center : place.bank;
+        explorer_.teleport(world_,p);simulation_.advance(world_,p,0);explorer_.teleport(world_,p,&simulation_.water);
+        const auto look=normalized(place.center-place.bank+place.downstream*(place.width/world_.config().radius));
+        explorer_.look(std::atan2(dot(look,east(p)),dot(look,north(p))),radians(-8));
+        view_.globe=false;view_.floraInfo=false;noon();if(renderer_) renderer_->invalidate();
+    }
     double maximumTimeScale() const {
         if(explorer_.swimming()) return 1;
         if(world_.modules().enabled(Module::WaterMotion)) return 120;
@@ -563,7 +586,8 @@ private:
         else if(key=='U') view_.waterTracers=!view_.waterTracers;
         else if(key=='L') view_.headlamp=!view_.headlamp;
         else if(key=='E') view_.floraInfo=!view_.floraInfo;
-        else if(key==VK_F3) view_.weatherLayer=static_cast<WeatherLayer>((static_cast<unsigned>(view_.weatherLayer)+1)%4);
+        else if(key==VK_F3) view_.weatherLayer=static_cast<WeatherLayer>((static_cast<unsigned>(view_.weatherLayer)+1)%6);
+        else if(key==VK_F7) {constexpr std::array<RiverKind,3> tour{RiverKind::Major,RiverKind::River,RiverKind::Stream};visitRiver(tour[riverIndex_++%tour.size()]);}
         else if(key==VK_F2) {
             constexpr std::array<StormKind,3> tour{StormKind::Hurricane,StormKind::Cyclone,StormKind::Thunderstorm};
             for(unsigned i=0;i<tour.size();++i) if(visitStorm(tour[stormIndex_++%tour.size()])) break;
@@ -675,6 +699,7 @@ private:
     unsigned settingsOpened_=0,settingsSaved_=0,teleportRequests_=0,teleportsConfirmed_=0,seedChanges_=0;
     std::size_t landmarkIndex_=0;
     std::size_t stormIndex_=0;
+    std::size_t riverIndex_=0;
 };
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int show) {

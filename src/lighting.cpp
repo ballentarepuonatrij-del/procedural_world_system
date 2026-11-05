@@ -42,11 +42,11 @@ Lighting lighting(const Config& c,Vec3 observer,double seconds,const SkyConditio
     const double spaceVisibility=1-smoothstep(0.0,.02,l.airDensity);
     l.starVisibility=mix(spaceVisibility,1.0,l.night)*clearStars;
     l.starlightLux=.0002*clearStars; // Representative clear moonless starlight, not a calibrated display.
-    const double nightLight=l.night*(.20+.80*clearStars);
+    const double nightLight=(1-l.daylight)*(.70+.30*clearStars);
     // Display-adapted night fill: much brighter than raw stellar photometry, but weak beside daylight.
-    l.ambient={static_cast<float>(.020*nightLight+.15*l.daylight*(1-.40*l.cloudCover)),
-        static_cast<float>(.035*nightLight+.19*l.daylight*(1-.40*l.cloudCover)),
-        static_cast<float>(.065*nightLight+.25*l.daylight*(1-.40*l.cloudCover))};
+    l.ambient={static_cast<float>(.32*nightLight+l.daylight*(.15+.45*l.cloudCover)),
+        static_cast<float>(.45*nightLight+l.daylight*(.19+.46*l.cloudCover)),
+        static_cast<float>(.68*nightLight+l.daylight*(.25+.46*l.cloudCover))};
     if(!conditions.atmosphere) l.ambient={.006f,.010f,.018f};
     const Color zenithDay=blend({.055f,.24f,.54f},{.27f,.30f,.34f},l.cloudCover);
     const Color horizonDay=blend({.53f,.67f,.78f},{.31f,.34f,.38f},l.cloudCover);

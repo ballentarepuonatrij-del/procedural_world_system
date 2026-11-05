@@ -69,8 +69,22 @@ GLuint makeFont(HDC dc,int size,int weight) {
 Renderer::Renderer(HDC dc) {
     font_=makeFont(dc,15,FW_NORMAL); headingFont_=makeFont(dc,28,FW_BOLD);
     terrain_=glGenLists(1); terrainGrid_=glGenLists(1); globe_=glGenLists(1); objects_=glGenLists(1); caves_=glGenLists(1);weatherMap_=glGenLists(1);shadows_=glGenLists(1);
-    if (!terrain_ || !terrainGrid_ || !globe_ || !objects_ || !caves_ || !weatherMap_ || !shadows_) throw std::runtime_error("Cannot allocate terrain display lists");
+    waterMap_=glGenLists(1);
+    if (!terrain_ || !terrainGrid_ || !globe_ || !objects_ || !caves_ || !weatherMap_ || !shadows_ || !waterMap_) throw std::runtime_error("Cannot allocate terrain display lists");
     glGetIntegerv(GL_STENCIL_BITS,&stencilBits_);
+    glPixelStorei(GL_UNPACK_ALIGNMENT,1);
+    glGenTextures(1,&riverTexture_);glBindTexture(GL_TEXTURE_2D,riverTexture_);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR_MIPMAP_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    std::vector<unsigned char> ripples(128*128);
+    for(int y=0;y<128;++y) for(int x=0;x<128;++x) ripples[static_cast<std::size_t>(y*128+x)]=static_cast<unsigned char>(215+24*std::cos(tau*x/32+1.5*std::sin(tau*y/64))+12*randomUnit(static_cast<std::uint64_t>(y*128+x)));
+    for(int size=128,level=0;;size/=2,++level) {
+        glTexImage2D(GL_TEXTURE_2D,level,GL_LUMINANCE,size,size,0,GL_LUMINANCE,GL_UNSIGNED_BYTE,ripples.data());
+        if(size==1) break;
+        std::vector<unsigned char> next(static_cast<std::size_t>(size*size/4));
+        for(int y=0;y<size/2;++y) for(int x=0;x<size/2;++x) next[static_cast<std::size_t>(y*(size/2)+x)]=static_cast<unsigned char>((ripples[static_cast<std::size_t>(2*y*size+2*x)]+ripples[static_cast<std::size_t>(2*y*size+2*x+1)]+ripples[static_cast<std::size_t>((2*y+1)*size+2*x)]+ripples[static_cast<std::size_t>((2*y+1)*size+2*x+1)])/4);
+        ripples=std::move(next);
+    }
     const auto* extensions=reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
     const auto* version=reinterpret_cast<const char*>(glGetString(GL_VERSION));
     stencilWrap_=(version && std::atof(version)>=1.4) || (extensions && std::strstr(extensions,"GL_EXT_stencil_wrap"));
@@ -124,6 +138,8 @@ Renderer::~Renderer() {
     glDeleteLists(objects_,1); glDeleteLists(caves_,1);
     glDeleteLists(weatherMap_,1);
     glDeleteLists(shadows_,1);
+    glDeleteLists(waterMap_,1);
+    glDeleteTextures(1,&riverTexture_);
     glDeleteLists(font_,96); glDeleteLists(headingFont_,96);
     glDeleteTextures(1,&detailTexture_);
     glDeleteTextures(1,&cloudTexture_);
@@ -177,6 +193,19 @@ void Renderer::buildTerrain(const World& world,const Explorer& explorer,const Hy
         };
         refine(xs,minX,maxX); refine(ys,minY,maxY);
     }
+    riverSegments_.clear();
+    if(world.modules().enabled(Module::Rivers)) {
+        const auto network=world.waterNetwork();riverSegments_=network->nearby(anchor_,2200);
+        const auto river=network->sample(anchor_);
+        if(river.channel && river.distance<river.width*.5+40 && explorer.altitude()-world.surface(anchor_)<250) {
+            const double extent=clamp(river.width*3,40.,192.),spacing=river.width<4 ? .5 : river.width<16 ? 2. : 8.;
+            const auto refine=[&](std::vector<double>& axis,double center) {
+                for(double p=std::ceil((center-extent)/spacing)*spacing;p<=center+extent;p+=spacing) axis.push_back(p);
+                std::sort(axis.begin(),axis.end());axis.erase(std::unique(axis.begin(),axis.end()),axis.end());
+            };
+            refine(xs,dot(anchor_,right)*projection);refine(ys,dot(anchor_,down)*projection);
+        }
+    }
     const int columns=static_cast<int>(xs.size()),rows=static_cast<int>(ys.size());
     const double aboveGround=std::max(0.0,explorer.altitude()-world.surface(anchor_));
     struct Vertex { Vec3 position; Color color; double u,v; float gridAlpha; Vec3 normal{}; bool ocean{}; Vec3 unit{}; double height{}; CaveColumn cavity{}; Color rockColor{}; };
@@ -188,8 +217,9 @@ void Renderer::buildTerrain(const World& world,const Explorer& explorer,const Hy
         const Vec3 p=normalized(face*radius+right*xs[static_cast<std::size_t>(x)]+down*ys[static_cast<std::size_t>(y)]);
         const auto sample=world.sample(p,seconds);
         const auto ground=water.sample(p);
+        const auto river=world.modules().enabled(Module::Rivers) ? world.waterNetwork()->sample(p) : RiverSample{};
         const double original=sample.elevation;
-        const double h=ground.available ? mix(original,ground.bed,ground.weight) : original;
+        const double h=ground.available ? river.channel ? original+ground.bedChange*ground.weight : mix(original,ground.bed,ground.weight) : original;
         const Vec3 relative=p*(radius+h)-anchor_*radius;
         auto color=world.color(sample);
         if(sample.ocean) {
@@ -200,12 +230,13 @@ void Renderer::buildTerrain(const World& world,const Explorer& explorer,const Hy
             const float moisture=static_cast<float>(ground.available ? 1-0.28*ground.saturation*ground.weight : 1);
             color.r*=variation*moisture; color.g*=variation*moisture; color.b*=variation*moisture;
         }
+        if(river.wet) color={.34f,.30f,.22f};
         // World-anchored coordinates keep the material stationary when the local mesh recentres.
         const Vec3 global=p*(radius+h);
         const Vec3 position{dot(relative,east_),dot(relative,anchor_),dot(relative,north_)};
         const double localSpacing=std::max(x>0 ? xs[static_cast<std::size_t>(x)]-xs[static_cast<std::size_t>(x-1)] : terrainStep_,
                                            y>0 ? ys[static_cast<std::size_t>(y)]-ys[static_cast<std::size_t>(y-1)] : terrainStep_);
-        waterVertices_.push_back({p,position,h,world.modules().enabled(Module::Ocean) || (ground.available && ground.weight>0),localSpacing});
+        waterVertices_.push_back({p,position,h,world.modules().enabled(Module::Ocean) || (ground.available && ground.weight>0),river.wet && river.level>world.config().seaLevel+.02,localSpacing});
         const float alpha=static_cast<float>(1-smoothstep(1500+aboveGround*4,10000+aboveGround*12,std::hypot(position.x,position.z)));
         const double band=0.5+0.5*std::sin(h/7.5+0.35*std::sin(h/27));
         Color rock{0.44f,0.42f,0.36f};
@@ -475,8 +506,12 @@ void Renderer::drawShadows(Vec3 sun,bool textured) {
     if(!shadowCount_) return;
     shadowsUsed_=true;
     glPushAttrib(GL_ALL_ATTRIB_BITS);
-    glDisable(GL_LIGHTING);glDisable(GL_FOG);glDisable(GL_TEXTURE_2D);glDisable(GL_BLEND);glDisable(GL_POLYGON_OFFSET_FILL);
-    glColorMask(GL_FALSE,GL_FALSE,GL_FALSE,GL_FALSE);glDepthMask(GL_FALSE);glDepthFunc(GL_LEQUAL);
+    glDisable(GL_LIGHTING);glDisable(GL_FOG);glDisable(GL_TEXTURE_2D);glDisable(GL_BLEND);
+    // Far caps can round to the receiver's depth in a 24-bit buffer. Equal depth
+    // must fail the volume test, and a slope-scaled offset keeps lit caps behind
+    // their receiver even at grazing angles; a fixed centimetre bias cannot do this.
+    glEnable(GL_POLYGON_OFFSET_FILL);glPolygonOffset(1,2);
+    glColorMask(GL_FALSE,GL_FALSE,GL_FALSE,GL_FALSE);glDepthMask(GL_FALSE);glDepthFunc(GL_LESS);
     glEnable(GL_STENCIL_TEST);glStencilMask(255);glClearStencil(0);glClear(GL_STENCIL_BUFFER_BIT);glStencilFunc(GL_ALWAYS,0,255);
     glEnable(GL_CULL_FACE);glFrontFace(GL_CCW);
     // Closed-volume depth-fail counting also works with the eye inside a shadow.
@@ -493,7 +528,7 @@ void Renderer::drawShadows(Vec3 sun,bool textured) {
 }
 void Renderer::draw(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view) {
     const auto& water=simulation.water;
-    cloudCount_=0;waterCount_=0;rainCount_=0;lightningCount_=0;stormMarkerCount_=0;
+    cloudCount_=0;waterCount_=0;rainCount_=0;lightningCount_=0;stormMarkerCount_=0;riverTriangles_=0;
     glViewport(0,0,view.width,view.height);
     const auto sun=orbit(world.config(),view.seconds);
     const double rain=simulation.weather.sample(explorer.up()).rainRate*3600+simulation.rainExperiment();
@@ -535,6 +570,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
         glLightModelfv(GL_LIGHT_MODEL_AMBIENT,ambient);
         glDisable(GL_FOG); glCallList(globe_); glDisable(GL_LIGHTING);
         drawGlobalWeather(simulation.global,view);
+        drawGlobalWater(world,view);
         const Vec3 marker=explorer.up()*1.004;
         glPointSize(7); glColor3f(0.6f,1.0f,0.7f); glBegin(GL_POINTS); glVertex3d(marker.x,marker.y,marker.z); glEnd();
         // Sparse meridians: geographic orientation, drawn above the planet surface.
@@ -629,6 +665,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
             glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
         }
         drawWater(world,explorer,simulation,view,daylight);
+        drawRivers(world,explorer,simulation,view,daylight);
         if(!submerged) drawWeather(world,explorer,simulation,view,daylight);
     }
     drawHud(world,explorer,simulation,view);
@@ -648,8 +685,9 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
     for(std::size_t i=0;i<waterVertices_.size();++i) {
         const auto& v=waterVertices_[i]; if(!v.available) continue;
         const auto ground=water.sample(v.up);
-        const bool ocean=oceanEnabled && (v.altitude<sea || !ground.available || ground.depth<0.0005);
-        const double depth=ocean ? sea-v.altitude : (ground.available ? ground.depth*ground.weight : 0);
+        const bool riverWet=v.river;
+        const bool ocean=!riverWet && oceanEnabled && (v.altitude<sea || !ground.available || ground.depth<0.0005);
+        const double depth=riverWet ? -.01 : ocean ? sea-v.altitude : (ground.available ? ground.depth*ground.weight : 0);
         double level=ocean ? sea : v.altitude+depth;
         const auto wave=motion.waves(v.up,std::max(0.0,depth),ocean,v.spacing*2);
         level+=wave.height;
@@ -660,7 +698,7 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
         const Vec3 reflected=normal*(2*dot(normal,sun))-sun;
         const double shine=explorer.underwater() ? 0 : std::pow(std::max(0.0,dot(reflected,towardEye)),72);
         const double mud=ground.available ? 1-std::exp(-ground.sedimentKgM3/12) : 0;
-        const double light=.025+.975*daylight;
+        const double light=.16+.84*daylight;
         const Color clear{0.025f,0.29f,0.37f},silt{0.39f,0.29f,0.12f};
         const auto sky=skyColor(lighting_,normal*(2*dot(normal,towardEye))-towardEye);
         Color color=wire ? Color{0.035f,0.11f,0.18f} : Color{
@@ -727,8 +765,98 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
     }
     glDisable(GL_BLEND); glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
 }
+void Renderer::drawRivers(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight) {
+    if(!world.modules().enabled(Module::Rivers) || riverSegments_.empty()) return;
+    const auto atlas=world.waterNetwork();const double radius=world.config().radius;
+    const auto local=[&](Vec3 p) {const auto r=p-anchor_*radius;return Vec3{dot(r,east_),dot(r,anchor_),dot(r,north_)};};
+    const Vec3 eye=explorer.up()*(radius+explorer.altitude());
+    const double clock=simulation.motion.seconds(),light=.22+.78*daylight;
+    const bool moving=world.modules().enabled(Module::WaterMotion);
+    glPushAttrib(GL_ALL_ATTRIB_BITS);glDisable(GL_LIGHTING);glEnable(GL_TEXTURE_2D);glBindTexture(GL_TEXTURE_2D,riverTexture_);
+    glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDepthMask(GL_FALSE);glDepthFunc(GL_LEQUAL);
+    glEnable(GL_POLYGON_OFFSET_FILL);glPolygonOffset(-1,-1);
+    const auto emit=[&](const RiverPoint& p,double lateral) {
+        const auto up=normalized(p.up+p.left*(lateral*p.width/radius));
+        const auto pos=up*(radius+p.level+.008),toward=normalized(eye-pos);
+        const double fresnel=.02+.98*std::pow(1-std::abs(dot(toward,up)),5);
+        const auto sky=skyColor(lighting_,up*(2*dot(up,toward))-toward);
+        const double speed=p.discharge/(.8*p.width*p.depth);
+        const Color water{static_cast<float>(mix(.055*light,sky.r,fresnel)),static_cast<float>(mix(.28*light,sky.g,fresnel)),static_cast<float>(mix(.30*light,sky.b,fresnel))};
+        const double depth=p.depth*(1-smoothstep(.3,.5,std::abs(lateral)));
+        glColor4f(water.r,water.g,water.b,static_cast<float>(clamp((.32+.55*(1-std::exp(-depth*.6))+.3*fresnel)*smoothstep(0,.025,depth),0.,.96)));
+        glTexCoord2d((p.along-(moving ? clock*speed : 0))/8,lateral*p.width/8);
+        const auto v=local(pos);glVertex3d(v.x,v.y,v.z);
+    };
+    glBegin(GL_TRIANGLES);
+    for(const auto& [r,s]:riverSegments_) {
+        const auto a=atlas->point(r,s,0),b=atlas->point(r,s,1);const auto delta=b.up-a.up;
+        const double span=length(delta)*radius,t=clamp(dot(explorer.up()-a.up,delta)/dot(delta,delta),0.,1.);
+        if(length(atlas->point(r,s,t).up-explorer.up())*radius>2200) continue;
+        const double start=std::max(0.,t-2200/std::max(1.,span)),end=std::min(1.,t+2200/std::max(1.,span));
+        const double spacing=clamp(std::min(a.width,b.width)*.7,1.,24.);
+        const int steps=std::max(1,static_cast<int>(std::ceil((end-start)*span/spacing)));
+        auto previous=atlas->point(r,s,start);
+        for(int i=1;i<=steps;++i) {
+            const auto next=atlas->point(r,s,mix(start,end,static_cast<double>(i)/steps));
+            if(next.level<=world.config().seaLevel+.02) {previous=next;continue;}
+            for(const auto band:std::array<std::array<double,2>,3>{{{-.5,-.3},{-.3,.3},{.3,.5}}}) {
+                emit(previous,band[0]);emit(previous,band[1]);emit(next,band[1]);
+                emit(previous,band[0]);emit(next,band[1]);emit(next,band[0]);riverTriangles_+=2;
+            }
+            previous=next;
+        }
+    }
+    glEnd();glDisable(GL_POLYGON_OFFSET_FILL);glDisable(GL_TEXTURE_2D);
+    if(view.waterTracers && moving) {
+        glLineWidth(1.3f);glBegin(GL_LINES);
+        for(const auto& [r,s]:riverSegments_) {
+            const auto a=atlas->point(r,s,0),b=atlas->point(r,s,1);const double span=b.along-a.along;
+            const double speed=(a.discharge+b.discharge)/(.8*(a.width+b.width)*(a.depth+b.depth)*.5);
+            for(unsigned i=0;i<36;++i) {
+                const auto seed=hash64((world.config().seed+hash64(r))^hash64(s+701+i));
+                const double t=std::fmod(randomUnit(seed)+clock*speed/std::max(1.,span),1.);
+                const auto p=atlas->point(r,s,t),behind=atlas->point(r,s,std::max(0.,t-std::min(2.,speed*1.5)/std::max(1.,span)));
+                if(length(p.up-explorer.up())*radius>220 || p.level<=world.config().seaLevel+.02) continue;
+                const double lateral=(randomUnit(seed+1)-.5)*.65;
+                const auto head=local(normalized(p.up+p.left*(lateral*p.width/radius))*(radius+p.level+.025));
+                const auto tail=local(normalized(behind.up+behind.left*(lateral*behind.width/radius))*(radius+behind.level+.025));
+                glColor4f(.62f*static_cast<float>(light),.88f*static_cast<float>(light),.92f*static_cast<float>(light),.65f);glVertex3d(head.x,head.y,head.z);
+                glColor4f(.62f*static_cast<float>(light),.88f*static_cast<float>(light),.92f*static_cast<float>(light),.05f);glVertex3d(tail.x,tail.y,tail.z);
+            }
+        }
+        glEnd();
+    }
+    glPopAttrib();
+}
+void Renderer::drawGlobalWater(const World& world,const ViewState& view) {
+    if(view.weatherLayer!=WeatherLayer::Rivers && view.weatherLayer!=WeatherLayer::Currents) return;
+    if(waterMapDirty_ || waterMapLayer_!=view.weatherLayer) {
+        glNewList(waterMap_,GL_COMPILE);glDisable(GL_LIGHTING);glDisable(GL_TEXTURE_2D);glLineWidth(1.5f);
+        const auto vertex=[](Vec3 p) {p=normalized(p)*1.004;glVertex3d(p.x,p.y,p.z);};
+        const auto atlas=world.waterNetwork();
+        if(view.weatherLayer==WeatherLayer::Rivers && world.modules().enabled(Module::Rivers)) {
+            for(const auto& reach:atlas->reaches()) {
+                const float amount=static_cast<float>(clamp(std::log1p(reach.points.back().discharge)/10,0.,1.));
+                glColor3f(.08f,.38f+.35f*amount,.66f+.32f*amount);glBegin(GL_LINE_STRIP);
+                for(std::size_t i=0;i<reach.points.size();i+=3) vertex(reach.points[i].up);
+                vertex(reach.points.back().up);glEnd();
+            }
+        } else if(view.weatherLayer==WeatherLayer::Currents && world.modules().enabled(Module::Ocean) && world.modules().enabled(Module::WaterMotion) && world.modules().enabled(Module::Wind)) {
+            glBegin(GL_LINES);
+            for(std::size_t i=0;i<atlas->nodes().size();i+=3) {
+                const auto p=atlas->nodes()[i].up,current=atlas->oceanCurrent(p);const double speed=length(current);if(speed<.004) continue;
+                const auto forward=normalized(current),side=normalized(cross(p,forward));const double length=clamp(speed*.22,.020,.055);
+                const auto tip=normalized(p+forward*length);glColor3f(.12f,static_cast<float>(.45+.45*clamp(speed/.2,0.,1.)),.92f);
+                vertex(p);vertex(tip);vertex(tip);vertex(tip-forward*(length*.35)+side*(length*.22));vertex(tip);vertex(tip-forward*(length*.35)-side*(length*.22));
+            }
+            glEnd();
+        }
+        glLineWidth(1);glEndList();waterMapDirty_=false;waterMapLayer_=view.weatherLayer;
+    }
+    glCallList(waterMap_);
+}
 void Renderer::drawGlobalWeather(const GlobalWeather& weather,const ViewState& view) {
-    if(!weather.enabled() || view.weatherLayer==WeatherLayer::Off) return;
+    if(!weather.enabled() || view.weatherLayer==WeatherLayer::Off || view.weatherLayer==WeatherLayer::Rivers || view.weatherLayer==WeatherLayer::Currents) return;
     if(weatherDirty_ || lastGlobalStep_!=weather.steps() || lastWeatherLayer_!=view.weatherLayer || lastGlobalClouds_!=weather.cloudsEnabled()) {
         glNewList(weatherMap_,GL_COMPILE);
         glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDepthMask(GL_FALSE);
@@ -911,14 +1039,16 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
             (simulation.motion.windExperiment() ? "WATER WIND "+fixed(*simulation.motion.windExperiment(),0)+" m/s [EXPERIMENT]" : "V wind tracers: "+std::string(view.windTracers ? "ON" : "OFF")),muted);
     }
     const auto liquid=liquidAt(world,&water,&simulation.motion,explorer.up());
+    const auto river=world.modules().enabled(Module::Rivers) ? world.waterNetwork()->sample(explorer.up()) : RiverSample{};
     if(view.globe) {
         rect(22,238,292,120,panel,.90f);
-        text(40,259,"WEATHER MAP / "+std::string(weatherLayerName(view.weatherLayer)),mint);
-        text(40,280,simulation.global.enabled() ? "GLOBAL +"+fixed(simulation.global.elapsed()/3600,2)+" h / 5 degree grid" : "GLOBAL WEATHER DISABLED",white);
+        text(40,259,"PLANET MAP / "+std::string(weatherLayerName(view.weatherLayer)),mint);
+        const bool waterLayer=view.weatherLayer==WeatherLayer::Rivers || view.weatherLayer==WeatherLayer::Currents;
+        text(40,280,waterLayer ? "REFERENCE CLIMATE / STEADY FLOW" : simulation.global.enabled() ? "GLOBAL +"+fixed(simulation.global.elapsed()/3600,2)+" h / 5 degree grid" : "GLOBAL WEATHER DISABLED",white);
         text(40,301,view.weatherLayer==WeatherLayer::Pressure ? "BLUE 940 -- RED 1040 hPa [SLP]" :
-            (view.weatherLayer==WeatherLayer::Wind ? "BLUE 0 -- RED 70 m/s [10 m]" : "WHITE: column cloud / subgrid"),white);
-        text(40,323,"CYAN cyclone / ORANGE tropical",white);
-        text(40,346,"PURPLE thunder / F3 next map",muted);
+            (view.weatherLayer==WeatherLayer::Wind ? "BLUE 0 -- RED 70 m/s [10 m]" : waterLayer ? "CYAN: rivers / current direction" : "WHITE: column cloud / subgrid"),white);
+        text(40,323,waterLayer ? "F7 visit rivers / TAB surface" : "CYAN cyclone / ORANGE tropical",white);
+        text(40,346,"F3: weather / rivers / currents",muted);
     } else if(view.floraInfo) {
         rect(22,238,292,120,panel,.90f);
         text(40,259,"FLORA / nearest; "+std::to_string(plantSpeciesCount_)+" kinds",mint);
@@ -929,6 +1059,13 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         } else text(40,284,"No visible plants nearby",muted);
         text(40,323,"BIO +"+fixed(simulation.flora.days(),1)+" d  "+(simulation.flora.rate()==1 ? "1x" : fixed(simulation.flora.rate()/86400,0)+"d/s [EXP]"),white);
         text(40,346,"Y growth speed / E water",muted);
+    } else if(river.channel) {
+        rect(22,238,292,120,panel,.90f);
+        text(40,261,"RIVER / REFERENCE RUNOFF",mint);
+        text(40,283,"WIDTH "+fixed(river.width,1)+" m  Q "+fixed(river.discharge,1)+" m3/s",white);
+        text(40,305,"DEPTH "+fixed(river.depth,2)+" m  FLOW "+fixed(river.speed,2)+" m/s",white);
+        text(40,327,"F7 major / river / stream",white);
+        text(40,351,"U current tracers / E plants",muted);
     } else if(liquid.ocean) {
         rect(22,238,292,120,panel,0.90f);
         text(40,261,"OCEAN / WIND AND WAVES",mint);
@@ -968,7 +1105,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
     for(unsigned i=0;i<moduleCount;++i) {
         const auto m=static_cast<Module>(i);
         const bool on=world.modules().enabled(m);
-        const float y=145+14*static_cast<float>(i);
+        const float y=145+13*static_cast<float>(i);
         text(w-272,y,std::string(moduleNames[i]),on?white:muted);
         text(w-90,y,on ? "ON" : (world.modules().requested(m) ? "WAIT" : "OFF"),on?mint:muted);
     }
@@ -984,7 +1121,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(w-340,h-143,"+/- time  P pause  CTRL+S seed",white);
         text(w-340,h-122,"ESC settings / HOME landing",white);
         text(w-340,h-101,"Surface: "+std::string(surfaceStyleName(view.surfaceStyle)),mint);
-        text(w-340,h-80,"X grove  O coast  Y grow  E panel",muted);
+        text(w-340,h-80,"F7 rivers  X grove  O coast  E panel",muted);
     }
     if(!view.globe) {
         const float cx=w/2,cy=h/2;

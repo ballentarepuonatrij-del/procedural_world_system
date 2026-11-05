@@ -6,6 +6,7 @@
 #include "planet/globe_camera.hpp"
 #include "planet/lighting.hpp"
 #include "planet/shadows.hpp"
+#include "planet/rivers.hpp"
 #include <chrono>
 #include <fstream>
 #include <functional>
@@ -41,6 +42,76 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
     throw std::runtime_error("Walkable cave route was blocked");
 }
 void registerTests() {
+    test("rivers","Drainage is acyclic and accounts for all reference runoff at outlets",[] {
+        World w;const auto atlas=w.waterNetwork();const auto& nodes=atlas->nodes();double rain=0,outflow=0,area=0;
+        std::vector<double> incoming(nodes.size());
+        for(const auto& n:nodes) {
+            rain+=n.runoff;require(n.area>0 && n.discharge>=n.runoff,"Positive catchment and accumulated runoff");
+            if(n.downstream>=0) {const auto& parent=nodes[static_cast<std::size_t>(n.downstream)];require(parent.filled<n.filled,"Strictly earlier receiver excludes cycles");incoming[static_cast<std::size_t>(n.downstream)]+=n.discharge;}
+            else {outflow+=n.discharge;area+=n.area;}
+        }
+        for(std::size_t i=0;i<nodes.size();++i) near(nodes[i].discharge,nodes[i].runoff+incoming[i],1e-7,"Confluence conserves volumetric discharge");
+        near(rain,outflow,rain*1e-12,"All runoff reaches a terminal");near(atlas->runoff(),atlas->oceanDischarge(),rain*1e-12,"Atlas budget");
+        near(area,4*pi*w.config().radius*w.config().radius,area*1e-12,"Spherical cell areas cover the planet once");
+        require(atlas->reaches().size()>1000,"A planet-wide drainage network exists");
+    });
+    test("rivers","Longitudinal stages descend and meet at shared junctions",[] {
+        World w;const auto atlas=w.waterNetwork();
+        for(const auto& reach:atlas->reaches()) {
+            const auto& n=atlas->nodes()[reach.node];const auto& p=reach.points;
+            near(p.front().level,n.level,1e-9,"Shared upstream stage");near(p.back().level,atlas->nodes()[static_cast<std::size_t>(n.downstream)].level,1e-9,"Shared downstream stage");
+            for(std::size_t i=1;i<p.size();++i) {require(p[i].level<=p[i-1].level+1e-9 && p[i].along>p[i-1].along,"Downhill flow and positive reach length");require(p[i].width>0 && p[i].depth>0,"Finite wet cross section");}
+        }
+    });
+    test("rivers","Manning sections carry the requested volume and bound fast flow",[] {
+        for(double q:{.02,.1,1.,30.,500.,20000.}) for(double slope:{.00002,.001,.02}) {
+            const auto s=riverSection(q,slope);near(.8*s.width*s.depth*s.speed,q,q*1e-12,"Q equals area times mean speed");require(s.speed<=6.000001,"Bounded channel speed");
+            if(s.speed<5.99) {const double area=.8*s.width*s.depth,perimeter=.6*s.width+2*std::hypot(.2*s.width,s.depth);near(area*std::pow(area/perimeter,2./3)*std::sqrt(slope)/.035,q,q*1e-8,"Manning conveyance");}
+        }
+        require(riverSection(0,.01).depth==0,"Zero runoff is dry");bool bad=false;try{(void)riverSection(-1,.01);}catch(const std::invalid_argument&){bad=true;}require(bad,"Negative flow rejected");
+    });
+    test("rivers","Stream river and major river have continuous wet cross sections",[] {
+        World w;const auto atlas=w.waterNetwork();double previous=0;
+        for(auto kind:{RiverKind::Stream,RiverKind::River,RiverKind::Major}) {
+            const auto site=atlas->find(kind,w.findLand());const auto r=atlas->sample(site.center);
+            require(r.wet && r.width>previous && r.speed>0 && r.speed<=6.000001,"Increasing channel sizes with bounded moving water");previous=r.width;
+            const auto liquid=liquidAt(w,nullptr,nullptr,site.center);require(liquid.present && liquid.river && !liquid.ocean,"River is fresh surface water");near(liquid.level,r.level,1e-8,"Navigation and atlas share water stage");
+            const auto crossBank=normalized(cross(r.downstream,site.center));double area=0;constexpr int count=1000;
+            for(int i=0;i<count;++i) {const auto p=normalized(site.center+crossBank*((-.5+(i+.5)/count)*r.width/w.config().radius));const auto s=atlas->sample(p);require(s.wet,"No hole across the wet channel");area+=s.depth*r.width/count;}
+            near(area*r.speed,r.discharge,std::max(.001,r.discharge*.025),"Integrated cross-section flux agrees with Q");
+            require(!atlas->sample(normalized(site.center+crossBank*(r.width/w.config().radius))).wet,"Bank outside the channel is dry");
+        }
+    });
+    test("rivers","River current carries a swimmer and switching off motion stops the forcing",[] {
+        World w;const auto site=w.waterNetwork()->find(RiverKind::Major,w.findLand());Simulation sim(w,site.center,0,0);Explorer e(w);
+        e.teleport(w,site.center,&sim.water);const auto origin=e.up();const auto flow=liquidAt(w,&sim.water,&sim.motion,origin).current;
+        for(int i=0;i<40;++i) e.update(w,{},.1,&sim.water,&sim.motion);
+        require(e.swimming() && dot(e.up()-origin,flow)>0 && length(e.up()-origin)*w.config().radius>0.05,"Passive downstream drift");
+        w.modules().set(Module::WaterMotion,false);sim.advance(w,e.up(),0);near(length(liquidAt(w,&sim.water,&sim.motion,e.up()).current),0,0,"Motion toggle removes river velocity");
+        w.modules().set(Module::Rivers,false);require(!liquidAt(w,nullptr,nullptr,site.center).river,"River toggle removes analytical water");
+    });
+    test("rivers","Local runoff exchanges with a prescribed river without losing budget",[] {
+        RunoffGrid grid(8,4);for(auto& c:grid.cells){c.rock=0;c.soil=c.initialSoil=0;c.conductivity=0;c.water=.1;}
+        for(int z=0;z<8;++z) {auto& c=grid.cells[static_cast<std::size_t>(z*8+7)];c.river=true;c.riverLevel=.4;}
+        const double before=grid.waterVolume();const std::vector<double> rain(64,0);const auto change=grid.advance(5,rain,0,false,false,false,0);
+        require(change.boundaryM3<0 && grid.waterVolume()>before,"Prescribed stage supplies neighbouring land cells even with ocean disabled");
+        near(grid.waterVolume()+change.boundaryM3,before,1e-9,"River boundary exchange closes local volume budget");
+    });
+    test("rivers","Atlas is deterministic and toggles restore channel geometry",[] {
+        World a,b;const auto site=a.waterNetwork()->find(RiverKind::River,a.findLand());
+        near(a.elevation(site.center),b.elevation(site.center),0,"Same seed reproduces bed");
+        const double bed=a.elevation(site.center);a.modules().set(Module::Rivers,false);const double natural=a.elevation(site.center);
+        require(std::abs(natural-bed)>.01,"Enabled rivers condition the initial terrain");a.modules().set(Module::Rivers,true);near(a.elevation(site.center),bed,0,"Re-enabling restores original channel");
+        const auto atlas=a.waterNetwork();for(const auto p:std::array{direction(0,pi-1e-12),direction(0,-pi+1e-12),Vec3{0,1,0},Vec3{0,-1,0}}) require(std::isfinite(a.elevation(p)) && std::isfinite(length(atlas->oceanCurrent(p))),"Seam and poles remain finite");
+        require(serializePreferences(Preferences{}).find("rivers=1")!=std::string::npos,"River preference persists and defaults on");
+    });
+    test("rivers","Global ocean circulation is tangent bounded and fixed to the planet",[] {
+        World w;const auto atlas=w.waterNetwork();require(atlas->circulationResidual()<1e-6,"Steady streamfunction solve converged");double fastest=0;Vec3 sea{};
+        for(int i=0;i<400;++i) {const auto p=point(i,400),v=atlas->oceanCurrent(p);near(dot(p,v),0,1e-12,"Tangent ocean flow");fastest=std::max(fastest,length(v));if(length(v)>.01) sea=p;if(w.naturalElevation(p)>0) near(length(v),0,0,"No ocean current on land");}
+        require(fastest>.02 && fastest<2,"Nonzero bounded basin circulation");
+        const auto surface=atlas->oceanCurrent(sea),deep=atlas->oceanCurrent(sea,80);near(length(deep)/length(surface),std::exp(-1.),1e-10,"Prescribed mixed-layer attenuation");
+        World again;near(length(surface-again.waterNetwork()->oceanCurrent(sea)),0,0,"Moving observers do not reset the reference current");
+    });
     test("lighting","Solar visibility and direct light vanish on the night side",[] {
         Config c;c.obliquity=0;c.eccentricity=0;const Vec3 p{1,0,0};
         const auto noon=lighting(c,p,solarHourTime(c,p,79*c.day,12));
@@ -50,8 +121,20 @@ void registerTests() {
         SkyConditions mountain;mountain.altitude=6000;
         require(lighting(c,p,solarHourTime(c,p,79*c.day,12),mountain).starVisibility==0,"Daytime stars remain hidden on high mountains");
         require(night.direct==0 && night.starVisibility>.99,"No direct sunlight at midnight");
-        require(night.ambient.b>night.ambient.r*2 && night.ambient.b<.08,"Weak cold night fill");
+        require(night.ambient.b>night.ambient.r*2 && night.ambient.b<.75,"Adapted cold night fill remains below full daylight");
         require(night.starlightLux<.001 && night.starlightLux>0,"Moonless starlight scale");
+    });
+    test("lighting","Display adaptation preserves visibility through night twilight and storms",[] {
+        Config c;c.obliquity=0;c.eccentricity=0;const Vec3 p{1,0,0};
+        for(double cloud:{0.,.2,.8}) for(int hour=0;hour<48;++hour) {
+            SkyConditions sky;sky.cloudWater=sky.sunCloudWater=cloud;sky.rainMmH=cloud*60;
+            const auto l=lighting(c,p,solarHourTime(c,p,0,hour*.5),sky);
+            const double gray=.2126*(l.ambient.r+l.sunlight.r*std::max(0.,std::sin(l.elevation)))+
+                .7152*(l.ambient.g+l.sunlight.g*std::max(0.,std::sin(l.elevation)))+
+                .0722*(l.ambient.b+l.sunlight.b*std::max(0.,std::sin(l.elevation)));
+            require(gray>.18,"Display illumination has no black interval between day and night");
+            if(hour==24 && cloud>.7) require(gray>.55,"Overcast noon retains diffuse visibility");
+        }
     });
     test("lighting","Solar time selection follows geography and keeps the existing orbital clock",[] {
         Config c;
@@ -1061,6 +1144,7 @@ void registerTests() {
     test("detail","Cube edges corners poles and dateline have stable coverage",[] {
       for(double radius:{100000.,6371000.}) {
         Config c; c.radius=radius; c.seaLevel=-5000; World w(c);
+        w.modules().set(Module::Rivers,false); // This fixture checks populated dry cube charts, not wet channels.
         w.modules().set(Module::Biomes,false);
         std::size_t total=0;
         for(Vec3 p:std::vector<Vec3>{{1,1,0},{1,-1,0},{-1,1,0},{1,0,1},{-1,0,-1},{0,1,-1},{1,1,1},{-1,-1,-1},{0,1,0},{0,-1,0},{-1,0,0}}) {

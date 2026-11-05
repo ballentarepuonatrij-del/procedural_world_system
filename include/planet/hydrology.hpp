@@ -13,6 +13,8 @@ struct GroundCell {
     double sediment{};                  // kg/m2 suspended solids
     double roughness=0.04, conductivity=2e-6, vegetation=0;
     bool sea=false;                     // prescribed sea-level reservoir, not simulated ocean
+    bool river=false;                   // prescribed river stage; exchange counted at local boundary
+    double riverLevel=0;
     bool masked=false;                  // unresolved multilevel cave region: impermeable solver boundary
     double bed() const { return rock+soil; }
 };

@@ -1,4 +1,5 @@
 #include "planet/surface_detail.hpp"
+#include "planet/rivers.hpp"
 #include <stdexcept>
 
 namespace planet {
@@ -85,6 +86,7 @@ std::vector<SurfaceObject> surfaceSites(const World& world,Vec3 center,double ra
                 const double area=std::pow(dot(p,face),3);
                 if(randomUnit(id+2)>area) continue;
                 const auto habitat=world.climatology(p);
+                if(world.modules().enabled(Module::Rivers) && world.waterNetwork()->sample(p).wet) continue;
                 const double depth=world.config().seaLevel-habitat.elevation;
                 if(habitat.ocean && (depth<.5 || depth>30)) continue;
                 if(const auto site=world.caveSite(p); site && site->protectedGround(p)) continue;

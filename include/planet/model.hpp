@@ -3,15 +3,16 @@
 #include "planet/landforms.hpp"
 #include <array>
 #include <string_view>
+#include <memory>
 
 namespace planet {
 constexpr double stefanBoltzmann = 5.670374419e-8;
 constexpr double gasConstantAir = 287.05287;
 constexpr double standardGravity = 9.80665;
 
-enum class Module : unsigned { Terrain, Ocean, Atmosphere, Climate, Biomes, SurfaceDetail, Wind, Clouds, Hydrology, Erosion, Landforms, Caves, WaterMotion, PlantGrowth, GlobalWeather, Sound, Count };
+enum class Module : unsigned { Terrain, Ocean, Atmosphere, Climate, Biomes, SurfaceDetail, Wind, Clouds, Hydrology, Erosion, Landforms, Caves, WaterMotion, PlantGrowth, GlobalWeather, Sound, Rivers, Count };
 constexpr auto moduleCount = static_cast<unsigned>(Module::Count);
-constexpr std::array<std::string_view, moduleCount> moduleNames{"Terrain", "Ocean", "Atmosphere", "Climate", "Biomes", "Surface detail", "Wind", "Clouds", "Surface water", "Erosion", "Landforms", "Caves", "Water motion", "Plant growth", "Global weather", "Sound"};
+constexpr std::array<std::string_view, moduleCount> moduleNames{"Terrain", "Ocean", "Atmosphere", "Climate", "Biomes", "Surface detail", "Wind", "Clouds", "Surface water", "Erosion", "Landforms", "Caves", "Water motion", "Plant growth", "Global weather", "Sound", "Rivers"};
 class Modules {
 public:
     bool requested(Module module) const;
@@ -69,6 +70,7 @@ struct Sample {
     Landform landform=Landform::Lowland;
 };
 
+class RiverNetwork;
 class World {
 public:
     explicit World(Config config = {});
@@ -76,6 +78,8 @@ public:
     Modules& modules() { return modules_; }
     const Modules& modules() const { return modules_; }
     double elevation(Vec3 unit) const;
+    double naturalElevation(Vec3 unit) const { return rawRelief(unit).elevation; }
+    std::shared_ptr<const RiverNetwork> waterNetwork() const;
     double surface(Vec3 unit) const;
     Relief relief(Vec3 unit) const;
     std::optional<CaveSite> caveSite(Vec3 unit,double reach=650,bool requireEnabled=true) const;
@@ -87,6 +91,7 @@ public:
     Color color(const Sample& sample) const;
     Vec3 findLand() const;
 private:
+    friend class RiverNetwork;
     Relief rawRelief(Vec3 unit) const;
     Sample evaluate(Vec3 unit, double seconds, bool annualMean) const;
     struct Plate { Vec3 center; Vec3 velocity; double continental; };
@@ -97,5 +102,7 @@ private:
     std::array<double, 181> annualSolar_{};
     mutable std::optional<std::uint64_t> caveCacheId_;
     mutable std::optional<CaveSite> caveCache_;
+    mutable std::shared_ptr<const RiverNetwork> waterNetwork_;
+    mutable bool waterLandforms_=false,waterTerrain_=false;
 };
 } // namespace planet

@@ -1,5 +1,6 @@
 #include "planet/water_motion.hpp"
 #include "planet/hydrology.hpp"
+#include "planet/rivers.hpp"
 #include <complex>
 #include <stdexcept>
 
@@ -63,6 +64,8 @@ std::array<double,24> WaterMotion::targets(Vec3 wind) const {
 void WaterMotion::synchronize(const World& world,const Weather& weather,Vec3 observer) {
     if(world.config().seed!=config_.seed) throw std::invalid_argument("Reset water motion after changing the planet");
     enabled_=world.modules().enabled(Module::WaterMotion);
+    globalFlow_=enabled_ && world.modules().enabled(Module::Ocean) && world.modules().enabled(Module::Wind) && !experiment_;
+    if(globalFlow_) circulation_=world.waterNetwork();
     observer=normalized(observer);
     const bool moved=length(observer-anchor_)*config_.radius>5000;
     if(!initialized_ || moved) {
@@ -138,6 +141,7 @@ WaveSurface WaterMotion::waves(Vec3 p,double depth,bool ocean,double minimumWave
 Vec3 WaterMotion::current(Vec3 p,double belowSurface) const {
     if(!enabled_ || !oceanHere_) return {};
     auto flow=(east_*current_.east+north_*current_.north)*std::exp(-std::max(0.0,belowSurface-mixedDepth_)/mixedDepth_);
+    if(globalFlow_ && circulation_) flow+=circulation_->oceanCurrent(p,belowSurface);
     return flow-p*dot(flow,p);
 }
 double WaterMotion::significantHeight() const {
@@ -147,7 +151,11 @@ double WaterMotion::significantHeight() const {
 LiquidSample liquidAt(const World& world,const Hydrology* water,const WaterMotion* motion,Vec3 p) {
     p=normalized(p); LiquidSample liquid; liquid.bed=water ? water->ground(world,p) : world.elevation(p);
     liquid.level=liquid.bed;
-    if(world.modules().enabled(Module::Ocean) && liquid.bed<world.config().seaLevel) {
+    const auto river=world.modules().enabled(Module::Rivers) ? world.waterNetwork()->sample(p) : RiverSample{};
+    if(river.wet && river.level>world.config().seaLevel+.02) {
+        liquid.present=true;liquid.river=true;liquid.level=river.level;
+        if(world.modules().enabled(Module::WaterMotion)) liquid.current=river.downstream*river.speed;
+    } else if(world.modules().enabled(Module::Ocean) && liquid.bed<world.config().seaLevel) {
         liquid.ocean=true; liquid.present=true; liquid.level=world.config().seaLevel;
         if(motion) liquid.current=motion->current(p);
     } else if(water) {
@@ -157,7 +165,7 @@ LiquidSample liquidAt(const World& world,const Hydrology* water,const WaterMotio
             liquid.current=water->flowVector(ground.velocity); liquid.sediment=ground.sedimentKgM3;
         }
     }
-    if(liquid.present && motion) liquid.level+=motion->waves(p,liquid.level-liquid.bed,liquid.ocean).height;
+    if(liquid.present && motion && !liquid.river) liquid.level+=motion->waves(p,liquid.level-liquid.bed,liquid.ocean).height;
     liquid.depth=std::max(0.0,liquid.level-liquid.bed);
     return liquid;
 }

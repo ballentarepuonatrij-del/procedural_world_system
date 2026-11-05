@@ -1,4 +1,5 @@
 #include "planet/model.hpp"
+#include "planet/rivers.hpp"
 #include <limits>
 #include <stdexcept>
 
@@ -45,7 +46,8 @@ bool Modules::enabled(Module m) const {
     if (m == Module::Erosion) return enabled(Module::Hydrology);
     if (m == Module::Landforms) return enabled(Module::Terrain);
     if (m == Module::Caves) return enabled(Module::Landforms);
-    if (m == Module::WaterMotion) return enabled(Module::Ocean) || enabled(Module::Hydrology);
+    if (m == Module::Rivers) return enabled(Module::Terrain);
+    if (m == Module::WaterMotion) return enabled(Module::Ocean) || enabled(Module::Hydrology) || enabled(Module::Rivers);
     if (m == Module::PlantGrowth) return enabled(Module::SurfaceDetail) && enabled(Module::Biomes);
     if (m == Module::GlobalWeather) return enabled(Module::Wind) && enabled(Module::Climate);
     return true;
@@ -139,6 +141,21 @@ World::World(Config config) : config_(config), noise_(config.seed) {
     }
 }
 double World::elevation(Vec3 p) const { return relief(p).elevation; }
+std::shared_ptr<const RiverNetwork> World::waterNetwork() const {
+    const bool landforms=modules_.enabled(Module::Landforms),terrain=modules_.enabled(Module::Terrain);
+    if(waterNetwork_ && waterLandforms_==landforms && waterTerrain_==terrain) return waterNetwork_;
+    struct Cached {Config config;bool landforms,terrain;std::shared_ptr<const RiverNetwork> network;};
+    // Like the existing cave cache, this is used on the simulation thread.
+    // Retaining three immutable atlases avoids regenerating identical test/world copies.
+    static std::vector<Cached> cache;
+    for(const auto& entry:cache) if(entry.config.seed==config_.seed && entry.config.radius==config_.radius &&
+        entry.config.seaLevel==config_.seaLevel && entry.config.year==config_.year && entry.landforms==landforms && entry.terrain==terrain) {
+        waterNetwork_=entry.network;waterLandforms_=landforms;waterTerrain_=terrain;return waterNetwork_;
+    }
+    waterNetwork_=std::make_shared<RiverNetwork>(*this);waterLandforms_=landforms;waterTerrain_=terrain;
+    if(cache.size()>=3) cache.erase(cache.begin());
+    cache.push_back({config_,landforms,terrain,waterNetwork_});return waterNetwork_;
+}
 Relief World::rawRelief(Vec3 p) const {
     if (!modules_.enabled(Module::Terrain)) return {};
     p = normalized(p);
@@ -175,7 +192,8 @@ Relief World::rawRelief(Vec3 p) const {
     return modules_.enabled(Module::Landforms) ? shapeLandforms(p,config_.radius,config_.seaLevel,config_.seed,height,mountains/4000) : Relief{height};
 }
 double World::surface(Vec3 p) const {
-    const double h = elevation(p);
+    double h = elevation(p);
+    if(modules_.enabled(Module::Rivers)) {const auto river=waterNetwork()->sample(p);if(river.wet) h=std::max(h,river.level);}
     return modules_.enabled(Module::Ocean) ? std::max(h, config_.seaLevel) : h;
 }
 double World::annualInsolation(double lat) const {
@@ -194,7 +212,10 @@ Sample World::evaluate(Vec3 p, double seconds, bool annualMean) const {
     Sample s;
     const auto terrain=relief(p); s.elevation=terrain.elevation; s.landform=terrain.type;
     s.ocean = modules_.enabled(Module::Ocean) && s.elevation < config_.seaLevel;
-    const double height = s.ocean ? config_.seaLevel : s.elevation;
+    const auto river=modules_.enabled(Module::Rivers) ? waterNetwork()->sample(p) : RiverSample{};
+    const bool freshwater=river.wet && river.level>config_.seaLevel+.02;
+    if(freshwater) s.ocean=false;
+    const double height = s.ocean ? config_.seaLevel : freshwater ? river.level : s.elevation;
     const double lat = latitude(p);
     const double annual = annualInsolation(lat);
     const auto sun = orbit(config_,seconds);

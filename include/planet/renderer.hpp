@@ -4,6 +4,7 @@
 #include "planet/globe_camera.hpp"
 #include "planet/lighting.hpp"
 #include "planet/shadows.hpp"
+#include "planet/rivers.hpp"
 #include <windows.h>
 #include <GL/gl.h>
 #include <filesystem>
@@ -11,9 +12,9 @@
 
 namespace planet {
 enum class SurfaceStyle { Natural, Grid, Wireframe };
-enum class WeatherLayer { Clouds, Pressure, Wind, Off };
+enum class WeatherLayer { Clouds, Pressure, Wind, Rivers, Currents, Off };
 inline const char* weatherLayerName(WeatherLayer layer) {
-    switch(layer) { case WeatherLayer::Clouds:return "clouds";case WeatherLayer::Pressure:return "pressure";case WeatherLayer::Wind:return "wind";default:return "off"; }
+    switch(layer) { case WeatherLayer::Clouds:return "clouds";case WeatherLayer::Pressure:return "pressure";case WeatherLayer::Wind:return "wind";case WeatherLayer::Rivers:return "rivers";case WeatherLayer::Currents:return "currents";default:return "off"; }
 }
 inline const char* surfaceStyleName(SurfaceStyle style) {
     switch(style) {
@@ -43,7 +44,7 @@ public:
     ~Renderer();
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
-    void invalidate() { dirty_=true; globeDirty_=true; weatherDirty_=true; }
+    void invalidate() { dirty_=true; globeDirty_=true; weatherDirty_=true;waterMapDirty_=true; }
     void draw(const World& world, const Explorer& explorer, const Simulation& simulation,const ViewState& view);
     void capture(const std::filesystem::path& path, int width, int height) const;
     std::string device() const;
@@ -63,6 +64,7 @@ public:
     bool shadowSupport() const { return stencilBits_>=8; }
     bool shadowsUsed() const { return shadowsUsed_; }
     const Lighting& illumination() const { return lighting_; }
+    std::size_t riverTriangles() const { return riverTriangles_; }
 private:
     void buildTerrain(const World& world,const Explorer& explorer,const Hydrology& water,double seconds);
     void buildGlobe(const World& world,double seconds);
@@ -72,6 +74,8 @@ private:
     void drawWeather(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight);
     void drawGlobalWeather(const GlobalWeather& weather,const ViewState& view);
     void drawWater(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight);
+    void drawRivers(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight);
+    void drawGlobalWater(const World& world,const ViewState& view);
     void drawHud(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view);
     void text(float x,float y,const std::string& value,Color color,bool large=false);
     GLuint terrain_=0, terrainGrid_=0, globe_=0, font_=0, headingFont_=0, detailTexture_=0;
@@ -86,7 +90,7 @@ private:
     bool lastYoung_=false;
     GLuint cloudTexture_=0;
     std::size_t cloudCount_=0;
-    struct WaterVertex { Vec3 up,position; double altitude; bool available; double spacing; };
+    struct WaterVertex { Vec3 up,position; double altitude; bool available,river; double spacing; };
     std::vector<WaterVertex> waterVertices_;
     std::vector<std::array<std::size_t,3>> waterTriangles_;
     std::size_t waterCount_=0;
@@ -109,5 +113,10 @@ private:
     bool shadowDirty_=true,shadowsUsed_=false,stencilWrap_=false;
     GLint stencilBits_=0;
     std::size_t starCount_=0,shadowCount_=0;
+    std::vector<std::pair<std::size_t,std::size_t>> riverSegments_;
+    std::size_t riverTriangles_=0;
+    GLuint waterMap_=0,riverTexture_=0;
+    bool waterMapDirty_=true;
+    WeatherLayer waterMapLayer_=WeatherLayer::Off;
 };
 } // namespace planet

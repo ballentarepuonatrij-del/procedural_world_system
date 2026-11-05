@@ -14,7 +14,7 @@
 
 namespace planet {
 namespace {
-constexpr std::array<std::string_view,moduleCount> keys{"terrain","ocean","atmosphere","climate","biomes","detail","wind","clouds","water","erosion","landforms","caves","water_motion","plant_growth","global_weather","sound"};
+constexpr std::array<std::string_view,moduleCount> keys{"terrain","ocean","atmosphere","climate","biomes","detail","wind","clouds","water","erosion","landforms","caves","water_motion","plant_growth","global_weather","sound","rivers"};
 std::string_view trim(std::string_view text) {
     const auto first=text.find_first_not_of(" \t\r\n");
     if(first==text.npos) return {};

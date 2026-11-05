@@ -2,6 +2,7 @@
 #include <queue>
 #include <numeric>
 #include <stdexcept>
+#include <atomic>
 
 namespace planet {
 namespace {
@@ -33,6 +34,8 @@ std::optional<RiverKind> riverKind(std::string_view name) {
     return {};
 }
 RiverNetwork::RiverNetwork(const World& world) : base_(world) {
+    static std::atomic<std::uint64_t> nextIdentity{1};
+    cacheIdentity_=nextIdentity.fetch_add(1,std::memory_order_relaxed);
     base_.waterNetwork_.reset();base_.modules().set(Module::Rivers,false);
     const auto& config=base_.config();const double radius=config.radius,sea=config.seaLevel;
     nodes_.resize(columns*rows);std::vector<bool> visited(nodes_.size());std::vector<int> order;
@@ -142,9 +145,13 @@ RiverPoint RiverNetwork::point(std::size_t reach,std::size_t segment,double t) c
     p.up=normalized(p.up+p.left*(amplitude*std::sin(tau*p.along/wavelength+phase)/base_.config().radius));return p;
 }
 RiverSample RiverNetwork::sample(Vec3 up,double natural) const {
+    // Atlases are immutable and shared by the simulation and mesh worker.
+    // Only the single-query acceleration cache belongs to the calling thread.
+    struct Cache {std::uint64_t identity=0;Vec3 up{};double natural=0;RiverSample sample;};
+    static thread_local Cache cache;
     up=normalized(up);
-    if(sampleCached_ && up.x==cachedUp_.x && up.y==cachedUp_.y && up.z==cachedUp_.z &&
-       (!std::isfinite(natural) || natural==cachedNatural_)) return cachedSample_;
+    if(cache.identity==cacheIdentity_ && up.x==cache.up.x && up.y==cache.up.y && up.z==cache.up.z &&
+       (!std::isfinite(natural) || natural==cache.natural)) return cache.sample;
     RiverSample best;double score=1e30;const double radius=base_.config().radius;
     for(const auto id:candidates(up,8000)) {
         const auto s=segments_[id];const auto& pts=reaches_[s.reach].points;const auto& a=pts[s.point];const auto& b=pts[s.point+1];
@@ -174,7 +181,7 @@ RiverSample RiverNetwork::sample(Vec3 up,double natural) const {
         best={true,away<.5*p.width,p.up,normalized(flow-up*dot(flow,up)),away,dot(up-p.up,p.left)*radius,p.level,bed,
             std::max(0.,p.level-bed),p.width,p.discharge,speed,p.along,std::max(minimumSlope,(a.level-b.level)/std::max(1.,b.along-a.along))};
     }
-    cachedUp_=up;cachedSample_=best;cachedNatural_=natural;sampleCached_=true;return best;
+    cache={cacheIdentity_,up,natural,best};return best;
 }
 std::vector<std::pair<std::size_t,std::size_t>> RiverNetwork::nearby(Vec3 up,double radius) const {
     std::vector<std::pair<std::size_t,std::size_t>> result;

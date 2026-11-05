@@ -53,9 +53,6 @@ private:
     std::unordered_map<int,std::vector<std::size_t>> buckets_;
     std::vector<double> streamfunction_;
     double totalRunoff_=0,oceanDischarge_=0,circulationResidual_=0;
-    mutable Vec3 cachedUp_{};
-    mutable RiverSample cachedSample_;
-    mutable double cachedNatural_=0;
-    mutable bool sampleCached_=false;
+    std::uint64_t cacheIdentity_=0;
 };
 } // namespace planet

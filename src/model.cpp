@@ -1,4 +1,5 @@
 #include "planet/model.hpp"
+#include <mutex>
 #include "planet/rivers.hpp"
 #include <limits>
 #include <stdexcept>
@@ -144,9 +145,10 @@ double World::elevation(Vec3 p) const { return relief(p).elevation; }
 std::shared_ptr<const RiverNetwork> World::waterNetwork() const {
     const bool landforms=modules_.enabled(Module::Landforms),terrain=modules_.enabled(Module::Terrain);
     if(waterNetwork_ && waterLandforms_==landforms && waterTerrain_==terrain) return waterNetwork_;
+    static std::mutex atlasMutex;const std::lock_guard lock(atlasMutex);
     struct Cached {Config config;bool landforms,terrain;std::shared_ptr<const RiverNetwork> network;};
-    // Like the existing cave cache, this is used on the simulation thread.
-    // Retaining three immutable atlases avoids regenerating identical test/world copies.
+    // Each thread owns its World snapshot; the shared immutable atlas pool
+    // is protected during lookup/creation and retains three recent worlds.
     static std::vector<Cached> cache;
     for(const auto& entry:cache) if(entry.config.seed==config_.seed && entry.config.radius==config_.radius &&
         entry.config.seaLevel==config_.seaLevel && entry.config.year==config_.year && entry.landforms==landforms && entry.terrain==terrain) {

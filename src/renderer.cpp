@@ -1,4 +1,5 @@
 #include "planet/renderer.hpp"
+#include <chrono>
 #include <array>
 #include <fstream>
 #include <iomanip>
@@ -9,6 +10,13 @@
 #include <cstdlib>
 
 namespace planet {
+namespace {
+struct DrawTimer {
+    double& milliseconds;
+    std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
+    ~DrawTimer() { milliseconds+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count(); }
+};
+}
 namespace {
 void perspective(double fov,double aspect,double nearPlane,double farPlane) {
     const double top = nearPlane*std::tan(fov/2);
@@ -29,27 +37,6 @@ void rect(float x,float y,float w,float h,Color c,float alpha=1) {
 }
 std::string fixed(double value,int precision=1) {
     std::ostringstream out; out << std::fixed << std::setprecision(precision) << value; return out.str();
-}
-double terrainSpacing(const World& world,const Explorer& explorer) {
-    const double aboveGround=std::max(0.0,explorer.altitude()-world.surface(explorer.up()));
-    const int level=clamp(static_cast<int>(std::floor(std::log2(std::max(1.0,aboveGround/64)))),0,12);
-    return std::ldexp(2.0,level);
-}
-std::vector<double> terrainAxis(double center,double step) {
-    std::vector<double> points;
-    // Nested powers-of-two lattices in a fixed cube-face chart. The sample
-    // positions stay on the planet as the camera moves; only LOD membership changes.
-    for(double spacing=step,extent=step*8;extent<=262144;spacing*=2,extent*=2) {
-        const auto first=static_cast<std::int64_t>(std::ceil((center-extent)/spacing));
-        const auto last=static_cast<std::int64_t>(std::floor((center+extent)/spacing));
-        for(auto i=first;i<=last;++i) {
-            const double position=static_cast<double>(i)*spacing;
-            if(spacing==step || std::abs(position-center)>extent/2) points.push_back(position);
-        }
-    }
-    std::sort(points.begin(),points.end());
-    points.erase(std::unique(points.begin(),points.end()),points.end());
-    return points;
 }
 GLuint makeFont(HDC dc,int size,int weight) {
     const HFONT font = CreateFontW(size,0,0,0,weight,FALSE,FALSE,FALSE,ANSI_CHARSET,
@@ -133,6 +120,7 @@ Renderer::Renderer(HDC dc) {
     glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,64,64,0,GL_RGBA,GL_UNSIGNED_BYTE,cloudPixels.data());
 }
 Renderer::~Renderer() {
+    discardUpload();if(terrainChunks_) glDeleteLists(terrainChunks_,terrainChunksCount_);
     glDeleteLists(terrain_,1); glDeleteLists(globe_,1);
     glDeleteLists(terrainGrid_,1);
     glDeleteLists(objects_,1); glDeleteLists(caves_,1);
@@ -149,250 +137,99 @@ std::string Renderer::device() const {
     return vendor ? reinterpret_cast<const char*>(vendor) : "unknown";
 }
 void Renderer::buildTerrain(const World& world,const Explorer& explorer,const Hydrology& water,double seconds) {
-    terrainCasters_.clear();shadowDirty_=true;
-    // Local +Z points south so the rendering basis is right-handed.
-    anchor_=explorer.up(); east_=east(anchor_); north_=-north(anchor_);
-    const double radius=world.config().radius;
-    terrainStep_=terrainSpacing(world,explorer);
-    terrainEyeHeight_=explorer.altitude();
-    Vec3 face;
-    if(std::abs(anchor_.x)>=std::abs(anchor_.y) && std::abs(anchor_.x)>=std::abs(anchor_.z))
-        face={std::copysign(1.0,anchor_.x),0,0};
-    else if(std::abs(anchor_.y)>=std::abs(anchor_.z)) face={0,std::copysign(1.0,anchor_.y),0};
-    else face={0,0,std::copysign(1.0,anchor_.z)};
-    const Vec3 reference=std::abs(face.y)<0.5 ? Vec3{0,1,0} : Vec3{0,0,1};
-    const Vec3 right=normalized(cross(reference,face)), down=cross(right,face);
-    const auto cave=world.caveSite(anchor_);
-    const double projection=radius/dot(anchor_,face);
-    auto xs=terrainAxis(dot(anchor_,right)*projection,terrainStep_);
-    auto ys=terrainAxis(dot(anchor_,down)*projection,terrainStep_);
-    if(water.enabled() && explorer.altitude()-water.ground(world,anchor_)<1200) {
-        double minX=1e30,maxX=-1e30,minY=1e30,maxY=-1e30;
-        for(int z:{0,Hydrology::resolution-1}) for(int x:{0,Hydrology::resolution-1}) {
-            const auto q=water.directionAt(water.cellX(x),water.cellZ(z));
-            const double k=radius/dot(q,face),cx=dot(q,right)*k,cy=dot(q,down)*k;
-            minX=std::min(minX,cx); maxX=std::max(maxX,cx); minY=std::min(minY,cy); maxY=std::max(maxY,cy);
+    DrawTimer timer{timings_.terrain};
+    uploadTerrain(makeTerrainMesh(world,water,explorer.up(),explorer.altitude(),seconds));
+}
+void Renderer::uploadTerrain(TerrainMesh mesh) {
+    discardUpload();
+    const auto compile=[](GLuint list,const std::vector<TerrainVertex>& vertices) {
+        glNewList(list,GL_COMPILE);glBegin(GL_TRIANGLES);
+        for(const auto& v:vertices) {
+            glNormal3d(v.normal.x,v.normal.y,v.normal.z);glColor3f(v.color.r,v.color.g,v.color.b);
+            glTexCoord2d(v.u,v.v);glVertex3d(v.position.x,v.position.y,v.position.z);
         }
-        const auto refine=[](std::vector<double>& axis,double low,double high) {
-            for(double v=std::ceil(low/4)*4;v<=high;v+=4) axis.push_back(v);
-            std::sort(axis.begin(),axis.end()); axis.erase(std::unique(axis.begin(),axis.end()),axis.end());
-        };
-        refine(xs,minX,maxX); refine(ys,minY,maxY);
-    }
-    if(cave && explorer.altitude()-world.surface(anchor_)<1200) {
-        double minX=1e30,maxX=-1e30,minY=1e30,maxY=-1e30;
-        for(double z:{-85.,290.}) for(double x:{-110.,110.}) {
-            const auto q=cave->directionAt(x,z); const double k=radius/dot(q,face);
-            minX=std::min(minX,dot(q,right)*k); maxX=std::max(maxX,dot(q,right)*k);
-            minY=std::min(minY,dot(q,down)*k); maxY=std::max(maxY,dot(q,down)*k);
-        }
-        const double step=std::pow(2.0,std::ceil(std::log2(2/std::pow(dot(cave->anchor,face),2))));
-        const auto refine=[&](std::vector<double>& axis,double low,double high) {
-            for(double v=std::ceil(low/step)*step;v<=high;v+=step) axis.push_back(v);
-            std::sort(axis.begin(),axis.end()); axis.erase(std::unique(axis.begin(),axis.end()),axis.end());
-        };
-        refine(xs,minX,maxX); refine(ys,minY,maxY);
-    }
-    riverSegments_.clear();
-    if(world.modules().enabled(Module::Rivers)) {
-        const auto network=world.waterNetwork();riverSegments_=network->nearby(anchor_,2200);
-        const auto river=network->sample(anchor_);
-        if(river.channel && river.distance<river.width*.5+40 && explorer.altitude()-world.surface(anchor_)<250) {
-            const double extent=clamp(river.width*3,40.,192.),spacing=river.width<4 ? .5 : river.width<16 ? 2. : 8.;
-            const auto refine=[&](std::vector<double>& axis,double center) {
-                for(double p=std::ceil((center-extent)/spacing)*spacing;p<=center+extent;p+=spacing) axis.push_back(p);
-                std::sort(axis.begin(),axis.end());axis.erase(std::unique(axis.begin(),axis.end()),axis.end());
-            };
-            refine(xs,dot(anchor_,right)*projection);refine(ys,dot(anchor_,down)*projection);
-        }
-    }
-    const int columns=static_cast<int>(xs.size()),rows=static_cast<int>(ys.size());
-    const double aboveGround=std::max(0.0,explorer.altitude()-world.surface(anchor_));
-    struct Vertex { Vec3 position; Color color; double u,v; float gridAlpha; Vec3 normal{}; bool ocean{}; Vec3 unit{}; double height{}; CaveColumn cavity{}; Color rockColor{}; };
-    std::vector<Vertex> vertices(xs.size()*ys.size());
-    waterVertices_.clear(); waterTriangles_.clear();
-    waterVertices_.reserve(vertices.size());
-    const Noise material(world.config().seed^0x695c17ULL);
-    for(int y=0;y<rows;++y) for(int x=0;x<columns;++x) {
-        const Vec3 p=normalized(face*radius+right*xs[static_cast<std::size_t>(x)]+down*ys[static_cast<std::size_t>(y)]);
-        const auto sample=world.sample(p,seconds);
-        const auto ground=water.sample(p);
-        const auto river=world.modules().enabled(Module::Rivers) ? world.waterNetwork()->sample(p) : RiverSample{};
-        const double original=sample.elevation;
-        const double h=ground.available ? river.channel ? original+ground.bedChange*ground.weight : mix(original,ground.bed,ground.weight) : original;
-        const Vec3 relative=p*(radius+h)-anchor_*radius;
-        auto color=world.color(sample);
-        if(sample.ocean) {
-            const float shallow=static_cast<float>(1-clamp((world.config().seaLevel-sample.elevation)/150,0.0,1.0));
-            color={0.13f+0.30f*shallow,0.19f+0.20f*shallow,0.20f+0.10f*shallow};
-        } else {
-            const float variation=static_cast<float>(0.87+0.22*material.fbm(p*(radius/45),2));
-            const float moisture=static_cast<float>(ground.available ? 1-0.28*ground.saturation*ground.weight : 1);
-            color.r*=variation*moisture; color.g*=variation*moisture; color.b*=variation*moisture;
-        }
-        if(river.wet) color={.34f,.30f,.22f};
-        // World-anchored coordinates keep the material stationary when the local mesh recentres.
-        const Vec3 global=p*(radius+h);
-        const Vec3 position{dot(relative,east_),dot(relative,anchor_),dot(relative,north_)};
-        const double localSpacing=std::max(x>0 ? xs[static_cast<std::size_t>(x)]-xs[static_cast<std::size_t>(x-1)] : terrainStep_,
-                                           y>0 ? ys[static_cast<std::size_t>(y)]-ys[static_cast<std::size_t>(y-1)] : terrainStep_);
-        waterVertices_.push_back({p,position,h,world.modules().enabled(Module::Ocean) || (ground.available && ground.weight>0),river.wet && river.level>world.config().seaLevel+.02,localSpacing});
-        const float alpha=static_cast<float>(1-smoothstep(1500+aboveGround*4,10000+aboveGround*12,std::hypot(position.x,position.z)));
-        const double band=0.5+0.5*std::sin(h/7.5+0.35*std::sin(h/27));
-        Color rock{0.44f,0.42f,0.36f};
-        if(sample.landform==Landform::Canyon || sample.landform==Landform::Plateau)
-            rock={static_cast<float>(0.52+0.14*band),static_cast<float>(0.30+0.12*band),static_cast<float>(0.18+0.10*band)};
-        else if(sample.landform==Landform::Karst) rock={static_cast<float>(0.48+0.12*band),static_cast<float>(0.46+0.12*band),static_cast<float>(0.39+0.12*band)};
-        else if(sample.landform==Landform::Mountains || sample.landform==Landform::Gorge) rock={0.39f,0.41f,0.42f};
-        if(cave && cave->protectedGround(p)) color=rock;
-        vertices[static_cast<std::size_t>(y*columns+x)]={position,color,
-            (global.x+global.z)*0.25,(global.y+global.z*0.37)*0.25,alpha,{},sample.ocean,p,h,cave ? cave->column(p) : CaveColumn{},rock};
-    }
-    const auto at=[&](int x,int y)->Vertex& { return vertices[static_cast<std::size_t>(y*columns+x)]; };
-    for(int y=0;y<rows;++y) for(int x=0;x<columns;++x) {
-        auto& v=at(x,y);
-        v.normal=normalized(cross(at(std::min(x+1,columns-1),y).position-at(std::max(x-1,0),y).position,
-                                  at(x,std::max(y-1,0)).position-at(x,std::min(y+1,rows-1)).position));
-        if(!v.ocean) {
-            const float rock=static_cast<float>(smoothstep(0.12,0.42,1-v.normal.y));
-            v.color={static_cast<float>(mix(v.color.r,v.rockColor.r,rock)),static_cast<float>(mix(v.color.g,v.rockColor.g,rock)),
-                     static_cast<float>(mix(v.color.b,v.rockColor.b,rock))};
-        }
-        // Grazing lines cover subpixel cells near the horizon. Fade them instead
-        // of accumulating a bright, flickering band of overlapping edges.
-        const double incidence=dot(v.normal,normalized(Vec3{0,terrainEyeHeight_,0}-v.position));
-        v.gridAlpha*=static_cast<float>(smoothstep(0.0,0.08,incidence));
-    }
-    for(int y=0;y<rows-1;++y) for(int x=0;x<columns-1;++x) {
-        const auto a=static_cast<std::size_t>(y*columns+x),b=a+1,c=a+static_cast<std::size_t>(columns),d=c+1;
-        for(const auto tri:{std::array<std::size_t,3>{a,c,d},std::array<std::size_t,3>{a,d,b}})
-            if(waterVertices_[tri[0]].available && waterVertices_[tri[1]].available && waterVertices_[tri[2]].available) waterTriangles_.push_back(tri);
-    }
-    waterRevision_=water.revision(); waterSteps_=water.steps();
-    const auto interpolate=[&](const Vertex& a,const Vertex& b,double t) {
-        Vertex v=a; v.unit=normalized(a.unit*(1-t)+b.unit*t); v.height=world.elevation(v.unit);
-        const Vec3 relative=v.unit*(radius+v.height)-anchor_*radius;
-        v.position={dot(relative,east_),dot(relative,anchor_),dot(relative,north_)};
-        v.normal=normalized(a.normal*(1-t)+b.normal*t);
-        v.color={static_cast<float>(mix(a.color.r,b.color.r,t)),static_cast<float>(mix(a.color.g,b.color.g,t)),static_cast<float>(mix(a.color.b,b.color.b,t))};
-        v.u=mix(a.u,b.u,t); v.v=mix(a.v,b.v,t); v.gridAlpha=static_cast<float>(mix(a.gridAlpha,b.gridAlpha,t));
-        v.cavity=cave ? cave->column(v.unit) : CaveColumn{}; return v;
+        glEnd();glEndList();
     };
-    const auto field=[](const Vertex& v,int plane) {
-        if(plane==0) return v.cavity.field;
-        if(plane==1) return -std::min(v.cavity.ceiling-v.height,v.height-v.cavity.floor);
-        return v.height-(plane==2 ? v.cavity.floor : v.cavity.ceiling);
-    };
-    const auto clip=[&](const std::vector<Vertex>& input,int plane) {
-        std::vector<Vertex> output;
-        if(input.empty()) return output;
-        for(std::size_t i=0;i<input.size();++i) {
-            const auto& a=input[i]; const auto& b=input[(i+1)%input.size()];
-            const bool inside=field(a,plane)>=0,next=field(b,plane)>=0;
-            if(inside) output.push_back(a);
-            if(inside!=next) {
-                double lo=0,hi=1;
-                for(int j=0;j<14;++j) { const double mid=(lo+hi)/2; if((field(interpolate(a,b,mid),plane)>=0)==inside) lo=mid; else hi=mid; }
-                auto v=interpolate(a,b,(lo+hi)/2);
-                if(plane==0) { v.cavity.field=0; v.cavity.floor=v.cavity.ceiling=(v.cavity.floor+v.cavity.ceiling)/2; }
-                else if(plane==2) v.cavity.floor=v.height;
-                else if(plane==3) v.cavity.ceiling=v.height;
-                output.push_back(v);
+    compile(terrain_,mesh.terrain);compile(caves_,mesh.caves);
+    glNewList(terrainGrid_,GL_COMPILE);glBegin(GL_LINES);
+    for(const auto& v:mesh.grid) {glColor4f(.20f,.82f,1.f,v.alpha);glVertex3d(v.position.x,v.position.y,v.position.z);}
+    glEnd();glEndList();glNewList(shadows_,GL_COMPILE);glEndList();
+    if(terrainChunks_) glDeleteLists(terrainChunks_,terrainChunksCount_);
+    terrainChunks_=0;terrainChunksCount_=0;preparedFlora_.reset();preparedShadow_=false;
+    adoptTerrain(std::move(mesh));
+}
+void Renderer::adoptTerrain(TerrainMesh mesh) {
+    anchor_=mesh.anchor;east_=mesh.east;north_=mesh.north;terrainStep_=mesh.spacing;terrainEyeHeight_=mesh.eyeHeight;
+    waterRevision_=mesh.waterRevision;waterSteps_=mesh.waterSteps;lastTerrainTime_=mesh.seconds;
+    terrainCasters_=std::move(mesh.casters);waterVertices_=std::move(mesh.waterVertices);waterTriangles_=std::move(mesh.waterTriangles);
+    objectSites_=std::move(mesh.plants);riverSegments_=std::move(mesh.rivers);caveCount_=mesh.caves.size()/3;
+    lastFloraDay_=-1e30;shadowDirty_=true;dirty_=false;
+}
+void Renderer::discardUpload() {
+    if(!meshUpload_) return;
+    std::size_t count=0;for(auto n:meshUpload_->chunks) count+=n;
+    if(meshUpload_->lists) glDeleteLists(meshUpload_->lists,static_cast<GLsizei>(count));
+    meshUpload_.reset();
+}
+void Renderer::beginUpload(SceneMesh scene) {
+    discardUpload();MeshUpload upload;upload.scene=std::move(scene);upload.epoch=terrainEpoch_;
+    constexpr std::size_t chunk=3072;
+    const auto& mesh=upload.scene.terrain;
+    const std::array sizes{mesh.terrain.size(),mesh.caves.size(),mesh.grid.size(),upload.scene.shadows.size()*3};
+    std::size_t count=0;
+    for(std::size_t i=0;i<sizes.size();++i) {upload.chunks[i]=(sizes[i]+chunk-1)/chunk;count+=upload.chunks[i];}
+    upload.lists=glGenLists(static_cast<GLsizei>(count));
+    if(!upload.lists) throw std::runtime_error("Cannot allocate streamed terrain display lists");
+    meshUpload_=std::move(upload);
+}
+void Renderer::advanceUpload(const Flora& flora,Vec3 sunlight) {
+    if(!meshUpload_) return;
+    if(meshUpload_->epoch!=terrainEpoch_) {discardUpload();++terrainDiscarded_;return;}
+    DrawTimer timer{timings_.terrain};const auto start=std::chrono::steady_clock::now();
+    auto& upload=*meshUpload_;auto& scene=upload.scene;auto& mesh=scene.terrain;
+    std::size_t count=0;for(auto n:upload.chunks) count+=n;
+    constexpr std::size_t chunk=3072;
+    // Each list is closed before drawing a frame. Never expose a partially
+    // uploaded mesh, and budget driver work independently of CPU generation.
+    do {
+        std::size_t section=0,part=upload.next;
+        while(section<3 && part>=upload.chunks[section]) part-=upload.chunks[section++];
+        const auto first=part*chunk;
+        glNewList(upload.lists+static_cast<GLuint>(upload.next),GL_COMPILE);glBegin(section==2 ? GL_LINES : GL_TRIANGLES);
+        if(section<2) {
+            const auto& vertices=section==0 ? mesh.terrain : mesh.caves;
+            for(std::size_t i=first;i<std::min(first+chunk,vertices.size());++i) {const auto& v=vertices[i];
+                glNormal3d(v.normal.x,v.normal.y,v.normal.z);glColor3f(v.color.r,v.color.g,v.color.b);
+                glTexCoord2d(v.u,v.v);glVertex3d(v.position.x,v.position.y,v.position.z);
             }
-        }
-        return output;
-    };
-    const auto terrainVertex=[](const Vertex& v) {
-        glNormal3d(v.normal.x,v.normal.y,v.normal.z); glColor3f(v.color.r,v.color.g,v.color.b);
-        glTexCoord2d(v.u,v.v); glVertex3d(v.position.x,v.position.y,v.position.z);
-    };
-    glNewList(terrain_,GL_COMPILE); glBegin(GL_TRIANGLES);
-    for(int y=0;y<rows-1;++y) for(int x=0;x<columns-1;++x) {
-        for(const auto& tri:{std::array<Vertex,3>{at(x,y),at(x,y+1),at(x+1,y+1)},std::array<Vertex,3>{at(x,y),at(x+1,y+1),at(x+1,y)}}) {
-            const auto polygon=cave ? clip({tri.begin(),tri.end()},1) : std::vector<Vertex>{tri.begin(),tri.end()};
-            for(std::size_t i=1;i+1<polygon.size();++i) {
-                const auto a=polygon[0].position,b=polygon[i].position,c=polygon[i+1].position;
-                if(std::max({std::hypot(a.x,a.z),std::hypot(b.x,b.z),std::hypot(c.x,c.z)})<1200) terrainCasters_.push_back({a,b,c});
-                terrainVertex(polygon[0]); terrainVertex(polygon[i]); terrainVertex(polygon[i+1]);
+        } else if(section==2) {
+            for(std::size_t i=first;i<std::min(first+chunk,mesh.grid.size());++i) {const auto& v=mesh.grid[i];
+                glColor4f(.20f,.82f,1.f,v.alpha);glVertex3d(v.position.x,v.position.y,v.position.z);
             }
+        } else for(std::size_t i=first;i<std::min(first+chunk,scene.shadows.size()*3);++i) {
+            const auto& t=scene.shadows[i/3];const auto p=i%3==0 ? t.a : i%3==1 ? t.b : t.c;glVertex3d(p.x,p.y,p.z);
         }
+        glEnd();glEndList();++upload.next;
+    } while(upload.next<count && std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()<3);
+    if(upload.next<count) return;
+    const std::array<GLuint,4> parents{terrain_,caves_,terrainGrid_,shadows_};std::size_t offset=0;
+    for(std::size_t section=0;section<parents.size();++section) {
+        glNewList(parents[section],GL_COMPILE);
+        for(std::size_t i=0;i<upload.chunks[section];++i) glCallList(upload.lists+static_cast<GLuint>(offset+i));
+        glEndList();offset+=upload.chunks[section];
     }
-    glEnd(); glEndList();
-    caveCount_=0;
-    glNewList(caves_,GL_COMPILE); glBegin(GL_TRIANGLES);
-    if(cave) for(int y=0;y<rows-1;++y) for(int x=0;x<columns-1;++x) {
-        for(const auto& tri:{std::array<Vertex,3>{at(x,y),at(x,y+1),at(x+1,y+1)},std::array<Vertex,3>{at(x,y),at(x+1,y+1),at(x+1,y)}}) {
-            if(std::max({tri[0].cavity.field,tri[1].cavity.field,tri[2].cavity.field})<0) continue;
-            const auto footprint=clip({tri.begin(),tri.end()},0);
-            for(int side=2;side<=3;++side) {
-                const auto polygon=clip(footprint,side);
-                const auto point=[&](const Vertex& v) {
-                    const double h=side==2 ? v.cavity.floor : v.cavity.ceiling;
-                    const Vec3 p=v.unit*(radius+h)-anchor_*radius;
-                    return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)};
-                };
-                for(std::size_t i=1;i+1<polygon.size();++i) {
-                    const auto a=point(polygon[0]),b=point(polygon[i]),c=point(polygon[i+1]);
-                    auto normal=normalized(cross(b-a,c-a));
-                    if((normal.y>0)!=(side==2)) normal=-normal;
-                    glNormal3d(normal.x,normal.y,normal.z);
-                    for(const auto index:{std::size_t{0},i,i+1}) {
-                        const auto& v=polygon[index]; const auto p=point(v);
-                        const double height=side==2 ? v.cavity.floor : v.cavity.ceiling;
-                        const float shade=static_cast<float>(0.83+0.12*std::sin(height*1.5)+0.05*std::sin(height*5));
-                        glColor3f(0.51f*shade,0.47f*shade,0.38f*shade); glTexCoord2d(v.u,v.v);
-                        glVertex3d(p.x,p.y,p.z);
-                    }
-                    ++caveCount_;
-                }
-            }
-        }
-    }
-    glEnd(); glEndList();
-    glNewList(terrainGrid_,GL_COMPILE);
-    glBegin(GL_LINES);
-    const auto edge=[&](int ax,int ay,int bx,int by,bool diagonal) {
-        const auto& a=vertices[static_cast<std::size_t>(ay*columns+ax)];
-        const auto& b=vertices[static_cast<std::size_t>(by*columns+bx)];
-        if(a.gridAlpha==0 && b.gridAlpha==0) return;
-        if(cave && (field(a,1)<0 || field(b,1)<0)) return;
-        const auto vertex=[&](const Vertex& v) {
-            glColor4f(0.20f,0.82f,1.0f,v.gridAlpha*(diagonal ? 0.34f : 0.75f));
-            glVertex3d(v.position.x,v.position.y,v.position.z);
-        };
-        vertex(a); vertex(b);
-    };
-    for(int y=0;y<rows;++y) for(int x=0;x<columns;++x) {
-        if(x+1<columns) edge(x,y,x+1,y,false);
-        if(y+1<rows) edge(x,y,x,y+1,false);
-        // Match the diagonal of the filled triangle strip, including its depth.
-        if(x+1<columns && y+1<rows) edge(x,y,x+1,y+1,true);
-    }
-    glEnd(); glEndList();
-    objectSites_.clear();lastFloraDay_=-1e30;
-    if(aboveGround<1800) {
-        const auto objects=surfaceSites(world,anchor_,420,aboveGround<100);
-        for(const auto& object:objects) {
-            const double distance=length(object.up-anchor_)*radius;
-            const double range=object.kind==DetailKind::Tree ? 420 : (object.kind==DetailKind::Rock ? 220 : 80);
-            if(distance>range) continue;
-            // Seat objects on the actual rendered triangle. Distant LOD samples
-            // can differ from the exact collision height; roots must not float.
-            const double project=radius/dot(object.up,face);
-            const double x=dot(object.up,right)*project,y=dot(object.up,down)*project;
-            const int ix=clamp(static_cast<int>(std::upper_bound(xs.begin(),xs.end(),x)-xs.begin())-1,0,columns-2);
-            const int iy=clamp(static_cast<int>(std::upper_bound(ys.begin(),ys.end(),y)-ys.begin())-1,0,rows-2);
-            const double tx=clamp((x-xs[static_cast<std::size_t>(ix)])/(xs[static_cast<std::size_t>(ix+1)]-xs[static_cast<std::size_t>(ix)]),0.0,1.0);
-            const double ty=clamp((y-ys[static_cast<std::size_t>(iy)])/(ys[static_cast<std::size_t>(iy+1)]-ys[static_cast<std::size_t>(iy)]),0.0,1.0);
-            const Vec3 a=at(ix,iy).position,d=at(ix+1,iy+1).position;
-            const Vec3 base=tx>=ty ? a*(1-tx)+at(ix+1,iy).position*(tx-ty)+d*ty
-                                  : a*(1-ty)+at(ix,iy+1).position*(ty-tx)+d*tx;
-            objectSites_.push_back({object,base});
-        }
-    }
-    lastTerrainTime_=seconds; dirty_=false;
+    if(terrainChunks_) glDeleteLists(terrainChunks_,terrainChunksCount_);
+    terrainChunks_=upload.lists;terrainChunksCount_=static_cast<GLsizei>(count);upload.lists=0;
+    const Vec3 localSun{dot(sunlight,mesh.east),dot(sunlight,mesh.anchor),dot(sunlight,mesh.north)};
+    const bool sameFlora=std::abs(flora.days()-scene.flora.days())<.25 &&
+        std::abs(flora.calendarDay()-scene.flora.calendarDay())<.25 && flora.young()==scene.flora.young();
+    preparedFlora_=sameFlora ? std::optional<Flora>{scene.flora} : std::nullopt;
+    preparedShadow_=sameFlora && scene.hasShadows && length(localSun-scene.sun)<=radians(.02);
+    shadowSun_=scene.sun;shadowCount_=scene.shadows.size();
+    adoptTerrain(std::move(mesh));meshUpload_.reset();++terrainUploads_;
 }
 void Renderer::buildObjects(const World& world,const Flora& flora) {
+    DrawTimer timer{timings_.plants};
     objectCasters_.clear();shadowDirty_=true;
     glNewList(objects_,GL_COMPILE);glBegin(GL_TRIANGLES);
     detailCount_=0;plantCount_=0;marineCount_=0;plantHeightSum_=0;focusPlant_.reset();
@@ -443,6 +280,7 @@ void Renderer::buildGlobe(const World& world,double seconds) {
     glEndList(); lastGlobeTime_=seconds; globeDirty_=false;
 }
 void Renderer::drawSky(const World& world,const Explorer& explorer,const ViewState& view) {
+    DrawTimer timer{timings_.sky};
     starCount_=0;
     if(!view.skyEnabled || (!view.globe && explorer.underwater())) return;
     if(stars_.empty() || starSeed_!=world.config().seed) {starSeed_=world.config().seed;stars_=starCatalog(starSeed_);}
@@ -500,7 +338,9 @@ void Renderer::drawSky(const World& world,const Explorer& explorer,const ViewSta
     glMatrixMode(GL_MODELVIEW);glPopMatrix();glMatrixMode(GL_PROJECTION);glPopMatrix();glMatrixMode(GL_MODELVIEW);glPopAttrib();
 }
 void Renderer::drawShadows(Vec3 sun,bool textured) {
+    DrawTimer timer{timings_.shadows};
     if(shadowDirty_ || length(sun-shadowSun_)>radians(.02)) {
+        DrawTimer buildTimer{timings_.shadowBuild};
         std::vector<Triangle> casters=terrainCasters_;casters.insert(casters.end(),objectCasters_.begin(),objectCasters_.end());
         const auto volume=shadowVolume(casters,sun);shadowCount_=volume.size();
         glNewList(shadows_,GL_COMPILE);glBegin(GL_TRIANGLES);
@@ -531,6 +371,12 @@ void Renderer::drawShadows(Vec3 sun,bool textured) {
     glPopAttrib();
 }
 void Renderer::draw(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view) {
+    timings_={};
+    const double travelSpeed=dirty_ || length(previousObserver_)<.5 || view.frameSeconds<=0 ? 0 :
+        length(explorer.up()-previousObserver_)*world.config().radius/view.frameSeconds;
+    previousObserver_=explorer.up();
+    const double detailStep=explorer.flying ? std::ldexp(2.,clamp(static_cast<int>(std::floor(std::log2(std::max(1.,travelSpeed/80)))),0,10)) : 2;
+    if(detailStep>flightDetailStep_ || travelSpeed<flightDetailStep_*25 || !explorer.flying) flightDetailStep_=detailStep;
     const auto& water=simulation.water;
     cloudCount_=0;waterCount_=0;rainCount_=0;lightningCount_=0;stormMarkerCount_=0;riverTriangles_=0;
     glViewport(0,0,view.width,view.height);
@@ -585,12 +431,45 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
             glEnd();
         }
     } else {
-        if(dirty_ || waterRevision_!=water.revision() || (water.enabled() && water.steps()-waterSteps_>=150) || length(explorer.up()-anchor_)*world.config().radius>std::max(12.0,terrainStep_*4) ||
+        if(terrainJob_.valid() && terrainJob_.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+            auto mesh=terrainJob_.get();
+            if(terrainJobEpoch_==terrainEpoch_) beginUpload(std::move(mesh));
+            else ++terrainDiscarded_;
+        }
+        advanceUpload(simulation.flora,sun.sunDirection);
+        if(dirty_) buildTerrain(world,explorer,water,view.seconds);
+        else if(!terrainJob_.valid() && !meshUpload_ && (waterRevision_!=water.revision() || (water.enabled() && water.steps()-waterSteps_>=150) ||
+           length(explorer.up()-anchor_)*world.config().radius>std::max(12.0,terrainStep_*4) ||
            std::abs(explorer.altitude()-terrainEyeHeight_)>std::max(32.0,terrainStep_*4) ||
-           terrainSpacing(world,explorer)!=terrainStep_ || std::abs(view.seconds-lastTerrainTime_)>900)
-            buildTerrain(world,explorer,water,view.seconds);
-        if(std::abs(simulation.flora.days()-lastFloraDay_)>=.25 || std::abs(simulation.flora.calendarDay()-lastFloraCalendar_)>=.25 || simulation.flora.young()!=lastYoung_)
-            buildObjects(world,simulation.flora);
+           terrainSpacing(world,explorer.up(),explorer.altitude(),flightDetailStep_)!=terrainStep_ || std::abs(view.seconds-lastTerrainTime_)>900)) {
+            DrawTimer dispatch{timings_.terrain};
+            // One job at a time, with no queue of stale positions. The complete
+            // previous mesh stays visible while the next snapshot is prepared.
+            if(world.modules().enabled(Module::Rivers)) (void)world.waterNetwork();
+            terrainJobEpoch_=terrainEpoch_;++terrainJobs_;
+            const bool shadows=view.shadowsEnabled && shadowSupport() && !submerged && lighting_.direct>.002 && dot(sun.sunDirection,explorer.up())>0;
+            terrainJob_=std::async(std::launch::async,[worldCopy=world,waterCopy=water,flora=simulation.flora,observer=explorer.up(),altitude=explorer.altitude(),seconds=view.seconds,step=flightDetailStep_,shadows,sunlight=sun.sunDirection] {
+                SceneMesh scene;scene.terrain=makeTerrainMesh(worldCopy,waterCopy,observer,altitude,seconds,step);scene.flora=flora;
+                const auto& mesh=scene.terrain;const auto local=[&](Vec3 p){return Vec3{dot(p,mesh.east),dot(p,mesh.anchor),dot(p,mesh.north)};};
+                scene.sun=local(sunlight);scene.hasShadows=shadows;
+                if(shadows) {
+                    auto casters=mesh.casters;
+                    for(const auto& site:mesh.plants) {
+                        const auto object=grownObject(site.object,&flora);const double distance=length(object.up-mesh.anchor)*worldCopy.config().radius;
+                        if(object.height<.015 || distance>240 || plantTraits(object.species).aquatic) continue;
+                        const bool simple=distance>(object.kind==DetailKind::Grass || object.kind==DetailKind::Shrub ? 24 : 100);
+                        for(const auto& face:detailMesh(object,site.base,local(object.up),local(east(object.up)),simple)) casters.push_back(face.triangle);
+                    }
+                    scene.shadows=shadowVolume(casters,scene.sun);
+                }
+                return scene;
+            });
+        }
+        if(std::abs(simulation.flora.days()-lastFloraDay_)>=.25 || std::abs(simulation.flora.calendarDay()-lastFloraCalendar_)>=.25 || simulation.flora.young()!=lastYoung_) {
+            buildObjects(world,preparedFlora_ ? *preparedFlora_ : simulation.flora);
+            if(preparedShadow_) shadowDirty_=false;
+            preparedFlora_.reset();preparedShadow_=false;
+        }
         perspective(radians(72),static_cast<double>(view.width)/view.height,explorer.underground() || submerged ? 0.08 : 0.25,400000);
         const auto local=[&](Vec3 p) { return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)}; };
         const Vec3 eye=local(explorer.up()*(world.config().radius+explorer.altitude())-anchor_*world.config().radius);
@@ -675,6 +554,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
     drawHud(world,explorer,simulation,view);
 }
 void Renderer::drawWater(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight) {
+    DrawTimer timer{timings_.water};
     const auto& water=simulation.water; const auto& motion=simulation.motion;
     const bool oceanEnabled=world.modules().enabled(Module::Ocean);
     if(!water.enabled() && !oceanEnabled) return;
@@ -682,16 +562,27 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
     const double radius=world.config().radius,sea=world.config().seaLevel;
     const Vec3 origin=anchor_*radius,eye=explorer.up()*(radius+explorer.altitude());
     const Vec3 sun=orbit(world.config(),view.seconds).sunDirection;
-    struct Vertex { Vec3 position; Color color; float alpha; double depth; };
-    std::vector<Vertex> vertices(waterVertices_.size()),triangles;
+    auto& vertices=waterFrame_;auto& triangles=waterDraw_;
+    vertices.assign(waterVertices_.size(),{});triangles.clear();
+    waterGround_.resize(waterVertices_.size());waterVisible_.assign(waterVertices_.size(),0);
     const bool wire=view.surfaceStyle==SurfaceStyle::Wireframe;
     if(!wire && world.modules().enabled(Module::Atmosphere)) glEnable(GL_FOG);
     for(std::size_t i=0;i<waterVertices_.size();++i) {
         const auto& v=waterVertices_[i]; if(!v.available) continue;
-        const auto ground=water.sample(v.up);
+        const auto ground=waterGround_[i]=water.sample(v.up);
         const bool riverWet=v.river;
         const bool ocean=!riverWet && oceanEnabled && (v.altitude<sea || !ground.available || ground.depth<0.0005);
         const double depth=riverWet ? -.01 : ocean ? sea-v.altitude : (ground.available ? ground.depth*ground.weight : 0);
+        vertices[i].depth=depth;
+    }
+    // Dry triangles cannot contribute pixels. Their shoreline neighbours still
+    // need the original positions/colours for exactly the same wet-edge clipping.
+    for(const auto& t:waterTriangles_) if(vertices[t[0]].depth>.0005 || vertices[t[1]].depth>.0005 || vertices[t[2]].depth>.0005)
+        for(const auto i:t) waterVisible_[i]=1;
+    for(std::size_t i=0;i<waterVertices_.size();++i) {
+        const auto& v=waterVertices_[i];if(!v.available || !waterVisible_[i]) continue;
+        const auto& ground=waterGround_[i];const double depth=vertices[i].depth;
+        const bool ocean=!v.river && oceanEnabled && (v.altitude<sea || !ground.available || ground.depth<0.0005);
         double level=ocean ? sea : v.altitude+depth;
         const auto wave=motion.waves(v.up,std::max(0.0,depth),ocean,v.spacing*2);
         level+=wave.height;
@@ -713,7 +604,8 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
         vertices[i]={local(position-origin),color,static_cast<float>(clamp(alpha,0.0,0.98)),depth};
     }
     for(const auto& t:waterTriangles_) {
-        std::array<Vertex,4> clipped{}; std::size_t count=0;
+        if(!waterVisible_[t[0]] && !waterVisible_[t[1]] && !waterVisible_[t[2]]) continue;
+        std::array<WaterDrawVertex,4> clipped{}; std::size_t count=0;
         for(int j=0;j<3;++j) {
             const auto& a=vertices[t[static_cast<std::size_t>(j)]]; const auto& b=vertices[t[static_cast<std::size_t>((j+1)%3)]];
             const bool inside=a.depth>0.0005,next=b.depth>0.0005;
@@ -757,8 +649,8 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
             glColor4f(0.55f,0.93f,1,0.08f); glVertex3d(tail.x,tail.y,tail.z);
         }
         if(oceanEnabled && motion.enabled()) for(const auto p:motion.probes()) {
-            const double depth=sea-world.elevation(p); const auto flow=motion.current(p); const double speed=length(flow);
-            if(depth<0.1 || speed<0.002) continue;
+            const auto flow=motion.current(p); const double speed=length(flow);if(speed<0.002) continue;
+            const double depth=sea-world.elevation(p);if(depth<0.1) continue;
             const auto behind=normalized(p-flow*(std::min(20.0,2.0/speed)/radius));
             const Vec3 head=local(p*(radius+sea+motion.waves(p,depth).height+0.04)-origin);
             const Vec3 tail=local(behind*(radius+sea+motion.waves(behind,depth).height+0.04)-origin);
@@ -770,6 +662,7 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
     glDisable(GL_BLEND); glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
 }
 void Renderer::drawRivers(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight) {
+    DrawTimer timer{timings_.rivers};
     if(!world.modules().enabled(Module::Rivers) || riverSegments_.empty()) return;
     const auto atlas=world.waterNetwork();const double radius=world.config().radius;
     const auto local=[&](Vec3 p) {const auto r=p-anchor_*radius;return Vec3{dot(r,east_),dot(r,anchor_),dot(r,north_)};};
@@ -902,6 +795,7 @@ void Renderer::drawGlobalWeather(const GlobalWeather& weather,const ViewState& v
     glLineWidth(1);
 }
 void Renderer::drawWeather(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight) {
+    DrawTimer timer{timings_.weather};
     const auto& weather=simulation.weather;
     if(!weather.windEnabled()) return;
     const auto local=[&](Vec3 p) { return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)}; };

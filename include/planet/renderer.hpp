@@ -5,10 +5,12 @@
 #include "planet/lighting.hpp"
 #include "planet/shadows.hpp"
 #include "planet/rivers.hpp"
+#include "planet/terrain_mesh.hpp"
 #include <windows.h>
 #include <GL/gl.h>
 #include <filesystem>
 #include <string>
+#include <future>
 
 namespace planet {
 enum class SurfaceStyle { Natural, Grid, Wireframe };
@@ -26,6 +28,7 @@ inline const char* surfaceStyleName(SurfaceStyle style) {
 struct ViewState {
     int width=1280, height=800;
     double seconds=79*86400.0, timeScale=1, fps=0;
+    double frameSeconds=0;
     bool globe=false, help=true, captured=false, paused=false;
     bool windTracers=false,waterTracers=true,headlamp=true;
     bool floraInfo=true;
@@ -38,13 +41,16 @@ struct ViewState {
     GlobeCamera globeCamera;
 };
 bool globeHudHit(const ViewState& view,int x,int y);
+struct RenderTimings {
+    double terrain=0,plants=0,shadowBuild=0,shadows=0,water=0,rivers=0,weather=0,sky=0;
+};
 class Renderer {
 public:
     explicit Renderer(HDC dc);
     ~Renderer();
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
-    void invalidate() { dirty_=true; globeDirty_=true; weatherDirty_=true;waterMapDirty_=true; }
+    void invalidate() { dirty_=true;globeDirty_=true;weatherDirty_=true;waterMapDirty_=true;++terrainEpoch_; }
     void draw(const World& world, const Explorer& explorer, const Simulation& simulation,const ViewState& view);
     void capture(const std::filesystem::path& path, int width, int height) const;
     std::string device() const;
@@ -68,8 +74,21 @@ public:
     bool shadowsUsed() const { return shadowsUsed_; }
     const Lighting& illumination() const { return lighting_; }
     std::size_t riverTriangles() const { return riverTriangles_; }
+    const RenderTimings& timings() const { return timings_; }
+    std::uint64_t terrainJobs() const {return terrainJobs_;}
+    std::uint64_t terrainUploads() const {return terrainUploads_;}
+    std::uint64_t terrainDiscarded() const {return terrainDiscarded_;}
+    double surfaceSpacing() const {return terrainStep_;}
 private:
+    RenderTimings timings_;
     void buildTerrain(const World& world,const Explorer& explorer,const Hydrology& water,double seconds);
+    void uploadTerrain(TerrainMesh mesh);
+    void adoptTerrain(TerrainMesh mesh);
+    struct SceneMesh {TerrainMesh terrain;Flora flora;Vec3 sun;std::vector<Triangle> shadows;bool hasShadows=false;};
+    struct MeshUpload {SceneMesh scene;GLuint lists=0;std::array<std::size_t,4> chunks{};std::size_t next=0;std::uint64_t epoch=0;};
+    void beginUpload(SceneMesh scene);
+    void advanceUpload(const Flora& flora,Vec3 sunlight);
+    void discardUpload();
     void buildGlobe(const World& world,double seconds);
     void buildObjects(const World& world,const Flora& flora);
     void drawSky(const World& world,const Explorer& explorer,const ViewState& view);
@@ -85,7 +104,6 @@ private:
     GLuint objects_=0,caves_=0;
     std::size_t caveCount_=0;
     std::size_t detailCount_=0;
-    struct PlantSite { SurfaceObject object; Vec3 base; };
     std::vector<PlantSite> objectSites_;
     std::optional<SurfaceObject> focusPlant_;
     std::size_t plantCount_=0,marineCount_=0,plantSpeciesCount_=0;
@@ -94,15 +112,28 @@ private:
     bool lastYoung_=false;
     GLuint cloudTexture_=0;
     std::size_t cloudCount_=0;
-    struct WaterVertex { Vec3 up,position; double altitude; bool available,river; double spacing; };
-    std::vector<WaterVertex> waterVertices_;
+    std::vector<SurfaceWaterVertex> waterVertices_;
     std::vector<std::array<std::size_t,3>> waterTriangles_;
+    struct WaterDrawVertex { Vec3 position; Color color; float alpha; double depth; };
+    std::vector<WaterDrawVertex> waterFrame_,waterDraw_;
+    std::vector<GroundSample> waterGround_;
+    std::vector<unsigned char> waterVisible_;
     std::size_t waterCount_=0;
     std::uint64_t waterRevision_=0,waterSteps_=0;
     Vec3 anchor_{1,0,0}, east_{0,0,1}, north_{0,1,0};
     double lastTerrainTime_=-1e30, lastGlobeTime_=-1e30;
     double terrainStep_=2, terrainEyeHeight_=0;
     bool dirty_=true, globeDirty_=true;
+    std::future<SceneMesh> terrainJob_;
+    std::optional<MeshUpload> meshUpload_;
+    GLuint terrainChunks_=0;
+    GLsizei terrainChunksCount_=0;
+    std::optional<Flora> preparedFlora_;
+    bool preparedShadow_=false;
+    std::uint64_t terrainEpoch_=0,terrainJobEpoch_=0;
+    std::uint64_t terrainJobs_=0,terrainUploads_=0,terrainDiscarded_=0;
+    Vec3 previousObserver_{};
+    double flightDetailStep_=2;
     GLuint weatherMap_=0;
     std::uint64_t lastGlobalStep_=0;
     WeatherLayer lastWeatherLayer_=WeatherLayer::Off;

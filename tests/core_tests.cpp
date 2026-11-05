@@ -7,6 +7,8 @@
 #include "planet/lighting.hpp"
 #include "planet/shadows.hpp"
 #include "planet/rivers.hpp"
+#include "planet/terrain_mesh.hpp"
+#include <future>
 #include <chrono>
 #include <fstream>
 #include <functional>
@@ -42,6 +44,50 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
     throw std::runtime_error("Walkable cave route was blocked");
 }
 void registerTests() {
+    test("detail","CPU terrain snapshots preserve coordinates and bound flight detail",[] {
+        World w;const auto p=w.findLand();Hydrology water(w,p);const double height=w.surface(p)+1.75;
+        const auto fine=makeTerrainMesh(w,water,p,height,79*86400),fast=makeTerrainMesh(w,water,p,height,79*86400,64);
+        require(!fine.terrain.empty() && fast.terrain.size()<fine.terrain.size(),"Flight LOD bounds geometry work");
+        require(!fine.plants.empty() && fast.plants.empty(),"Full local plants return at walking detail");
+        for(const auto* mesh:{&fine,&fast}) {
+            require(mesh->terrain.size()%3==0 && mesh->caves.size()%3==0 && mesh->grid.size()%2==0,"Complete primitives");
+            near(length(mesh->anchor-p),0,0,"Snapshot anchor stays at the observer");
+            for(const auto& v:mesh->terrain) require(std::isfinite(length(v.position)) && std::isfinite(length(v.normal)),"Finite mesh data");
+            for(const auto& tri:mesh->waterTriangles) for(auto i:tri) require(i<mesh->waterVertices.size(),"Water indices refer to this snapshot");
+        }
+        near(w.surface(p)+1.75,height,0,"Render LOD does not change the physical surface");
+        for(double bad:{0.,-2.,9000.,std::numeric_limits<double>::quiet_NaN()}) {
+            bool rejected=false;try {(void)terrainSpacing(w,p,height,bad);} catch(const std::invalid_argument&) {rejected=true;}
+            require(rejected,"Invalid mesh density is rejected before allocating geometry");
+        }
+    });
+    test("detail","A mesh worker owns its world and ground snapshot across world changes",[] {
+        World live;const auto p=live.findLand();Hydrology water(live,p);const double height=live.surface(p)+1.75;
+        const auto expected=makeTerrainMesh(live,water,p,height,79*86400,64);
+        auto job=std::async(std::launch::async,[copy=live,ground=water,p,height] {return makeTerrainMesh(copy,ground,p,height,79*86400,64);});
+        live.modules().set(Module::Terrain,false);water.synchronize(live,p);
+        Config config;config.seed=73;live=World(config);
+        const auto actual=job.get();require(actual.terrain.size()==expected.terrain.size(),"World replacement cannot alter an in-flight mesh");
+        for(std::size_t i=0;i<actual.terrain.size();++i) {
+            near(length(actual.terrain[i].position-expected.terrain[i].position),0,0,"Stable snapshot vertices");
+            near(actual.terrain[i].color.r,expected.terrain[i].color.r,0,"Stable snapshot colours");
+        }
+    });
+    test("rivers","Immutable river atlases support independent concurrent sampling",[] {
+        World w;const auto atlas=w.waterNetwork();const auto site=atlas->find(RiverKind::River,w.findLand());
+        std::array<Vec3,64> points{};std::array<RiverSample,64> expected{};
+        for(std::size_t i=0;i<points.size();++i) {
+            points[i]=normalized(site.center+east(site.center)*((static_cast<double>(i)-32)*2/w.config().radius));expected[i]=atlas->sample(points[i]);
+        }
+        const auto sample=[&](std::size_t offset) {
+            for(std::size_t i=0;i<1200;++i) {
+                const auto j=(i*17+offset)%points.size();const auto a=atlas->sample(points[j]),b=atlas->sample(points[j]);
+                near(a.bed,expected[j].bed,0,"Concurrent river bed");near(b.discharge,expected[j].discharge,0,"Thread-local repeated-query cache");
+            }
+        };
+        auto first=std::async(std::launch::async,sample,0);auto second=std::async(std::launch::async,sample,31);
+        first.get();second.get();
+    });
     test("flora","Flowering belongs to angiosperms and new meadow herbs have distinct forms",[] {
         for(auto s:{Species::Pine,Species::Juniper,Species::Fern,Species::Kelp,Species::Rockweed})
             require(flowerTraits(s).form==FlowerForm::None,"Conifers ferns and algae do not produce flowers");

@@ -290,6 +290,11 @@ public:
         auto last=Clock::now();
         int frames=0;
         double renderTime=0, longestRender=0;
+        constexpr std::array<const char*,14> phaseNames{"navigation","simulation","audio","render","swap","terrain_build","plants_build","shadow_build","shadows","water","rivers","weather","sky","frame_work"};
+        std::array<double,14> phaseTotals{},steadyTotals{},phasePeaks{};
+        std::vector<double> steadyFrames;
+        unsigned steadyCount=0;
+        const auto milliseconds=[](Clock::time_point a,Clock::time_point b) {return std::chrono::duration<double,std::milli>(b-a).count();};
         while(running_) {
             MSG message{};
             while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) {
@@ -303,6 +308,7 @@ public:
             const double elapsed=std::chrono::duration<double>(now-last).count();
             last=now;
             const double dt=clamp(elapsed,0.0,0.1);
+            view_.frameSeconds=dt;
             view_.fps=mix(view_.fps,1/std::max(elapsed,0.001),0.04);
             view_.timeScale=std::min(view_.timeScale,maximumTimeScale());
             const double modelDt=view_.paused ? 0 : dt*view_.timeScale;
@@ -315,8 +321,11 @@ public:
                 input.vertical=static_cast<double>(down(VK_SPACE))-static_cast<double>(down(VK_CONTROL));
                 input.sprint=down(VK_SHIFT); input.jump=down(VK_SPACE);
             }
+            const auto navigationStart=Clock::now();
             explorer_.update(world_,input,view_.globe ? 0 : dt,&simulation_.water,&simulation_.motion,&simulation_.flora);
+            const auto simulationStart=Clock::now();
             simulation_.advance(world_,explorer_.up(),modelDt);
+            const auto audioStart=Clock::now();
             auto acoustics=soundScene(world_,simulation_,explorer_,view_.volume,view_.paused,view_.globe);
             if(!focused_) acoustics.audible=false;
             audio_->update(acoustics);view_.audioAvailable=audio_->available();
@@ -331,13 +340,33 @@ public:
             }
             const auto error=glGetError();
             if(error!=GL_NO_ERROR) throw std::runtime_error("OpenGL error " + std::to_string(error));
+            const auto swapStart=Clock::now();
             if(!SwapBuffers(dc_)) throw std::runtime_error("SwapBuffers failed");
+            if(!options_.report.empty()) {
+                const auto& r=renderer_->timings();
+                std::array<double,14> sample{milliseconds(navigationStart,simulationStart),milliseconds(simulationStart,audioStart),milliseconds(audioStart,renderStart),renderMs,milliseconds(swapStart,Clock::now()),r.terrain,r.plants,r.shadowBuild,r.shadows,r.water,r.rivers,r.weather,r.sky,0};
+                for(unsigned i=0;i<5;++i) sample.back()+=sample[i];
+                for(std::size_t i=0;i<sample.size();++i) {
+                    phaseTotals[i]+=sample[i];if(frames>5) {steadyTotals[i]+=sample[i];phasePeaks[i]=std::max(phasePeaks[i],sample[i]);}
+                }
+                if(frames>5) {++steadyCount;if(steadyFrames.size()<10000) steadyFrames.push_back(sample.back());}
+            }
             Sleep(8);
         }
         audio_->stop();if(!options_.audioCapture.empty()) audio_->saveCapture(options_.audioCapture);
         if(!options_.report.empty()) {
             std::ofstream out(options_.report);
             if(!out) throw std::runtime_error("Cannot open smoke report");
+            out << "terrain_async_started=" << renderer_->terrainJobs() << "\nterrain_async_uploaded=" << renderer_->terrainUploads()
+                << "\nterrain_async_discarded=" << renderer_->terrainDiscarded() << "\nterrain_spacing_m=" << renderer_->surfaceSpacing() << '\n';
+            for(std::size_t i=0;i<phaseNames.size();++i) out << "profile_" << phaseNames[i] << "_mean_ms=" << phaseTotals[i]/std::max(1,frames)
+                << "\nprofile_" << phaseNames[i] << "_steady_ms=" << steadyTotals[i]/std::max(1U,steadyCount)
+                << "\nprofile_" << phaseNames[i] << "_max_ms=" << phasePeaks[i] << '\n';
+            if(!steadyFrames.empty()) {
+                std::sort(steadyFrames.begin(),steadyFrames.end());
+                out << "profile_samples=" << steadyFrames.size() << "\nprofile_frame_p50_ms=" << steadyFrames[steadyFrames.size()/2]
+                    << "\nprofile_frame_p95_ms=" << steadyFrames[(steadyFrames.size()-1)*95/100] << "\nprofile_frame_max_ms=" << steadyFrames.back() << '\n';
+            }
             out << "status=ok\nframes=" << frames << "\nrenderer=" << renderer_->device()
                 << "\nseed=" << world_.config().seed << "\nlatitude=" << degrees(latitude(explorer_.up()))
                 << "\nlongitude=" << degrees(longitude(explorer_.up())) << "\naltitude_m=" << explorer_.altitude()

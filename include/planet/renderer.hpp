@@ -56,6 +56,9 @@ public:
     std::size_t marineCount() const { return marineCount_; }
     std::size_t plantSpeciesCount() const { return plantSpeciesCount_; }
     double plantHeightSum() const { return plantHeightSum_; }
+    std::size_t floweringCount() const { return floweringCount_; }
+    std::size_t buddingCount() const { return buddingCount_; }
+    std::size_t seedHeadCount() const { return seedHeadCount_; }
     std::size_t rainCount() const { return rainCount_; }
     std::size_t lightningCount() const { return lightningCount_; }
     std::size_t stormMarkerCount() const { return stormMarkerCount_; }
@@ -86,7 +89,8 @@ private:
     std::vector<PlantSite> objectSites_;
     std::optional<SurfaceObject> focusPlant_;
     std::size_t plantCount_=0,marineCount_=0,plantSpeciesCount_=0;
-    double plantHeightSum_=0,lastFloraDay_=-1e30;
+    std::size_t floweringCount_=0,buddingCount_=0,seedHeadCount_=0;
+    double plantHeightSum_=0,lastFloraDay_=-1e30,lastFloraCalendar_=-1e30;
     bool lastYoung_=false;
     GLuint cloudTexture_=0;
     std::size_t cloudCount_=0;

@@ -396,13 +396,14 @@ void Renderer::buildObjects(const World& world,const Flora& flora) {
     objectCasters_.clear();shadowDirty_=true;
     glNewList(objects_,GL_COMPILE);glBegin(GL_TRIANGLES);
     detailCount_=0;plantCount_=0;marineCount_=0;plantHeightSum_=0;focusPlant_.reset();
+    floweringCount_=buddingCount_=seedHeadCount_=0;
     std::array<bool,speciesCount> species{};double nearest=1e30;
     const auto local=[&](Vec3 p) { return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)}; };
     for(const auto& site:objectSites_) {
         const auto object=grownObject(site.object,&flora);
         if(object.height<.015) continue;
         const double distance=length(object.up-anchor_)*world.config().radius;
-        const auto mesh=detailMesh(object,site.base,local(object.up),local(east(object.up)),distance>100);
+        const auto mesh=detailMesh(object,site.base,local(object.up),local(east(object.up)),distance>(object.kind==DetailKind::Grass || object.kind==DetailKind::Shrub ? 24 : 100));
         for(const auto& face:mesh) {
             const auto& t=face.triangle;const auto n=normalized(cross(t.b-t.a,t.c-t.a));
             glNormal3d(n.x,n.y,n.z);glColor3f(face.color.r,face.color.g,face.color.b);
@@ -413,12 +414,15 @@ void Renderer::buildObjects(const World& world,const Flora& flora) {
         if(object.species!=Species::None) {
             ++plantCount_;species[static_cast<unsigned>(object.species)]=true;plantHeightSum_+=object.height;
             if(plantTraits(object.species).aquatic) ++marineCount_;
+            if(object.flowers.bloom>.02) ++floweringCount_;
+            if(object.flowers.buds>.02) ++buddingCount_;
+            if(object.flowers.seeds>.02) ++seedHeadCount_;
             if(distance<nearest) { nearest=distance;focusPlant_=object; }
         }
     }
     glEnd();glEndList();
     plantSpeciesCount_=static_cast<std::size_t>(std::count(species.begin(),species.end(),true));
-    lastFloraDay_=flora.days();lastYoung_=flora.young();
+    lastFloraDay_=flora.days();lastFloraCalendar_=flora.calendarDay();lastYoung_=flora.young();
 }
 void Renderer::buildGlobe(const World& world,double seconds) {
     constexpr int latitudes=100,longitudes=200;
@@ -585,7 +589,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
            std::abs(explorer.altitude()-terrainEyeHeight_)>std::max(32.0,terrainStep_*4) ||
            terrainSpacing(world,explorer)!=terrainStep_ || std::abs(view.seconds-lastTerrainTime_)>900)
             buildTerrain(world,explorer,water,view.seconds);
-        if(std::abs(simulation.flora.days()-lastFloraDay_)>=.25 || simulation.flora.young()!=lastYoung_)
+        if(std::abs(simulation.flora.days()-lastFloraDay_)>=.25 || std::abs(simulation.flora.calendarDay()-lastFloraCalendar_)>=.25 || simulation.flora.young()!=lastYoung_)
             buildObjects(world,simulation.flora);
         perspective(radians(72),static_cast<double>(view.width)/view.height,explorer.underground() || submerged ? 0.08 : 0.25,400000);
         const auto local=[&](Vec3 p) { return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)}; };
@@ -1056,9 +1060,9 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
             const auto& p=*focusPlant_;
             text(40,280,std::string(plantTraits(p.species).name)+" / "+std::string(stageName(p.plant.stage)),white);
             text(40,301,"AGE "+fixed(p.plant.ageDays/365.25,2)+" y  HEIGHT "+fixed(p.height,2)+" m",white);
+            text(40,323,std::string(flowerPhaseName(p.flowers.phase))+" / "+std::to_string(floweringCount_)+" in bloom",white);
         } else text(40,284,"No visible plants nearby",muted);
-        text(40,323,"BIO +"+fixed(simulation.flora.days(),1)+" d  "+(simulation.flora.rate()==1 ? "1x" : fixed(simulation.flora.rate()/86400,0)+"d/s [EXP]"),white);
-        text(40,346,"Y growth speed / E water",muted);
+        text(40,346,"BIO +"+fixed(simulation.flora.days(),1)+"d  Y: "+(simulation.flora.rate()==1 ? "1x" : fixed(simulation.flora.rate()/86400,0)+"d/s"),muted);
     } else if(river.channel) {
         rect(22,238,292,120,panel,.90f);
         text(40,261,"RIVER / REFERENCE RUNOFF",mint);
@@ -1121,7 +1125,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(w-340,h-143,"+/- time  P pause  CTRL+S seed",white);
         text(w-340,h-122,"ESC settings / HOME landing",white);
         text(w-340,h-101,"Surface: "+std::string(surfaceStyleName(view.surfaceStyle)),mint);
-        text(w-340,h-80,"F7 rivers  X grove  O coast  E panel",muted);
+        text(w-340,h-80,"F7 rivers  F8 meadow  X grove",muted);
     }
     if(!view.globe) {
         const float cx=w/2,cy=h/2;

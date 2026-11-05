@@ -25,7 +25,8 @@ struct Options {
     std::optional<Landform> landmark;
     std::optional<double> waterWind,diveDepth;
     bool coast=false,waterMotion=true;
-    bool youngFlora=false,plantGrowth=true,grove=false;
+    bool youngFlora=false,plantGrowth=true,grove=false,meadow=false;
+    std::optional<double> floraDay;
     double growDays=0,growthRate=1;
     bool globalWeather=true;
     double globalHours=0;
@@ -136,6 +137,12 @@ Options parseOptions() {
             else if(arg==L"--no-water-motion") options.waterMotion=false;
             else if(arg==L"--young-flora") options.youngFlora=true;
             else if(arg==L"--grove") options.grove=true;
+            else if(arg==L"--meadow") options.meadow=true;
+            else if(arg==L"--flora-day") {
+                const auto value=next();std::size_t used=0;const double day=std::stod(value,&used);
+                if(used!=value.size() || !std::isfinite(day) || std::abs(day)>1e7) throw std::invalid_argument("Invalid biological calendar day");
+                options.floraDay=day;
+            }
             else if(arg==L"--no-growth") options.plantGrowth=false;
             else if(arg==L"--grow-days" || arg==L"--growth-rate") {
                 const auto value=next();std::size_t used=0;const double number=std::stod(value,&used);
@@ -204,6 +211,7 @@ public:
         view_.skyEnabled=options_.sky;view_.shadowsEnabled=options_.shadows;
         view_.paused=options_.paused; view_.windTracers=options_.windTracers; view_.headlamp=options_.headlamp;
         simulation_.flora.setYoung(options_.youngFlora);simulation_.flora.setRate(options_.growthRate);
+        if(options_.floraDay) simulation_.flora.setCalendarDay(*options_.floraDay);
         simulation_.flora.advanceDays(world_,options_.growDays);
         simulation_.setRainExperiment(options_.rainMmH);
         simulation_.advance(world_,explorer_.up(),0);
@@ -211,6 +219,7 @@ public:
         orientLanding(); noon();
         if(options_.landmark) visitLandmark(*options_.landmark);
         if(options_.grove) visitGrove();
+        if(options_.meadow) visitMeadow();
         if(options_.coast || options_.diveDepth) visitCoast(options_.diveDepth.has_value());
         if(options_.riverSite) visitRiver(*options_.riverSite,options_.diveDepth.has_value());
         if(options_.storm && !visitStorm(*options_.storm)) throw std::runtime_error("No active storm of the requested kind on this planet");
@@ -348,7 +357,9 @@ public:
             out << "flora_days=" << simulation_.flora.days() << "\nflora_rate=" << simulation_.flora.rate()
                 << "\nyoung_flora=" << simulation_.flora.young() << "\nflora_panel=" << view_.floraInfo
                 << "\nflora_plants=" << renderer_->plantCount() << "\nmarine_plants=" << renderer_->marineCount()
-                << "\nflora_species=" << renderer_->plantSpeciesCount() << "\nflora_height_sum_m=" << renderer_->plantHeightSum() << '\n';
+                << "\nflora_species=" << renderer_->plantSpeciesCount() << "\nflora_height_sum_m=" << renderer_->plantHeightSum()
+                << "\nflora_calendar_day=" << simulation_.flora.calendarDay() << "\nflowering_plants=" << renderer_->floweringCount()
+                << "\nbudding_plants=" << renderer_->buddingCount() << "\nseed_head_plants=" << renderer_->seedHeadCount() << '\n';
             const auto& light=renderer_->illumination();
             const auto river=world_.modules().enabled(Module::Rivers) ? world_.waterNetwork()->sample(explorer_.up()) : RiverSample{};
             out << "river_wet=" << river.wet << "\nriver_width_m=" << river.width << "\nriver_depth_m=" << river.depth
@@ -483,6 +494,16 @@ private:
         explorer_.look(pi/2,radians(kind==StormKind::Thunderstorm ? 12 : -3));
         view_.globe=false;noon();if(renderer_) renderer_->invalidate();return true;
     }
+    void visitMeadow() {
+        if(!world_.modules().enabled(Module::Biomes) || !world_.modules().enabled(Module::SurfaceDetail)) {
+            if(!window_) throw std::runtime_error("Enable Biomes and Surface detail to visit a meadow");
+            MessageBoxW(window_,L"Включите «Биомы» и «Детали поверхности» в настройках.",L"PlanetLab — Луг",MB_OK|MB_ICONINFORMATION);return;
+        }
+        const auto place=findMeadow(world_);explorer_.teleport(world_,place.position);simulation_.advance(world_,place.position,0);
+        explorer_.teleport(world_,place.position,&simulation_.water);const auto look=normalized(place.lookToward-place.position);
+        explorer_.look(std::atan2(dot(look,east(place.position)),dot(look,north(place.position))),radians(-31));
+        view_.globe=false;view_.floraInfo=true;noon();if(renderer_) renderer_->invalidate();
+    }
     void visitGrove() {
         const auto place=findGrove(world_);
         explorer_.teleport(world_,place.position);simulation_.advance(world_,place.position,0);
@@ -588,14 +609,15 @@ private:
         else if(key=='E') view_.floraInfo=!view_.floraInfo;
         else if(key==VK_F3) view_.weatherLayer=static_cast<WeatherLayer>((static_cast<unsigned>(view_.weatherLayer)+1)%6);
         else if(key==VK_F7) {constexpr std::array<RiverKind,3> tour{RiverKind::Major,RiverKind::River,RiverKind::Stream};visitRiver(tour[riverIndex_++%tour.size()]);}
+        else if(key==VK_F8) visitMeadow();
         else if(key==VK_F2) {
             constexpr std::array<StormKind,3> tour{StormKind::Hurricane,StormKind::Cyclone,StormKind::Thunderstorm};
             for(unsigned i=0;i<tour.size();++i) if(visitStorm(tour[stormIndex_++%tour.size()])) break;
         }
         else if(key=='Y') simulation_.flora.setRate(simulation_.flora.rate()<86400 ? 86400 : (simulation_.flora.rate()<2592000 ? 2592000 : 1));
         else if(key=='Z') {
-            const double rate=simulation_.flora.rate();simulation_.flora=Flora{};
-            simulation_.flora.setYoung(true);simulation_.flora.setRate(rate);renderer_->invalidate();
+            const double rate=simulation_.flora.rate(),calendar=simulation_.flora.calendarDay();simulation_.flora=Flora{};
+            simulation_.flora.setYoung(true);simulation_.flora.setRate(rate);simulation_.flora.setCalendarDay(calendar);renderer_->invalidate();
         }
         else if(key=='O') visitCoast();
         else if(key=='X') visitGrove();

@@ -42,6 +42,95 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
     throw std::runtime_error("Walkable cave route was blocked");
 }
 void registerTests() {
+    test("flora","Flowering belongs to angiosperms and new meadow herbs have distinct forms",[] {
+        for(auto s:{Species::Pine,Species::Juniper,Species::Fern,Species::Kelp,Species::Rockweed})
+            require(flowerTraits(s).form==FlowerForm::None,"Conifers ferns and algae do not produce flowers");
+        require(flowerTraits(Species::Seagrass).form!=FlowerForm::None,"Seagrass is an underwater flowering plant");
+        std::array<bool,8> forms{};
+        for(unsigned i=static_cast<unsigned>(Species::Daisy);i<speciesCount;++i) {
+            const auto s=static_cast<Species>(i);const auto& f=flowerTraits(s);
+            require(!plantTraits(s).aquatic && f.radius>0 && f.reproductiveDays>0,"Terrestrial reproductive herbs");
+            forms[static_cast<unsigned>(f.form)]=true;
+        }
+        require(std::count(forms.begin(),forms.end(),true)>=4,"Different floral architectures");
+    });
+    test("flora","Thermal time agrees with numerical integration of positive temperature excess",[] {
+        constexpr double year=365.25,days=281.3;
+        for(double mean:{-3.,6.,20.}) for(double amplitude:{0.,10.,20.}) {
+            double numeric=0;constexpr int count=20000;
+            for(int i=0;i<count;++i) numeric+=std::max(0.,mean-amplitude*std::cos(tau*(i+.5)*days/count/year)-5)*days/count;
+            near(growingDegreeDays(days,year,mean,amplitude,5),numeric,.0001,"Growing degree days integrate only warmth above the base");
+        }
+        near(growingDegreeDays(100,year,-10,3,5),0,0,"Frozen season contributes no thermal time");
+    });
+    test("flora","Seasonal bloom shifts between hemispheres and advances in warmer climates",[] {
+        Config c;c.eccentricity=0;Sample climate;climate.temperature=288;climate.precipitation=1000;
+        const auto n=flowerCycle(Species::Daisy,42,c,direction(radians(45),0),climate);
+        const auto s=flowerCycle(Species::Daisy,42,c,direction(radians(-45),0),climate);
+        require(n.enabled && s.enabled,"Temperate flowers have a reproductive window");
+        near(std::abs(std::remainder(n.winterDay-s.winterDay,n.yearDays)),n.yearDays/2,1e-8,"Opposite thermal seasons");
+        PlantState adult;adult.ageDays=900;adult.size=adult.foliage=1;adult.stage=GrowthStage::Mature;
+        const double date=n.winterDay+(n.openDay+n.closeDay)*.5;
+        require(flowerState(Species::Daisy,adult,n,date).bloom>.9 && flowerState(Species::Daisy,adult,s,date).bloom==0,"Summer bloom is absent in opposite season");
+        climate.temperature+=4;const auto warm=flowerCycle(Species::Daisy,42,c,direction(radians(45),0),climate);
+        require(warm.openDay<n.openDay,"A warmer reference climate reaches heat requirement earlier");
+        climate.temperature=245;require(!flowerCycle(Species::Daisy,42,c,direction(radians(45),0),climate).enabled,"Insufficient yearly heat prevents flowering");
+    });
+    test("flora","Buds flowers and seed heads are ordered without juvenile or retroactive reproduction",[] {
+        Config c;Sample climate;climate.temperature=289;climate.precipitation=1000;
+        const auto cycle=flowerCycle(Species::Clover,91,c,direction(radians(40),0),climate);
+        PlantState p;p.ageDays=600;p.size=p.foliage=1;p.stage=GrowthStage::Mature;
+        const auto at=[&](double day){return flowerState(Species::Clover,p,cycle,cycle.winterDay+day);};
+        require(at((cycle.budDay+cycle.openDay)*.5).phase==FlowerPhase::Budding,"Buds precede open flowers");
+        require(at((cycle.openDay+cycle.closeDay)*.5).phase==FlowerPhase::Flowering,"Flowering window");
+        const double fruit=(cycle.closeDay+cycle.endDay)*.5;require(at(fruit).phase==FlowerPhase::Fruiting,"Seed heads follow flowering");
+        require(at(0).phase==FlowerPhase::Dormant,"Winter is vegetative");
+        p.stage=GrowthStage::Seedling;require(at((cycle.openDay+cycle.closeDay)*.5).bloom==0,"Seedlings cannot flower");
+        p.stage=GrowthStage::Dead;require(at(fruit).seeds==0,"Dead plant has no active reproduction");
+        p.stage=GrowthStage::Mature;p.ageDays=flowerTraits(Species::Clover).reproductiveDays+1;
+        require(at(fruit).seeds==0,"A plant which matured after flowering cannot acquire earlier seed heads");
+    });
+    test("flora","Flower envelopes are continuous periodic and independent of query order",[] {
+        Config c;Sample climate;climate.temperature=288;climate.precipitation=1000;
+        const auto cycle=flowerCycle(Species::Daisy,7,c,direction(radians(40),3.14),climate);
+        PlantState p;p.ageDays=1000;p.size=p.foliage=1;p.stage=GrowthStage::Mature;
+        for(double boundary:{cycle.budDay,cycle.openDay,cycle.closeDay,cycle.endDay,cycle.yearDays}) {
+            const auto a=flowerState(Species::Daisy,p,cycle,cycle.winterDay+boundary-1e-5),b=flowerState(Species::Daisy,p,cycle,cycle.winterDay+boundary+1e-5);
+            require(std::abs(a.buds-b.buds)+std::abs(a.bloom-b.bloom)+std::abs(a.seeds-b.seeds)<1e-4,"No abrupt stage geometry change");
+        }
+        const double day=cycle.winterDay+(cycle.openDay+cycle.closeDay)*.5;
+        const auto a=flowerState(Species::Daisy,p,cycle,day),b=flowerState(Species::Daisy,p,cycle,day+cycle.yearDays);
+        near(a.bloom,b.bloom,1e-12,"Annual climate cycle repeats for a reproductive plant");
+        c.obliquity=0;require(flowerCycle(Species::Daisy,7,c,{0,1,0},climate).enabled,"Zero obliquity and poles remain defined");
+    });
+    test("flora","Biological calendar freezes with growth and accelerates without changing physical clocks",[] {
+        World w;Simulation s(w,w.findLand(),79*86400);s.flora.setRate(86400);const double weather=s.weather.seconds();
+        s.advance(w,w.findLand(),2);near(s.flora.calendarDay(),81,1e-12,"Two experimental biological days");
+        near(s.weather.seconds()-weather,2,1e-12,"Atmosphere advances only two seconds");
+        w.modules().set(Module::PlantGrowth,false);s.advance(w,w.findLand(),2);near(s.flora.calendarDay(),81,0,"Growth switch freezes phenology");
+        s.setClock(10000);near(s.flora.calendarDay(),81,0,"Lighting clock does not jump plant seasons");
+        const double age=s.flora.days();s.flora.setCalendarDay(180);near(s.flora.days(),age,0,"Season selection does not change plant age");
+    });
+    test("flora","Flower meshes have finite nondegenerate geometry and seasonal differences",[] {
+        for(unsigned i=static_cast<unsigned>(Species::Daisy);i<speciesCount;++i) {
+            SurfaceObject p;p.id=71;p.kind=DetailKind::Grass;p.species=static_cast<Species>(i);p.height=plantTraits(p.species).height;p.radius=p.height*.35;
+            p.plant.size=p.plant.foliage=1;p.plant.stage=GrowthStage::Mature;
+            const auto dormant=detailMesh(p,{}, {0,1,0},{1,0,0},false);p.flowers.bloom=1;
+            const auto open=detailMesh(p,{}, {0,1,0},{1,0,0},false);require(open.size()>dormant.size(),"Flower heads add visible geometry");
+            std::vector<Triangle> caster;
+            for(const auto& face:open) {const auto& t=face.triangle;require(std::isfinite(length(t.a)) && length(cross(t.b-t.a,t.c-t.a))>1e-10,"Valid floral triangle");caster.push_back(t);}
+            require(!shadowVolume(caster,normalized(Vec3{.2,1,.3})).empty(),"Visible flowers share the shadow geometry");
+        }
+    });
+    test("flora","Meadow route exposes several rooted flowering species at stable sites",[] {
+        World w;const auto place=findMeadow(w);const auto sites=surfaceSites(w,place.position,60);
+        std::array<bool,speciesCount> kinds{};Flora a,b;a.setCalendarDay(130);b.setCalendarDay(280);unsigned observed=0;
+        for(const auto& site:sites) if(site.species>=Species::Daisy) {
+            kinds[static_cast<unsigned>(site.species)]=true;const auto first=grownObject(site,&a),second=grownObject(site,&b);
+            near(length(first.up-second.up),0,0,"Season change keeps roots fixed");near(first.height,second.height,0,"Season preview does not age plants");++observed;
+        }
+        require(observed>12 && std::count(kinds.begin(),kinds.end(),true)>=4,"Several new meadow herbs coexist in a suitable habitat");
+    });
     test("rivers","Drainage is acyclic and accounts for all reference runoff at outlets",[] {
         World w;const auto atlas=w.waterNetwork();const auto& nodes=atlas->nodes();double rain=0,outflow=0,area=0;
         std::vector<double> incoming(nodes.size());

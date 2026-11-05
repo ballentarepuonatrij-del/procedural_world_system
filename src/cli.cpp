@@ -26,7 +26,8 @@ int main(int argc, char** argv) {
         std::optional<double> weatherSeconds,waterSeconds;
         std::optional<double> waterWind;
         double rainMmH=0;
-        bool floraOutput=false,youngFlora=false,grove=false;
+        bool floraOutput=false,youngFlora=false,grove=false,meadow=false;
+        std::optional<double> floraDay;
         double growDays=0;
         double globalHours=0;
         bool globalOutput=false,globalEnabled=true;
@@ -76,6 +77,8 @@ int main(int argc, char** argv) {
             }
             else if(arg=="--flora") floraOutput=true;
             else if(arg=="--grove") { grove=true;floraOutput=true; }
+            else if(arg=="--meadow") { meadow=true;floraOutput=true; }
+            else if(arg=="--flora-day") {floraDay=number(next());if(std::abs(*floraDay)>1e7) throw std::invalid_argument("Invalid biological calendar day");floraOutput=true;}
             else if(arg=="--young-flora") { youngFlora=true;floraOutput=true; }
             else if(arg=="--grow-days") {
                 growDays=number(next());floraOutput=true;
@@ -105,6 +108,7 @@ int main(int argc, char** argv) {
                 std::cout << "planet_cli [--seed uint64] [--sample latitude longitude] [--day days_since_perihelion] [--map world.ppm] [--weather 0..3600_seconds] [--water 0..3600_seconds] [--rain-mm-h 0..200] [--landmark cave|canyon|mountains|gorge] [--coast] [--wind-m-s 0..40] [--flora] [--grove] [--young-flora] [--grow-days 0..365250]\n";
                 std::cout << "Global weather: [--storm cyclone|hurricane|thunderstorm] [--global-hours 0..240] [--no-global-weather]\n";
                 std::cout << "Global water: [--rivers] [--river stream|river|major] [--no-rivers]\n";
+                std::cout << "Flowering: [--meadow] [--flora-day days_since_perihelion]\n";
                 std::cout << "Procedural audio: [--audio output.wav] [--audio-seconds 0.1..60] [--volume 0..100] [--no-sound]\n";
                 return 0;
             } else throw std::invalid_argument("Unknown option: " + arg);
@@ -131,6 +135,10 @@ int main(int argc, char** argv) {
         }
         if(grove && !coast) {
             const auto p=planet::findGrove(world).position;
+            lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
+        }
+        if(meadow) {
+            const auto p=planet::findMeadow(world).position;
             lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
         }
         if(riverSite) {
@@ -197,15 +205,21 @@ int main(int argc, char** argv) {
                 << ", \"channels\": 2, \"frames\": " << audioFrames << ", \"peak_pcm\": " << audioPeak
                 << ", \"thunder_events\": " << thunderEvents << ", \"volume\": " << volume << '}';
             if(floraOutput) {
-                planet::Flora flora;flora.setYoung(youngFlora);flora.advanceDays(world,std::min(365250.0,growDays+totalDuration/86400));
+                planet::Flora flora;flora.setYoung(youngFlora);flora.setCalendarDay(floraDay.value_or(day));flora.advanceDays(world,std::min(365250.0,growDays+totalDuration/86400));
                 auto plants=planet::surfaceObjects(world,location,80,true,&flora);
                 std::erase_if(plants,[](const auto& o) { return o.species==planet::Species::None; });
                 std::sort(plants.begin(),plants.end(),[&](const auto& a,const auto& b) { return planet::length(a.up-location)<planet::length(b.up-location); });
                 std::array<unsigned,planet::speciesCount> counts{};
-                double heightSum=0;unsigned marine=0;
-                for(const auto& p:plants) { ++counts[static_cast<unsigned>(p.species)];heightSum+=p.height;if(planet::plantTraits(p.species).aquatic) ++marine; }
+                double heightSum=0;unsigned marine=0,blooming=0,budding=0,seeding=0;
+                for(const auto& p:plants) { ++counts[static_cast<unsigned>(p.species)];heightSum+=p.height;if(planet::plantTraits(p.species).aquatic) ++marine;
+                    if(p.flowers.bloom>.02) ++blooming;
+                    if(p.flowers.buds>.02) ++budding;
+                    if(p.flowers.seeds>.02) ++seeding;
+                }
                 std::cout << ",\n  \"flora\": {\n    \"elapsed_days\": " << flora.days() << ",\n    \"plants\": " << plants.size()
-                    << ",\n    \"marine_plants\": " << marine << ",\n    \"height_sum_m\": " << heightSum << ",\n    \"species\": [";
+                    << ",\n    \"marine_plants\": " << marine << ",\n    \"height_sum_m\": " << heightSum
+                    << ",\n    \"calendar_day\": " << flora.calendarDay() << ",\n    \"flowering_plants\": " << blooming
+                    << ",\n    \"budding_plants\": " << budding << ",\n    \"seed_head_plants\": " << seeding << ",\n    \"species\": [";
                 bool comma=false;
                 for(unsigned i=1;i<counts.size();++i) if(counts[i]) {
                     if(comma) std::cout << ',';
@@ -216,7 +230,9 @@ int main(int argc, char** argv) {
                     const auto& p=plants[i];if(i) std::cout << ',';
                     std::cout << "{\"site_id\": \"" << p.id << "\", \"species\": \"" << planet::plantTraits(p.species).name
                         << "\", \"stage\": \"" << planet::stageName(p.plant.stage) << "\", \"age_days\": " << p.plant.ageDays
-                        << ", \"height_m\": " << p.height << ", \"generation\": " << p.plant.generation << '}';
+                        << ", \"height_m\": " << p.height << ", \"generation\": " << p.plant.generation
+                        << ", \"flower_phase\": \"" << planet::flowerPhaseName(p.flowers.phase) << "\", \"bloom\": " << p.flowers.bloom
+                        << ", \"buds\": " << p.flowers.buds << ", \"seed_heads\": " << p.flowers.seeds << '}';
                 }
                 std::cout << "]\n  }";
             }

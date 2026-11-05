@@ -13,6 +13,8 @@ struct SurfaceObject {
     Species species=Species::None;
     double suitability=0;
     PlantState plant;
+    FlowerCycle flowerCycle;
+    FlowerState flowers;
     double collisionRadius() const;
     double collisionHeight() const;
 };
@@ -26,4 +28,5 @@ std::vector<SurfaceObject> surfaceObjects(const World& world, Vec3 center,
 std::vector<SurfaceObject> surfaceSites(const World& world,Vec3 center,double radius,bool groundCover=true);
 SurfaceObject grownObject(SurfaceObject site,const Flora* flora=nullptr);
 Landmark findGrove(const World& world);
+Landmark findMeadow(const World& world);
 } // namespace planet

@@ -3,6 +3,38 @@
 #include <stdexcept>
 
 namespace planet {
+Landmark findMeadow(const World& world) {
+    if(!world.modules().enabled(Module::Biomes) || !world.modules().enabled(Module::SurfaceDetail))
+        throw std::runtime_error("Enable Biomes and Surface detail to visit a meadow");
+    const auto home=world.findLand();std::vector<std::pair<double,Vec3>> candidates;
+    for(int i=0;i<1024;++i) {
+        const auto p=direction(std::asin(1-2*(i+.5)/1024),i*pi*(3-std::sqrt(5.0))+randomUnit(world.config().seed)*tau);
+        const auto s=world.climatology(p);
+        if(s.ocean || s.elevation<world.config().seaLevel+10 || s.temperature<282 || s.temperature>296 ||
+           s.precipitation<600 || s.precipitation>1800 || std::abs(latitude(p))<radians(20)) continue;
+        candidates.emplace_back(length(p-home)+std::abs(s.temperature-290)*.16+(s.biome==Biome::Grassland ? 0 : .7),p);
+    }
+    std::sort(candidates.begin(),candidates.end(),[](const auto& a,const auto& b){return a.first<b.first;});
+    for(std::size_t i=0;i<std::min<std::size_t>(24,candidates.size());++i) {
+        const auto p=candidates[i].second;const auto sites=surfaceSites(world,p,55);
+        std::array<bool,speciesCount> kinds{};const SurfaceObject* target=nullptr;double best=1e30;
+        for(const auto& site:sites) if(site.species>=Species::Daisy && site.flowerCycle.enabled) {
+            kinds[static_cast<unsigned>(site.species)]=true;
+            const double distance=length(site.up-p)*world.config().radius;
+            const auto plant=grownObject(site);const auto& flower=flowerTraits(site.species);
+            // A mature, low flower head is easier to inspect from the path.
+            // The route stays fixed through the seasons; it does not force bloom.
+            const double score=distance+(site.species==Species::Fireweed ? 60 : 0);
+            if(plant.height>.3 && plant.plant.stage==GrowthStage::Mature &&
+               plant.plant.ageDays>flower.reproductiveDays+40 && score<best) {target=&site;best=score;}
+        }
+        if(!target || std::count(kinds.begin(),kinds.end(),true)<4) continue;
+        const auto start=normalized(target->up-north(target->up)*(2/world.config().radius));
+        if(std::abs(world.elevation(start)-target->elevation)>1 || world.surface(start)>world.elevation(start)+.1) continue;
+        return {start,target->up,world.relief(start).type};
+    }
+    throw std::runtime_error("No suitable flowering meadow on this planet");
+}
 Landmark findGrove(const World& world) {
     const auto home=world.findLand();
     if(!world.modules().enabled(Module::Biomes) || !world.modules().enabled(Module::SurfaceDetail)) return {home,home,Landform::Lowland};
@@ -36,6 +68,7 @@ double SurfaceObject::collisionHeight() const {
 SurfaceObject grownObject(SurfaceObject object,const Flora* flora) {
     if(object.species==Species::None) return object;
     object.plant=plantState(object.species,object.id,flora ? flora->days() : 0,object.suitability,flora && flora->young());
+    object.flowers=flowerState(object.species,object.plant,object.flowerCycle,flora ? flora->calendarDay() : 79);
     object.height*=object.plant.size; object.radius*=object.plant.size;
     return object;
 }
@@ -99,7 +132,7 @@ std::vector<SurfaceObject> surfaceSites(const World& world,Vec3 center,double ra
                     h>world.config().seaLevel+2 && habitat.precipitation>180 && slope<0.65;
                 const double patch=clamp(0.55+0.65*patches.value(p*(planetRadius/95)),0.08,1.0);
                 const double choice=randomUnit(id+3);
-                SurfaceObject object{id,DetailKind::Rock,p,h,0,0,tau*randomUnit(id+4),false,Species::None,0,{}};
+                SurfaceObject object{id,DetailKind::Rock,p,h,0,0,tau*randomUnit(id+4),false,Species::None,0,{},{},{}};
                 if(habitat.ocean) {
                     if(layer==0 || !world.modules().enabled(Module::Biomes) || choice>patch*.85) continue;
                     object.kind=DetailKind::Grass;
@@ -150,6 +183,7 @@ std::vector<SurfaceObject> surfaceSites(const World& world,Vec3 center,double ra
                     if(traits.aquatic) object.height=std::min(object.height,depth*.85);
                     object.radius=object.height*traits.widthRatio;
                     object.evergreen=object.species==Species::Pine;
+                    object.flowerCycle=flowerCycle(object.species,id,world.config(),p,habitat);
                 }
                 result.push_back(object);
             }

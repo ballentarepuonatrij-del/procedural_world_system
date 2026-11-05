@@ -312,6 +312,7 @@ RunoffBudget Hydrology::budget() const {
     auto b=totals_; b.storedWaterM3=grid_.waterVolume(); b.storedSolidKg=grid_.solidMass(); return b;
 }
 Simulation::Simulation(const World& world,Vec3 observer,double seconds,std::optional<double> waterWind,double globalHours) : global(world,seconds,globalHours),weather(world,observer,seconds+global.elapsed(),&global),water(world,observer),motion(world,observer) {
+    flora.setCalendarDay((seconds+global.elapsed())/86400);
     motion.setWindExperiment(waterWind); motion.synchronize(world,weather,observer);
 }
 void Simulation::setClock(double seconds) { weather.setClock(seconds); global.setSolarClock(seconds); pending_=0; }

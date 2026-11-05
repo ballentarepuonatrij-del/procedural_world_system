@@ -16,7 +16,13 @@ const PlantTraits& plantTraits(Species s) {
         {"Fern",1.4,.65,180,1800,90,false,false,{.16f,.47f,.21f}},
         {"Seagrass",1.3,.40,180,1460,60,true,false,{.17f,.48f,.28f}},
         {"Kelp",11,.16,350,1095,60,true,false,{.47f,.39f,.12f}},
-        {"Rockweed",1.8,.55,400,2900,90,true,false,{.40f,.34f,.13f}}
+        {"Rockweed",1.8,.55,400,2900,90,true,false,{.40f,.34f,.13f}},
+        {"Oxeye daisy",.75,.32,100,1460,60,false,false,{.25f,.48f,.15f}},
+        {"Red clover",.48,.60,85,1095,45,false,false,{.20f,.48f,.19f}},
+        {"Field poppy",.85,.28,70,245,30,false,false,{.30f,.46f,.19f}},
+        {"Cornflower",.80,.30,85,245,30,false,false,{.29f,.46f,.27f}},
+        {"Fireweed",1.65,.23,180,2190,90,false,false,{.21f,.44f,.18f}},
+        {"Buttercup",.55,.40,90,1460,60,false,false,{.28f,.48f,.14f}}
     }};
     const auto i=static_cast<unsigned>(s);
     if(i>=traits.size()) throw std::invalid_argument("Unknown plant species");
@@ -50,6 +56,12 @@ double plantSuitability(Species species,const Sample& s,double slope,double rock
         case Species::Juniper: low=270;high=302;rain=180;break;
         case Species::Heather: low=268;high=293;rain=350;break;
         case Species::Fern: low=280;high=304;rain=800;break;
+        case Species::Daisy: low=278;high=300;rain=400;break;
+        case Species::Clover: low=280;high=301;rain=550;break;
+        case Species::Poppy: low=280;high=304;rain=250;break;
+        case Species::Cornflower: low=278;high=300;rain=300;break;
+        case Species::Fireweed: low=273;high=294;rain=500;break;
+        case Species::Buttercup: low=277;high=298;rain=700;break;
         default: break;
     }
     if(s.temperature<=low || s.temperature>=high || s.precipitation<rain) return 0;
@@ -82,6 +94,91 @@ PlantState plantState(Species species,std::uint64_t id,double days,double suitab
         state.foliage=clamp((t.lifespanDays-state.ageDays)/(t.lifespanDays*.1),0.0,1.0);
     } else state.stage=state.size<.08 ? GrowthStage::Seedling : (state.size<.70 ? GrowthStage::Juvenile : GrowthStage::Mature);
     return state;
+}
+const FlowerTraits& flowerTraits(Species species) {
+    static const std::array<FlowerTraits,speciesCount> traits=[] {
+        std::array<FlowerTraits,speciesCount> t{};
+        const auto set=[&](Species s,FlowerForm form,Color color,unsigned petals,double radius,double heat,double duration,double age) {
+            t[static_cast<unsigned>(s)]={form,color,petals,radius,5,heat,duration,age};
+        };
+        set(Species::Oak,FlowerForm::Catkin,{.66f,.69f,.25f},0,.11,110,110,4000);
+        set(Species::Birch,FlowerForm::Catkin,{.71f,.64f,.28f},0,.10,90,90,1500);
+        set(Species::Acacia,FlowerForm::Ball,{.98f,.83f,.24f},0,.07,230,270,900);
+        set(Species::TropicalTree,FlowerForm::Star,{.98f,.78f,.81f},5,.09,350,520,1800);
+        set(Species::Heather,FlowerForm::Bell,{.84f,.32f,.68f},4,.024,950,500,90);
+        set(Species::MeadowGrass,FlowerForm::Spike,{.72f,.66f,.36f},0,.045,300,280,45);
+        set(Species::Seagrass,FlowerForm::Spike,{.59f,.73f,.35f},0,.025,200,240,120);
+        set(Species::Daisy,FlowerForm::Daisy,{.98f,.97f,.85f},12,.045,300,500,75);
+        set(Species::Clover,FlowerForm::Ball,{.87f,.30f,.58f},0,.035,240,650,65);
+        set(Species::Poppy,FlowerForm::Cup,{.94f,.12f,.09f},4,.060,230,330,50);
+        set(Species::Cornflower,FlowerForm::Star,{.25f,.43f,.98f},9,.037,380,400,60);
+        set(Species::Fireweed,FlowerForm::Spike,{.94f,.31f,.66f},4,.032,800,500,150);
+        set(Species::Buttercup,FlowerForm::Cup,{.99f,.83f,.10f},5,.025,180,430,65);
+        return t;
+    }();
+    const auto i=static_cast<unsigned>(species);if(i>=traits.size()) throw std::invalid_argument("Unknown flowering species");
+    return traits[i];
+}
+std::string_view flowerPhaseName(FlowerPhase phase) {
+    constexpr std::array<std::string_view,4> names{"vegetative","buds","flowering","seed heads"};
+    const auto i=static_cast<unsigned>(phase);return i<names.size() ? names[i] : "unknown";
+}
+double growingDegreeDays(double days,double year,double mean,double amplitude,double base) {
+    if(!std::isfinite(days) || !std::isfinite(year) || year<=0 || days<0 || days>year ||
+       !std::isfinite(mean) || !std::isfinite(amplitude) || amplitude<0 || !std::isfinite(base))
+        throw std::invalid_argument("Invalid thermal-time parameters");
+    const double excess=mean-base,omega=tau/year;
+    if(amplitude<1e-12) return std::max(0.,excess)*days;
+    if(excess<=-amplitude) return 0;
+    const double start=excess>=amplitude ? 0 : std::acos(excess/amplitude)/omega;
+    const double end=clamp(days,start,year-start);
+    return std::max(0.,excess*(end-start)-amplitude/omega*(std::sin(omega*end)-std::sin(omega*start)));
+}
+FlowerCycle flowerCycle(Species species,std::uint64_t id,const Config& config,Vec3 up,const Sample& annual) {
+    const auto& f=flowerTraits(species);FlowerCycle c;c.yearDays=config.year/86400;
+    if(f.form==FlowerForm::None) return c;
+    const double lat=latitude(up),mean=annual.temperature-273.15;
+    const double amplitude=(2+18*std::abs(std::sin(lat)))*std::abs(std::sin(config.obliquity))/std::sin(radians(23.44))*(plantTraits(species).aquatic ? .35 : 1.);
+    // Invert the orbit at the local summer solstice, then apply a thermal lag.
+    const double anomaly=(lat>=0 ? pi/2 : pi*1.5)+radians(77.1);
+    const double eccentric=std::atan2(std::sqrt(1-config.eccentricity*config.eccentricity)*std::sin(anomaly),config.eccentricity+std::cos(anomaly));
+    const double summer=(eccentric-config.eccentricity*std::sin(eccentric))/tau*c.yearDays+c.yearDays*20/365.25;
+    c.winterDay=summer+c.yearDays*.5;
+    // Weakly seasonal habitats have individually staggered annual flowering.
+    c.winterDay+=(1-smoothstep(3,7,amplitude))*randomUnit(id+909)*c.yearDays;
+    const double start=f.heatStart*(.92+.16*randomUnit(id+335)),duration=f.heatDuration;
+    const double total=growingDegreeDays(c.yearDays,c.yearDays,mean,amplitude,f.baseC);
+    if(total<start+duration*.25) return c;
+    const auto when=[&](double heat) {
+        double low=0,high=c.yearDays;
+        for(int i=0;i<28;++i) {const double mid=(low+high)/2;if(growingDegreeDays(mid,c.yearDays,mean,amplitude,f.baseC)<heat) low=mid;else high=mid;}
+        return (low+high)/2;
+    };
+    c.budDay=when(start-duration*.15);c.openDay=when(start);
+    c.closeDay=std::min(c.yearDays*.92,when(start+duration));
+    c.endDay=std::min(c.yearDays*.99,c.closeDay+c.yearDays*.18);
+    c.enabled=c.closeDay>c.openDay+1 && c.endDay>c.closeDay;return c;
+}
+FlowerState flowerState(Species species,const PlantState& plant,const FlowerCycle& c,double day) {
+    if(!std::isfinite(day)) throw std::invalid_argument("Invalid flowering calendar");
+    const auto& f=flowerTraits(species);FlowerState state;
+    if(!c.enabled || f.form==FlowerForm::None || plant.foliage<=0 ||
+       (plant.stage!=GrowthStage::Mature && plant.stage!=GrowthStage::Senescent)) return state;
+    const double raw=std::fmod(day-c.winterDay,c.yearDays),phase=raw<0 ? raw+c.yearDays : raw;
+    // A young plant which missed this year's reproductive window cannot acquire
+    // seed heads retroactively. The local seed bank is still an approximation.
+    const double ageAtOpening=plant.ageDays-(phase-c.openDay);
+    if(ageAtOpening<f.reproductiveDays || plant.ageDays<f.reproductiveDays*.85) return state;
+    const double span=c.closeDay-c.openDay;
+    state.buds=smoothstep(c.budDay,c.openDay,phase)*(1-smoothstep(c.openDay,c.openDay+span*.18,phase))*plant.foliage;
+    state.bloom=smoothstep(c.openDay,c.openDay+span*.15,phase)*(1-smoothstep(c.closeDay-span*.25,c.closeDay,phase))*plant.foliage;
+    state.seeds=smoothstep(c.closeDay-span*.20,c.closeDay+span*.20,phase)*(1-smoothstep(c.endDay-span*.20,c.endDay,phase))*plant.foliage;
+    state.phase=state.bloom>.02 ? FlowerPhase::Flowering : state.buds>.02 ? FlowerPhase::Budding : state.seeds>.02 ? FlowerPhase::Fruiting : FlowerPhase::Dormant;
+    return state;
+}
+void Flora::setCalendarDay(double day) {
+    if(!std::isfinite(day) || std::abs(day)>1e7) throw std::invalid_argument("Biological calendar is outside the supported range");
+    epochDay_=day-days_;
 }
 void Flora::setRate(double rate) {
     if(!std::isfinite(rate) || rate<1 || rate>30*86400) throw std::invalid_argument("Growth rate must be 1..2592000");

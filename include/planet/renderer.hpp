@@ -30,7 +30,8 @@ struct ViewState {
     double seconds=79*86400.0, timeScale=1, fps=0;
     double frameSeconds=0;
     bool globe=false, help=true, captured=false, paused=false;
-    bool windTracers=false,waterTracers=true,headlamp=true;
+    // Flow markers are opt-in diagnostics; ordinary exploration starts clean.
+    bool windTracers=false,waterTracers=false,headlamp=true;
     bool floraInfo=true;
     SurfaceStyle surfaceStyle=SurfaceStyle::Natural;
     WeatherLayer weatherLayer=WeatherLayer::Clouds;

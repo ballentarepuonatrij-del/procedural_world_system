@@ -232,7 +232,7 @@ void Renderer::buildObjects(const World& world,const Flora& flora) {
     DrawTimer timer{timings_.plants};
     objectCasters_.clear();shadowDirty_=true;
     glNewList(objects_,GL_COMPILE);glBegin(GL_TRIANGLES);
-    detailCount_=0;plantCount_=0;marineCount_=0;plantHeightSum_=0;focusPlant_.reset();
+    detailCount_=0;plantCount_=0;marineCount_=0;freshwaterCount_=0;plantHeightSum_=0;focusPlant_.reset();
     floweringCount_=buddingCount_=seedHeadCount_=0;
     std::array<bool,speciesCount> species{};double nearest=1e30;
     const auto local=[&](Vec3 p) { return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)}; };
@@ -245,12 +245,12 @@ void Renderer::buildObjects(const World& world,const Flora& flora) {
             const auto& t=face.triangle;const auto n=normalized(cross(t.b-t.a,t.c-t.a));
             glNormal3d(n.x,n.y,n.z);glColor3f(face.color.r,face.color.g,face.color.b);
             for(const auto v:{t.a,t.b,t.c}) glVertex3d(v.x,v.y,v.z);
-            if(distance<=240 && !plantTraits(object.species).aquatic) objectCasters_.push_back(t);
+            if(distance<=240 && object.castsSurfaceShadow()) objectCasters_.push_back(t);
         }
         ++detailCount_;
         if(object.species!=Species::None) {
             ++plantCount_;species[static_cast<unsigned>(object.species)]=true;plantHeightSum_+=object.height;
-            if(plantTraits(object.species).aquatic) ++marineCount_;
+            if(plantTraits(object.species).aquatic) {if(freshwaterPlant(object.species)) ++freshwaterCount_;else ++marineCount_;}
             if(object.flowers.bloom>.02) ++floweringCount_;
             if(object.flowers.buds>.02) ++buddingCount_;
             if(object.flowers.seeds>.02) ++seedHeadCount_;
@@ -269,7 +269,7 @@ void Renderer::buildGlobe(const World& world,double seconds) {
         const auto sample=world.sample(p,seconds);
         const auto color=world.color(sample);
         // True radius, without vertical exaggeration.
-        const Vec3 v=p*(1+(sample.ocean ? world.config().seaLevel : sample.elevation)/world.config().radius);
+        const Vec3 v=p*(1+(sample.ocean || sample.freshwater ? sample.waterLevel : sample.elevation)/world.config().radius);
         glColor3f(color.r,color.g,color.b); glNormal3d(p.x,p.y,p.z); glVertex3d(v.x,v.y,v.z);
     };
     for(int y=0;y<latitudes;++y) {
@@ -456,7 +456,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
                     auto casters=mesh.casters;
                     for(const auto& site:mesh.plants) {
                         const auto object=grownObject(site.object,&flora);const double distance=length(object.up-mesh.anchor)*worldCopy.config().radius;
-                        if(object.height<.015 || distance>240 || plantTraits(object.species).aquatic) continue;
+                        if(object.height<.015 || distance>240 || !object.castsSurfaceShadow()) continue;
                         const bool simple=distance>(object.kind==DetailKind::Grass || object.kind==DetailKind::Shrub ? 24 : 100);
                         for(const auto& face:detailMesh(object,site.base,local(object.up),local(east(object.up)),simple)) casters.push_back(face.triangle);
                     }
@@ -557,7 +557,7 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
     DrawTimer timer{timings_.water};
     const auto& water=simulation.water; const auto& motion=simulation.motion;
     const bool oceanEnabled=world.modules().enabled(Module::Ocean);
-    if(!water.enabled() && !oceanEnabled) return;
+    if(!water.enabled() && !oceanEnabled && !world.modules().enabled(Module::InlandWaters)) return;
     const auto local=[&](Vec3 p) { return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)}; };
     const double radius=world.config().radius,sea=world.config().seaLevel;
     const Vec3 origin=anchor_*radius,eye=explorer.up()*(radius+explorer.altitude());
@@ -571,8 +571,8 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
         const auto& v=waterVertices_[i]; if(!v.available) continue;
         const auto ground=waterGround_[i]=water.sample(v.up);
         const bool riverWet=v.river;
-        const bool ocean=!riverWet && oceanEnabled && (v.altitude<sea || !ground.available || ground.depth<0.0005);
-        const double depth=riverWet ? -.01 : ocean ? sea-v.altitude : (ground.available ? ground.depth*ground.weight : 0);
+        const bool ocean=!riverWet && !v.inland && oceanEnabled && (v.altitude<sea || !ground.available || ground.depth<0.0005);
+        const double depth=riverWet ? -.01 : v.inland ? v.level-v.altitude : ocean ? sea-v.altitude : (ground.available ? ground.depth*ground.weight : 0);
         vertices[i].depth=depth;
     }
     // Dry triangles cannot contribute pixels. Their shoreline neighbours still
@@ -582,7 +582,7 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
     for(std::size_t i=0;i<waterVertices_.size();++i) {
         const auto& v=waterVertices_[i];if(!v.available || !waterVisible_[i]) continue;
         const auto& ground=waterGround_[i];const double depth=vertices[i].depth;
-        const bool ocean=!v.river && oceanEnabled && (v.altitude<sea || !ground.available || ground.depth<0.0005);
+        const bool ocean=!v.river && !v.inland && oceanEnabled && (v.altitude<sea || !ground.available || ground.depth<0.0005);
         double level=ocean ? sea : v.altitude+depth;
         const auto wave=motion.waves(v.up,std::max(0.0,depth),ocean,v.spacing*2);
         level+=wave.height;
@@ -594,7 +594,8 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
         const double shine=explorer.underwater() ? 0 : std::pow(std::max(0.0,dot(reflected,towardEye)),72);
         const double mud=ground.available ? 1-std::exp(-ground.sedimentKgM3/12) : 0;
         const double light=.16+.84*daylight;
-        const Color clear{0.025f,0.29f,0.37f},silt{0.39f,0.29f,0.12f};
+        const Color clear=v.wetland ? Color{.12f,.20f,.10f} : v.inland ? Color{.035f,.24f,.22f} : Color{0.025f,0.29f,0.37f};
+        const Color silt{0.39f,0.29f,0.12f};
         const auto sky=skyColor(lighting_,normal*(2*dot(normal,towardEye))-towardEye);
         Color color=wire ? Color{0.035f,0.11f,0.18f} : Color{
             static_cast<float>(mix(mix(clear.r,silt.r,mud)*light,sky.r,fresnel)+shine*lighting_.sunlight.r*.75),
@@ -998,7 +999,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(40,h-104,"AIR     " + fixed(sample.density,3) + " kg/m3",muted);
     } else text(40,h-126,"ATMOSPHERE DISABLED",muted);
     text(40,h-82,"RAIN    " + (world.modules().enabled(Module::Climate) ? fixed(sample.precipitation,0)+" mm/y (estimate)" : "--"),muted);
-    rect(w-288,98,266,274,panel,0.90f);
+    rect(w-288,98,266,287,panel,0.90f);
     text(w-272,123,"SIMULATION MODULES",mint);
     for(unsigned i=0;i<moduleCount;++i) {
         const auto m=static_cast<Module>(i);
@@ -1007,7 +1008,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(w-272,y,std::string(moduleNames[i]),on?white:muted);
         text(w-90,y,on ? "ON" : (world.modules().requested(m) ? "WAIT" : "OFF"),on?mint:muted);
     }
-    text(w-272,367,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
+    text(w-272,380,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
     rect(22,h-51,w-44,29,panel,0.9f);
     text(35,h-31,view.globe ? "RMB drag: rotate   LMB: travel   TAB surface   ESC settings   CTRL+U interface" :
         (view.captured ? "ESC release mouse" : "CLICK look / ESC settings") + std::string("   WASD  F fly  TAB globe  CTRL+U interface"),white);
@@ -1018,8 +1019,8 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(w-340,h-164,"CTRL down      WHEEL flight speed",white);
         text(w-340,h-143,"+/- time  P pause  CTRL+S seed",white);
         text(w-340,h-122,"ESC settings / HOME landing",white);
-        text(w-340,h-101,"Surface: "+std::string(surfaceStyleName(view.surfaceStyle)),mint);
-        text(w-340,h-80,"F7 rivers  F8 meadow  X grove",muted);
+        text(w-340,h-101,"F7 rivers  F8 meadow  X grove",muted);
+        text(w-340,h-80,"F9 wetlands  F10 coasts",mint);
     }
     if(!view.globe) {
         const float cx=w/2,cy=h/2;

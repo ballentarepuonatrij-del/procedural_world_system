@@ -36,7 +36,7 @@ std::optional<RiverKind> riverKind(std::string_view name) {
 RiverNetwork::RiverNetwork(const World& world) : base_(world) {
     static std::atomic<std::uint64_t> nextIdentity{1};
     cacheIdentity_=nextIdentity.fetch_add(1,std::memory_order_relaxed);
-    base_.waterNetwork_.reset();base_.modules().set(Module::Rivers,false);
+    base_.waterNetwork_.reset();base_.landscape_.reset();base_.modules().set(Module::Rivers,false);base_.modules().set(Module::InlandWaters,false);
     const auto& config=base_.config();const double radius=config.radius,sea=config.seaLevel;
     nodes_.resize(columns*rows);std::vector<bool> visited(nodes_.size());std::vector<int> order;
     using Queue=std::pair<double,int>;std::priority_queue<Queue,std::vector<Queue>,std::greater<>> queue;

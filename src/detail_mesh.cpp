@@ -90,6 +90,42 @@ std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up
         bead(center+Vec3{0,size*.07,0},size*.24,size*.10,disk);
         sheets=previous;
     };
+    if(object.species==Species::WaterLily) {
+        const double level=object.waterDepth*clamp(object.plant.size*2,0.,1.)+.025;
+        tube({0,0,0},{0,level,0},.012,.007,leaves);sheets=true;
+        for(int leaf=0;leaf<(simple ? 2 : 4);++leaf) {
+            const double angle=tau*leaf/4;const Vec3 center{std::cos(angle)*r*.55,level,std::sin(angle)*r*.55};
+            const int sides=simple ? 6 : 10;
+            for(int i=1;i<sides;++i) {
+                const double a=tau*i/sides+angle,b=tau*(i+1)/sides+angle;
+                triangle(center,center+Vec3{std::cos(b)*r*.65,0,std::sin(b)*r*.65},center+Vec3{std::cos(a)*r*.65,0,std::sin(a)*r*.65},leaves);
+            }
+        }
+        if(object.plant.size>=.5) flower({0,level+.035,0},floral.radius,870);
+        return faces;
+    }
+    if(object.species==Species::Sphagnum) {
+        crown({0,h*.35,0},{r,h*.65,r*.85},leaves,880);return faces;
+    }
+    if(object.species==Species::Reed || object.species==Species::Cattail || object.species==Species::Sedge || object.species==Species::Marram || object.species==Species::Pondweed) {
+        const int stems=simple ? 3 : 5;sheets=true;
+        for(int i=0;i<stems;++i) {
+            const double angle=tau*i/stems;const Vec3 direction{std::cos(angle),0,std::sin(angle)},side{-direction.z,0,direction.x};
+            const auto base=direction*(r*.25),tip=base+Vec3{0,h*(.72+.28*randomUnit(object.id+static_cast<unsigned>(i))),0};
+            triangle(base-side*.009,tip,base+side*.009,leaves);
+            for(int j=1;j<=4;++j) {
+                const auto joint=base+(tip-base)*(j*.16);const auto middle=joint+direction*(r*.55)+Vec3{0,h*.12,0};
+                const auto end=joint+direction*r+Vec3{0,h*(object.species==Species::Pondweed ? .05 : .07),0};
+                const double w=r*(object.species==Species::Pondweed ? .22 : .065);
+                triangle(joint,middle+side*w,end,leaves);triangle(joint,end,middle-side*w,leaves);
+            }
+            if(object.species==Species::Cattail) {
+                if(std::max({flowers.buds,flowers.bloom,flowers.seeds})>.02)
+                    tube(tip-Vec3{0,h*.18,0},tip,h*.024,h*.022,flowers.buds>flowers.bloom+flowers.seeds ? leaves : Color{.34f,.20f,.08f});
+            } else flower(tip,floral.radius,static_cast<unsigned>(890+i));
+        }
+        return faces;
+    }
     if(traits.aquatic || object.species==Species::Fern) {
         sheets=true;
         if(object.species==Species::Kelp) {
@@ -153,6 +189,12 @@ std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up
             } else {
                 const bool flat=object.species==Species::Acacia;
                 crown({0,h*(flat ? .86 : .73),0},{r,h*(flat ? .14 : .27),r},leaves,200);
+                if(object.species==Species::Willow) {
+                    for(int i=0;i<(simple ? 5 : 8);++i) {
+                        const double angle=tau*i/(simple ? 5 : 8);const Vec3 edge{std::cos(angle)*r*.75,h*.72,std::sin(angle)*r*.75};
+                        crown(edge-Vec3{0,h*.19,0},{r*.28,h*.29,r*.28},leaves,static_cast<unsigned>(1400+i*51));
+                    }
+                }
                 if(!simple) for(int i=0;i<3;++i) {
                     const double angle=tau*i/3+0.4;
                     const Vec3 branch{std::cos(angle)*r*0.65,h*(0.56+i*0.055),std::sin(angle)*r*0.65};

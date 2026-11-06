@@ -1,6 +1,7 @@
 #include "planet/model.hpp"
 #include <mutex>
 #include "planet/rivers.hpp"
+#include "planet/landscape.hpp"
 #include <limits>
 #include <stdexcept>
 
@@ -48,7 +49,8 @@ bool Modules::enabled(Module m) const {
     if (m == Module::Landforms) return enabled(Module::Terrain);
     if (m == Module::Caves) return enabled(Module::Landforms);
     if (m == Module::Rivers) return enabled(Module::Terrain);
-    if (m == Module::WaterMotion) return enabled(Module::Ocean) || enabled(Module::Hydrology) || enabled(Module::Rivers);
+    if (m == Module::InlandWaters) return enabled(Module::Terrain);
+    if (m == Module::WaterMotion) return enabled(Module::Ocean) || enabled(Module::Hydrology) || enabled(Module::Rivers) || enabled(Module::InlandWaters);
     if (m == Module::PlantGrowth) return enabled(Module::SurfaceDetail) && enabled(Module::Biomes);
     if (m == Module::GlobalWeather) return enabled(Module::Wind) && enabled(Module::Climate);
     return true;
@@ -112,7 +114,7 @@ Atmosphere standardAtmosphere(double altitude, double seaTemperature, double sur
 }
 
 std::string_view biomeName(Biome b) {
-    constexpr std::array<std::string_view, 8> names{"Ocean", "Ice", "Tundra", "Desert", "Grassland", "Forest", "Rainforest", "Rock"};
+    constexpr std::array<std::string_view, 11> names{"Ocean", "Ice", "Tundra", "Desert", "Grassland", "Forest", "Rainforest", "Rock", "Wetland", "Freshwater", "Beach"};
     return names.at(static_cast<std::size_t>(b));
 }
 World::World(Config config) : config_(config), noise_(config.seed) {
@@ -194,7 +196,8 @@ Relief World::rawRelief(Vec3 p) const {
     return modules_.enabled(Module::Landforms) ? shapeLandforms(p,config_.radius,config_.seaLevel,config_.seed,height,mountains/4000) : Relief{height};
 }
 double World::surface(Vec3 p) const {
-    double h = elevation(p);
+    const auto terrain=relief(p);double h=terrain.elevation;
+    if(terrain.inland) h=std::max(h,terrain.waterLevel);
     if(modules_.enabled(Module::Rivers)) {const auto river=waterNetwork()->sample(p);if(river.wet) h=std::max(h,river.level);}
     return modules_.enabled(Module::Ocean) ? std::max(h, config_.seaLevel) : h;
 }
@@ -215,9 +218,13 @@ Sample World::evaluate(Vec3 p, double seconds, bool annualMean) const {
     const auto terrain=relief(p); s.elevation=terrain.elevation; s.landform=terrain.type;
     s.ocean = modules_.enabled(Module::Ocean) && s.elevation < config_.seaLevel;
     const auto river=modules_.enabled(Module::Rivers) ? waterNetwork()->sample(p) : RiverSample{};
-    const bool freshwater=river.wet && river.level>config_.seaLevel+.02;
-    if(freshwater) s.ocean=false;
-    const double height = s.ocean ? config_.seaLevel : freshwater ? river.level : s.elevation;
+    s.inland=terrain.inland;s.wetness=terrain.wetness;s.sand=terrain.sand;s.waterLevel=terrain.inland ? terrain.waterLevel : s.elevation;
+    if(river.wet && river.level>config_.seaLevel+.02) s.waterLevel=std::max(s.waterLevel,river.level);
+    s.freshwater=s.waterLevel>s.elevation+.0005;
+    if(s.freshwater) s.ocean=false;
+    if(s.ocean) s.waterLevel=config_.seaLevel;
+    s.waterDepth=std::max(0.,s.waterLevel-s.elevation);
+    const double height = s.ocean || s.freshwater ? s.waterLevel : s.elevation;
     const double lat = latitude(p);
     const double annual = annualInsolation(lat);
     const auto sun = orbit(config_,seconds);
@@ -227,7 +234,7 @@ Sample World::evaluate(Vec3 p, double seconds, bool annualMean) const {
         const double transported = 0.65*annual + 0.35*config_.solarConstant/4;
         const double equilibrium = std::pow(transported*(1-config_.albedo)/(stefanBoltzmann*config_.emissivity),0.25);
         const double feedback = 4*stefanBoltzmann*config_.emissivity*std::pow(equilibrium,3);
-        const double heatCapacity = s.ocean ? 4.18e6*30 : 2e6*2;
+        const double heatCapacity = s.ocean ? 4.18e6*30 : 2e6*2+4.18e6*std::min(20.,s.waterDepth);
         const double omega = tau/config_.year;
         const double lag = std::atan(omega*heatCapacity/feedback)/omega;
         const double damping = feedback/std::hypot(feedback,omega*heatCapacity);
@@ -249,7 +256,10 @@ Sample World::evaluate(Vec3 p, double seconds, bool annualMean) const {
     }
     if (s.ocean) s.biome = Biome::Ocean;
     else if (modules_.enabled(Module::Biomes)) {
-        if (s.temperature < 263.15) s.biome = Biome::Ice;
+        if(s.wetness>.3) s.biome=terrain.type==Landform::Wetland || s.waterDepth<.08 ? Biome::Wetland : Biome::Freshwater;
+        else if(s.freshwater) s.biome=Biome::Freshwater;
+        else if(s.sand>.25) s.biome=Biome::Beach;
+        else if (s.temperature < 263.15) s.biome = Biome::Ice;
         else if (s.temperature < 277.15) s.biome = Biome::Tundra;
         else if (s.precipitation < 280) s.biome = Biome::Desert;
         else if (s.precipitation < 800) s.biome = Biome::Grassland;
@@ -267,6 +277,9 @@ Color World::color(const Sample& s) const {
         case Biome::Grassland: return {0.40f,0.45f,0.24f};
         case Biome::Forest: return {0.20f,0.33f,0.22f};
         case Biome::Rainforest: return {0.13f,0.29f,0.20f};
+        case Biome::Wetland: return {.25f,.32f,.15f};
+        case Biome::Freshwater: return {.16f,.29f,.24f};
+        case Biome::Beach: return {.72f,.64f,.44f};
         default: return {0.46f,0.43f,0.38f};
     }
 }

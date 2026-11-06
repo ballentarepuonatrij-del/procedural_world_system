@@ -15,8 +15,10 @@ struct SurfaceObject {
     PlantState plant;
     FlowerCycle flowerCycle;
     FlowerState flowers;
+    double waterDepth=0; // reference depth at the fixed root; floating leaves use this offset
     double collisionRadius() const;
     double collisionHeight() const;
+    bool castsSurfaceShadow() const {return !plantTraits(species).aquatic || height>waterDepth+.02;}
 };
 // A finite spherical neighbourhood. Coordinates, identity and shape depend on
 // seed and fixed cube-face cells, never on the observer or query order.

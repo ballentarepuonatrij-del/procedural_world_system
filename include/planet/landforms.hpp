@@ -5,10 +5,14 @@
 #include <string_view>
 
 namespace planet {
-enum class Landform { Lowland, Mountains, Plateau, Canyon, Gorge, Karst };
+enum class Landform { Lowland, Mountains, Plateau, Canyon, Gorge, Karst, Wetland, Pond, Lake, Bay, Cliff, Spit, Grotto };
 std::string_view landformName(Landform type);
 std::optional<Landform> landmarkType(std::string_view name);
-struct Relief { double elevation{}, incision{}, ruggedness{}; Landform type=Landform::Lowland; };
+struct Relief {
+    double elevation{}, incision{}, ruggedness{}; Landform type=Landform::Lowland;
+    double waterLevel=0,wetness=0,sand=0;
+    bool inland=false;
+};
 Relief shapeLandforms(Vec3 unit,double radius,double seaLevel,std::uint64_t seed,double height,double mountainWeight);
 struct CaveColumn {
     double floor{},ceiling{},field=-1; // elevations ASL; positive field inside the horizontal footprint
@@ -19,6 +23,7 @@ struct CaveSite {
     std::uint64_t id{};
     Vec3 anchor{},forward{},right{};
     double radius{},base{};
+    bool coastal=false;
     std::array<CaveNode,10> nodes{};
     std::array<std::array<unsigned,2>,9> links{};
     Vec3 directionAt(double x,double z) const;

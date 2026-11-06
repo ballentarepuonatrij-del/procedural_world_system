@@ -1,4 +1,5 @@
 #include "planet/renderer.hpp"
+#include "planet/landscape.hpp"
 #include "planet/win32_audio.hpp"
 #include "planet/win32_dialogs.hpp"
 #include <shellapi.h>
@@ -34,7 +35,7 @@ struct Options {
     WeatherLayer weatherLayer=WeatherLayer::Clouds;
     bool sound=true;
     bool sky=true,shadows=true,lookAtSun=false;
-    bool rivers=true;
+    bool rivers=true,inlandWaters=true;
     std::optional<RiverKind> riverSite;
     std::optional<double> solarHour;
     std::optional<std::array<double,2>> look;
@@ -65,7 +66,7 @@ Options parseOptions() {
         options.caves=modules.requested(Module::Caves);options.waterMotion=modules.requested(Module::WaterMotion);
         options.plantGrowth=modules.requested(Module::PlantGrowth);options.globalWeather=modules.requested(Module::GlobalWeather);
         options.sound=modules.requested(Module::Sound);
-        options.rivers=modules.requested(Module::Rivers);
+        options.rivers=modules.requested(Module::Rivers);options.inlandWaters=modules.requested(Module::InlandWaters);
         for(int i=1;i<argc;++i) {
             const std::wstring arg=argv[i];
             const auto next=[&]() -> std::wstring {
@@ -89,6 +90,7 @@ Options parseOptions() {
             else if(arg==L"--no-sky") options.sky=false;
             else if(arg==L"--no-shadows") options.shadows=false;
             else if(arg==L"--no-rivers") options.rivers=false;
+            else if(arg==L"--no-inland-waters") options.inlandWaters=false;
             else if(arg==L"--river") {const auto value=next();options.riverSite=riverKind(std::string(value.begin(),value.end()));if(!options.riverSite) throw std::invalid_argument("River must be stream, river or major");}
             else if(arg==L"--look-at-sun") options.lookAtSun=true;
             else if(arg==L"--solar-hour" || arg==L"--look") {
@@ -159,7 +161,7 @@ Options parseOptions() {
             }
             else if(arg==L"--landmark") {
                 const auto value=next(); options.landmark=landmarkType(std::string(value.begin(),value.end()));
-                if(!options.landmark) throw std::invalid_argument("Landmark must be cave, canyon, mountains or gorge");
+                if(!options.landmark) throw std::invalid_argument("Landmark must be cave, canyon, mountains, gorge, wetland, pond, lake, bay, cliff, spit or grotto");
             }
             else if(arg==L"--walk-seconds") {
                 const auto value=next(); std::size_t used=0; options.walkSeconds=std::stod(value,&used);
@@ -200,7 +202,7 @@ World configuredWorld(const Options& options) {
     modules.set(Module::Hydrology,options.water);modules.set(Module::Erosion,options.erosion);
     modules.set(Module::Landforms,options.landforms);modules.set(Module::Caves,options.caves);
     modules.set(Module::WaterMotion,options.waterMotion);modules.set(Module::PlantGrowth,options.plantGrowth);
-    modules.set(Module::GlobalWeather,options.globalWeather);modules.set(Module::Sound,options.sound);modules.set(Module::Rivers,options.rivers);return world;
+    modules.set(Module::GlobalWeather,options.globalWeather);modules.set(Module::Sound,options.sound);modules.set(Module::Rivers,options.rivers);modules.set(Module::InlandWaters,options.inlandWaters);return world;
 }
 class Application {
 public:
@@ -217,10 +219,10 @@ public:
         simulation_.advance(world_,explorer_.up(),0);
         explorer_.teleport(world_,explorer_.up(),&simulation_.water);
         orientLanding(); noon();
-        if(options_.landmark) visitLandmark(*options_.landmark);
+        if(options_.landmark) visitLandmark(*options_.landmark,options_.diveDepth.has_value());
         if(options_.grove) visitGrove();
         if(options_.meadow) visitMeadow();
-        if(options_.coast || options_.diveDepth) visitCoast(options_.diveDepth.has_value());
+        if(options_.coast || (options_.diveDepth && !options_.landmark && !options_.riverSite)) visitCoast(options_.diveDepth.has_value());
         if(options_.riverSite) visitRiver(*options_.riverSite,options_.diveDepth.has_value());
         if(options_.storm && !visitStorm(*options_.storm)) throw std::runtime_error("No active storm of the requested kind on this planet");
         simulation_.advance(world_,explorer_.up(),0);
@@ -385,10 +387,12 @@ public:
                 << "\nrender_mean_ms=" << renderTime/std::max(1,frames) << "\nrender_max_ms=" << longestRender << '\n';
             out << "flora_days=" << simulation_.flora.days() << "\nflora_rate=" << simulation_.flora.rate()
                 << "\nyoung_flora=" << simulation_.flora.young() << "\nflora_panel=" << view_.floraInfo
-                << "\nflora_plants=" << renderer_->plantCount() << "\nmarine_plants=" << renderer_->marineCount()
+                << "\nflora_plants=" << renderer_->plantCount() << "\nmarine_plants=" << renderer_->marineCount() << "\nfreshwater_plants=" << renderer_->freshwaterCount()
                 << "\nflora_species=" << renderer_->plantSpeciesCount() << "\nflora_height_sum_m=" << renderer_->plantHeightSum()
                 << "\nflora_calendar_day=" << simulation_.flora.calendarDay() << "\nflowering_plants=" << renderer_->floweringCount()
                 << "\nbudding_plants=" << renderer_->buddingCount() << "\nseed_head_plants=" << renderer_->seedHeadCount() << '\n';
+            const auto habitat=world_.climatology(explorer_.up());
+            out << "inland_water=" << habitat.inland << "\nreference_water_level_m=" << habitat.waterLevel << "\nreference_water_depth_m=" << habitat.waterDepth << "\nwetness=" << habitat.wetness << "\nsand=" << habitat.sand << '\n';
             const auto& light=renderer_->illumination();
             const auto river=world_.modules().enabled(Module::Rivers) ? world_.waterNetwork()->sample(explorer_.up()) : RiverSample{};
             out << "river_wet=" << river.wet << "\nriver_width_m=" << river.width << "\nriver_depth_m=" << river.depth
@@ -565,15 +569,18 @@ private:
         explorer_.look(std::atan2(dot(look,east(p)),dot(look,north(p))),radians(-5));
         view_.globe=false; noon(); if(renderer_) renderer_->invalidate();
     }
-    void visitLandmark(Landform type) {
-        const auto place=world_.findLandmark(type,world_.findLand());
+    void visitLandmark(Landform type,bool submerged=false) {
+        auto place=world_.findLandmark(type,world_.findLand());
+        if(submerged && inlandLandform(type)) {
+            if(const auto patch=world_.landscape()->patch(place.position)) place.position=patch->anchor;
+        }
         explorer_.teleport(world_,place.position); simulation_.advance(world_,explorer_.up(),0);
         explorer_.teleport(world_,place.position,&simulation_.water);
         const Vec3 look=normalized(place.lookToward-place.position*dot(place.lookToward,place.position));
         const double bearing=std::atan2(dot(look,east(place.position)),dot(look,north(place.position)));
         const double distance=length(place.lookToward-place.position)*world_.config().radius;
         const double rise=world_.elevation(place.lookToward)-explorer_.altitude()-distance*distance/(2*world_.config().radius);
-        const double pitch=type==Landform::Karst ? radians(-3) : clamp(std::atan2(rise,std::max(1.0,distance))*0.65,radians(-45),radians(30));
+        const double pitch=(type==Landform::Karst || type==Landform::Grotto) ? radians(-3) : clamp(std::atan2(rise,std::max(1.0,distance))*0.65,radians(-45),radians(30));
         explorer_.look(bearing,pitch);
         view_.globe=false; noon(); if(renderer_) renderer_->invalidate();
     }
@@ -639,6 +646,11 @@ private:
         else if(key==VK_F3) view_.weatherLayer=static_cast<WeatherLayer>((static_cast<unsigned>(view_.weatherLayer)+1)%6);
         else if(key==VK_F7) {constexpr std::array<RiverKind,3> tour{RiverKind::Major,RiverKind::River,RiverKind::Stream};visitRiver(tour[riverIndex_++%tour.size()]);}
         else if(key==VK_F8) visitMeadow();
+        else if(key==VK_F9) {
+            modalAction([&] {constexpr std::array tour{Landform::Wetland,Landform::Lake,Landform::Pond};visitLandmark(tour[inlandIndex_++%tour.size()]);});
+        } else if(key==VK_F10) {
+            modalAction([&] {constexpr std::array tour{Landform::Bay,Landform::Spit,Landform::Cliff,Landform::Grotto};visitLandmark(tour[coastIndex_++%tour.size()]);});
+        }
         else if(key==VK_F2) {
             constexpr std::array<StormKind,3> tour{StormKind::Hurricane,StormKind::Cyclone,StormKind::Thunderstorm};
             for(unsigned i=0;i<tour.size();++i) if(visitStorm(tour[stormIndex_++%tour.size()])) break;
@@ -718,6 +730,12 @@ private:
             case WM_KEYDOWN:
                 if(!(lParam&(1LL<<30)) && app->renderer_) app->key(wParam);
                 return 0;
+            case WM_SYSKEYDOWN:
+                if(wParam==VK_F10 && !(lParam&(1LL<<29))) {
+                    if(!(lParam&(1LL<<30)) && app->renderer_) app->key(wParam);
+                    return 0;
+                }
+                return DefWindowProcW(window,message,wParam,lParam);
             case WM_MOUSEWHEEL:
                 app->explorer_.flightSpeed=clamp(app->explorer_.flightSpeed*std::pow(1.5,GET_WHEEL_DELTA_WPARAM(wParam)/120.0),5.0,20000.0);
                 return 0;
@@ -747,6 +765,7 @@ private:
     bool resetFrameClock_=false,globeDragging_=false;
     POINT globeMouse_{};
     std::optional<POINT> globeClick_;
+    unsigned inlandIndex_=0,coastIndex_=0;
     unsigned settingsOpened_=0,settingsSaved_=0,teleportRequests_=0,teleportsConfirmed_=0,seedChanges_=0;
     std::size_t landmarkIndex_=0;
     std::size_t stormIndex_=0;

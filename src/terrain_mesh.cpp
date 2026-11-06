@@ -119,7 +119,9 @@ TerrainMesh makeTerrainMesh(const World& world,const Hydrology& water,Vec3 obser
         const Vec3 position{dot(relative,mesh.east),dot(relative,mesh.anchor),dot(relative,mesh.north)};
         const double localSpacing=std::max(x>0 ? xs[static_cast<std::size_t>(x)]-xs[static_cast<std::size_t>(x-1)] : mesh.spacing,
                                            y>0 ? ys[static_cast<std::size_t>(y)]-ys[static_cast<std::size_t>(y-1)] : mesh.spacing);
-        mesh.waterVertices.push_back({p,position,h,world.modules().enabled(Module::Ocean) || (ground.available && ground.weight>0),river.wet && river.level>world.config().seaLevel+.02,localSpacing});
+        double waterBed=h;
+        if(cave && cave->coastal) {const auto c=cave->column(p);if(c.valid()) waterBed=std::min(waterBed,c.floor);}
+        mesh.waterVertices.push_back({p,position,waterBed,world.modules().enabled(Module::Ocean) || world.modules().enabled(Module::InlandWaters) || (ground.available && ground.weight>0),river.wet && river.level>world.config().seaLevel+.02,localSpacing,sample.inland,sample.landform==Landform::Wetland,sample.waterLevel});
         const float alpha=static_cast<float>(1-smoothstep(1500+aboveGround*4,10000+aboveGround*12,std::hypot(position.x,position.z)));
         const double band=0.5+0.5*std::sin(h/7.5+0.35*std::sin(h/27));
         Color rock{0.44f,0.42f,0.36f};
@@ -265,8 +267,12 @@ TerrainMesh makeTerrainMesh(const World& world,const Hydrology& water,Vec3 obser
             const double tx=clamp((x-xs[static_cast<std::size_t>(ix)])/(xs[static_cast<std::size_t>(ix+1)]-xs[static_cast<std::size_t>(ix)]),0.0,1.0);
             const double ty=clamp((y-ys[static_cast<std::size_t>(iy)])/(ys[static_cast<std::size_t>(iy+1)]-ys[static_cast<std::size_t>(iy)]),0.0,1.0);
             const Vec3 a=at(ix,iy).position,d=at(ix+1,iy+1).position;
-            const Vec3 base=tx>=ty ? a*(1-tx)+at(ix+1,iy).position*(tx-ty)+d*ty
+            Vec3 base=tx>=ty ? a*(1-tx)+at(ix+1,iy).position*(tx-ty)+d*ty
                                   : a*(1-ty)+at(ix,iy+1).position*(ty-tx)+d*tx;
+            if(object.species==Species::WaterLily) {
+                const auto relative=object.up*(radius+object.elevation)-mesh.anchor*radius;
+                base={dot(relative,mesh.east),dot(relative,mesh.anchor),dot(relative,mesh.north)};
+            }
             mesh.plants.push_back({object,base});
         }
     }

@@ -38,7 +38,7 @@ int main(int argc, char** argv) {
         double audioSeconds=10,volume=.55;
         bool audioDurationSet=false,soundEnabled=true;
         bool sample = false,coast=false;
-        bool riverOutput=false,riversEnabled=true;std::optional<planet::RiverKind> riverSite;
+        bool riverOutput=false,riversEnabled=true,inlandEnabled=true;std::optional<planet::RiverKind> riverSite;
         for (int i=1; i<argc; ++i) {
             const std::string arg = argv[i];
             const auto next = [&]() -> std::string {
@@ -51,6 +51,7 @@ int main(int argc, char** argv) {
                 if (error != std::errc{} || end != value.data()+value.size()) throw std::invalid_argument("Invalid seed");
             } else if (arg == "--sample") { lat = number(next()); lon = number(next()); sample = true; }
             else if(arg=="--rivers") riverOutput=true;
+            else if(arg=="--no-inland-waters") inlandEnabled=false;
             else if(arg=="--no-rivers") {riversEnabled=false;riverOutput=true;}
             else if(arg=="--river") {riverSite=planet::riverKind(next());riverOutput=true;if(!riverSite) throw std::invalid_argument("River must be stream, river or major");}
             else if (arg == "--day") day = number(next());
@@ -102,12 +103,12 @@ int main(int argc, char** argv) {
             }
             else if(arg=="--landmark") {
                 landmark=planet::landmarkType(next());
-                if(!landmark) throw std::invalid_argument("Landmark must be cave, canyon, mountains or gorge");
+                if(!landmark) throw std::invalid_argument("Landmark must be cave, canyon, mountains, gorge, wetland, pond, lake, bay, cliff, spit or grotto");
             }
             else if (arg == "--help") {
-                std::cout << "planet_cli [--seed uint64] [--sample latitude longitude] [--day days_since_perihelion] [--map world.ppm] [--weather 0..3600_seconds] [--water 0..3600_seconds] [--rain-mm-h 0..200] [--landmark cave|canyon|mountains|gorge] [--coast] [--wind-m-s 0..40] [--flora] [--grove] [--young-flora] [--grow-days 0..365250]\n";
+                std::cout << "planet_cli [--seed uint64] [--sample latitude longitude] [--day days_since_perihelion] [--map world.ppm] [--weather 0..3600_seconds] [--water 0..3600_seconds] [--rain-mm-h 0..200] [--landmark cave|canyon|mountains|gorge|wetland|pond|lake|bay|cliff|spit|grotto] [--coast] [--wind-m-s 0..40] [--flora] [--grove] [--young-flora] [--grow-days 0..365250]\n";
                 std::cout << "Global weather: [--storm cyclone|hurricane|thunderstorm] [--global-hours 0..240] [--no-global-weather]\n";
-                std::cout << "Global water: [--rivers] [--river stream|river|major] [--no-rivers]\n";
+                std::cout << "Global water: [--rivers] [--river stream|river|major] [--no-rivers] [--no-inland-waters]\n";
                 std::cout << "Flowering: [--meadow] [--flora-day days_since_perihelion]\n";
                 std::cout << "Procedural audio: [--audio output.wav] [--audio-seconds 0.1..60] [--volume 0..100] [--no-sound]\n";
                 return 0;
@@ -121,7 +122,7 @@ int main(int argc, char** argv) {
         const double duration=waterSeconds.value_or(weatherSeconds.value_or(0));
         planet::World world(config);world.modules().set(planet::Module::GlobalWeather,globalEnabled);
         world.modules().set(planet::Module::Sound,soundEnabled);
-        world.modules().set(planet::Module::Rivers,riversEnabled);
+        world.modules().set(planet::Module::Rivers,riversEnabled);world.modules().set(planet::Module::InlandWaters,inlandEnabled);
         if(floraOutput && !sample && !coast && !landmark) {
             const auto p=world.findLand();lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
         }
@@ -188,6 +189,9 @@ int main(int argc, char** argv) {
                       << ",\n  \"annual_precipitation_mm\": " << s.precipitation
                       << ",\n  \"insolation_W_m2\": " << s.insolation
                       << ",\n  \"landform\": \"" << planet::landformName(s.landform) << '"'
+                      << ",\n  \"water_level_m\": " << s.waterLevel
+                      << ",\n  \"water_depth_m\": " << s.waterDepth
+                      << ",\n  \"wetness\": " << s.wetness
                       << ",\n  \"biome\": \"" << planet::biomeName(s.biome) << '"';
             if(riverOutput) {
                 const auto atlas=world.waterNetwork();const auto river=riversEnabled ? atlas->sample(location) : planet::RiverSample{};
@@ -210,14 +214,14 @@ int main(int argc, char** argv) {
                 std::erase_if(plants,[](const auto& o) { return o.species==planet::Species::None; });
                 std::sort(plants.begin(),plants.end(),[&](const auto& a,const auto& b) { return planet::length(a.up-location)<planet::length(b.up-location); });
                 std::array<unsigned,planet::speciesCount> counts{};
-                double heightSum=0;unsigned marine=0,blooming=0,budding=0,seeding=0;
-                for(const auto& p:plants) { ++counts[static_cast<unsigned>(p.species)];heightSum+=p.height;if(planet::plantTraits(p.species).aquatic) ++marine;
+                double heightSum=0;unsigned marine=0,freshwater=0,blooming=0,budding=0,seeding=0;
+                for(const auto& p:plants) { ++counts[static_cast<unsigned>(p.species)];heightSum+=p.height;if(planet::plantTraits(p.species).aquatic) {if(planet::freshwaterPlant(p.species)) ++freshwater;else ++marine;}
                     if(p.flowers.bloom>.02) ++blooming;
                     if(p.flowers.buds>.02) ++budding;
                     if(p.flowers.seeds>.02) ++seeding;
                 }
                 std::cout << ",\n  \"flora\": {\n    \"elapsed_days\": " << flora.days() << ",\n    \"plants\": " << plants.size()
-                    << ",\n    \"marine_plants\": " << marine << ",\n    \"height_sum_m\": " << heightSum
+                    << ",\n    \"marine_plants\": " << marine << ",\n    \"freshwater_plants\": " << freshwater << ",\n    \"height_sum_m\": " << heightSum
                     << ",\n    \"calendar_day\": " << flora.calendarDay() << ",\n    \"flowering_plants\": " << blooming
                     << ",\n    \"budding_plants\": " << budding << ",\n    \"seed_head_plants\": " << seeding << ",\n    \"species\": [";
                 bool comma=false;

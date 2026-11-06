@@ -8,6 +8,7 @@
 #include "planet/shadows.hpp"
 #include "planet/rivers.hpp"
 #include "planet/terrain_mesh.hpp"
+#include "planet/landscape.hpp"
 #include <future>
 #include <chrono>
 #include <fstream>
@@ -43,7 +44,9 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
     }
     throw std::runtime_error("Walkable cave route was blocked");
 }
+#include "landscape_tests.hpp"
 void registerTests() {
+    registerLandscapeTests();
     test("detail","CPU terrain snapshots preserve coordinates and bound flight detail",[] {
         World w;const auto p=w.findLand();Hydrology water(w,p);const double height=w.surface(p)+1.75;
         const auto fine=makeTerrainMesh(w,water,p,height,79*86400),fast=makeTerrainMesh(w,water,p,height,79*86400,64);
@@ -93,7 +96,7 @@ void registerTests() {
             require(flowerTraits(s).form==FlowerForm::None,"Conifers ferns and algae do not produce flowers");
         require(flowerTraits(Species::Seagrass).form!=FlowerForm::None,"Seagrass is an underwater flowering plant");
         std::array<bool,8> forms{};
-        for(unsigned i=static_cast<unsigned>(Species::Daisy);i<speciesCount;++i) {
+        for(unsigned i=static_cast<unsigned>(Species::Daisy);i<=static_cast<unsigned>(Species::Buttercup);++i) {
             const auto s=static_cast<Species>(i);const auto& f=flowerTraits(s);
             require(!plantTraits(s).aquatic && f.radius>0 && f.reproductiveDays>0,"Terrestrial reproductive herbs");
             forms[static_cast<unsigned>(f.form)]=true;
@@ -158,7 +161,7 @@ void registerTests() {
         const double age=s.flora.days();s.flora.setCalendarDay(180);near(s.flora.days(),age,0,"Season selection does not change plant age");
     });
     test("flora","Flower meshes have finite nondegenerate geometry and seasonal differences",[] {
-        for(unsigned i=static_cast<unsigned>(Species::Daisy);i<speciesCount;++i) {
+        for(unsigned i=static_cast<unsigned>(Species::Daisy);i<=static_cast<unsigned>(Species::Buttercup);++i) {
             SurfaceObject p;p.id=71;p.kind=DetailKind::Grass;p.species=static_cast<Species>(i);p.height=plantTraits(p.species).height;p.radius=p.height*.35;
             p.plant.size=p.plant.foliage=1;p.plant.stage=GrowthStage::Mature;
             const auto dormant=detailMesh(p,{}, {0,1,0},{1,0,0},false);p.flowers.bloom=1;
@@ -227,7 +230,7 @@ void registerTests() {
     });
     test("rivers","Local runoff exchanges with a prescribed river without losing budget",[] {
         RunoffGrid grid(8,4);for(auto& c:grid.cells){c.rock=0;c.soil=c.initialSoil=0;c.conductivity=0;c.water=.1;}
-        for(int z=0;z<8;++z) {auto& c=grid.cells[static_cast<std::size_t>(z*8+7)];c.river=true;c.riverLevel=.4;}
+        for(int z=0;z<8;++z) {auto& c=grid.cells[static_cast<std::size_t>(z*8+7)];c.reservoir=true;c.reservoirLevel=.4;}
         const double before=grid.waterVolume();const std::vector<double> rain(64,0);const auto change=grid.advance(5,rain,0,false,false,false,0);
         require(change.boundaryM3<0 && grid.waterVolume()>before,"Prescribed stage supplies neighbouring land cells even with ocean disabled");
         near(grid.waterVolume()+change.boundaryM3,before,1e-9,"River boundary exchange closes local volume budget");
@@ -691,14 +694,14 @@ void registerTests() {
         }
     });
     test("flora","Species traits cover distinct land and marine growth strategies",[] {
-        unsigned marine=0,woody=0;
+        unsigned marine=0,fresh=0,woody=0;
         for(unsigned i=1;i<speciesCount;++i) {
             const auto& t=plantTraits(static_cast<Species>(i));
             require(t.height>0 && t.widthRatio>0 && t.maturityDays>0 && t.lifespanDays>t.maturityDays && t.decayDays>0,"Valid biological dimensions and timescales");
-            if(t.aquatic) ++marine;
+            if(t.aquatic) {if(freshwaterPlant(static_cast<Species>(i))) ++fresh;else ++marine;}
             if(t.woody) ++woody;
         }
-        require(marine==3 && woody==6,"Three marine archetypes and six woody forms");
+        require(marine==3 && fresh==4 && woody==8,"Marine, freshwater and woody archetypes");
         require(plantTraits(Species::Oak).maturityDays>plantTraits(Species::MeadowGrass).maturityDays*50,"Trees take years, herbs months");
     });
     test("flora","Growth is continuous bounded and follows its analytic size curve",[] {

@@ -10,9 +10,9 @@ constexpr double stefanBoltzmann = 5.670374419e-8;
 constexpr double gasConstantAir = 287.05287;
 constexpr double standardGravity = 9.80665;
 
-enum class Module : unsigned { Terrain, Ocean, Atmosphere, Climate, Biomes, SurfaceDetail, Wind, Clouds, Hydrology, Erosion, Landforms, Caves, WaterMotion, PlantGrowth, GlobalWeather, Sound, Rivers, Count };
+enum class Module : unsigned { Terrain, Ocean, Atmosphere, Climate, Biomes, SurfaceDetail, Wind, Clouds, Hydrology, Erosion, Landforms, Caves, WaterMotion, PlantGrowth, GlobalWeather, Sound, Rivers, InlandWaters, Count };
 constexpr auto moduleCount = static_cast<unsigned>(Module::Count);
-constexpr std::array<std::string_view, moduleCount> moduleNames{"Terrain", "Ocean", "Atmosphere", "Climate", "Biomes", "Surface detail", "Wind", "Clouds", "Surface water", "Erosion", "Landforms", "Caves", "Water motion", "Plant growth", "Global weather", "Sound", "Rivers"};
+constexpr std::array<std::string_view, moduleCount> moduleNames{"Terrain", "Ocean", "Atmosphere", "Climate", "Biomes", "Surface detail", "Wind", "Clouds", "Surface water", "Erosion", "Landforms", "Caves", "Water motion", "Plant growth", "Global weather", "Sound", "Rivers", "Lakes and wetlands"};
 class Modules {
 public:
     bool requested(Module module) const;
@@ -35,6 +35,7 @@ struct Config {
     double seaLevel = 0.0;
     double emissivity = 0.61;
     double albedo = 0.30;
+    bool operator==(const Config&) const = default;
 };
 struct Orbit {
     Vec3 sunDirection;
@@ -55,7 +56,7 @@ Atmosphere standardAtmosphere(double altitude, double seaTemperature = 288.15,
                               double surfacePressure = 101325.0, double radius = 6'371'000.0,
                               double gravity = standardGravity);
 
-enum class Biome { Ocean, Ice, Tundra, Desert, Grassland, Forest, Rainforest, Rock };
+enum class Biome { Ocean, Ice, Tundra, Desert, Grassland, Forest, Rainforest, Rock, Wetland, Freshwater, Beach };
 std::string_view biomeName(Biome biome);
 struct Color { float r, g, b; };
 struct Sample {
@@ -68,9 +69,12 @@ struct Sample {
     Biome biome = Biome::Rock;
     bool ocean{};
     Landform landform=Landform::Lowland;
+    bool freshwater=false,inland=false;
+    double waterLevel=0,waterDepth=0,wetness=0,sand=0;
 };
 
 class RiverNetwork;
+class LandscapeAtlas;
 class World {
 public:
     explicit World(Config config = {});
@@ -80,6 +84,7 @@ public:
     double elevation(Vec3 unit) const;
     double naturalElevation(Vec3 unit) const { return rawRelief(unit).elevation; }
     std::shared_ptr<const RiverNetwork> waterNetwork() const;
+    std::shared_ptr<const LandscapeAtlas> landscape() const;
     double surface(Vec3 unit) const;
     Relief relief(Vec3 unit) const;
     std::optional<CaveSite> caveSite(Vec3 unit,double reach=650,bool requireEnabled=true) const;
@@ -92,6 +97,7 @@ public:
     Vec3 findLand() const;
 private:
     friend class RiverNetwork;
+    friend class LandscapeAtlas;
     Relief rawRelief(Vec3 unit) const;
     Sample evaluate(Vec3 unit, double seconds, bool annualMean) const;
     struct Plate { Vec3 center; Vec3 velocity; double continental; };
@@ -104,5 +110,7 @@ private:
     mutable std::optional<CaveSite> caveCache_;
     mutable std::shared_ptr<const RiverNetwork> waterNetwork_;
     mutable bool waterLandforms_=false,waterTerrain_=false;
+    mutable std::shared_ptr<const LandscapeAtlas> landscape_;
+    mutable bool landscapeLandforms_=false;
 };
 } // namespace planet

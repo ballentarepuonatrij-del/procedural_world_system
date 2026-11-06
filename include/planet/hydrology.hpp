@@ -13,8 +13,8 @@ struct GroundCell {
     double sediment{};                  // kg/m2 suspended solids
     double roughness=0.04, conductivity=2e-6, vegetation=0;
     bool sea=false;                     // prescribed sea-level reservoir, not simulated ocean
-    bool river=false;                   // prescribed river stage; exchange counted at local boundary
-    double riverLevel=0;
+    bool reservoir=false;               // prescribed river/lake stage; exchange counted at local boundary
+    double reservoirLevel=0;
     bool masked=false;                  // unresolved multilevel cave region: impermeable solver boundary
     double bed() const { return rock+soil; }
 };
@@ -65,7 +65,7 @@ public:
     void step(const World& world,const Weather& weather,double seconds,double experimentRainMmH=0,const WaterMotion* motion=nullptr);
     GroundSample sample(Vec3 unit) const;
     GroundSample sampleLocal(double x,double z) const;
-    double ground(const World& world,Vec3 unit) const;
+    double ground(const World& world,Vec3 unit,std::optional<double> knownElevation={}) const;
     Vec3 directionAt(double x,double z) const;
     Vec3 position(double x,double z,double altitude) const;
     double cellX(int x) const { return (originX_+x)*spacing; }

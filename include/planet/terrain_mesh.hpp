@@ -7,7 +7,7 @@ namespace planet {
 // and adoption of this complete snapshot stay on the window thread.
 struct TerrainVertex {Vec3 position,normal;Color color;double u,v;};
 struct GridVertex {Vec3 position;float alpha;};
-struct SurfaceWaterVertex {Vec3 up,position;double altitude;bool available,river;double spacing;};
+struct SurfaceWaterVertex {Vec3 up,position;double altitude;bool available,river;double spacing;bool inland=false,wetland=false;double level=0;};
 struct PlantSite {SurfaceObject object;Vec3 base;};
 struct TerrainMesh {
     Vec3 anchor,east,north;

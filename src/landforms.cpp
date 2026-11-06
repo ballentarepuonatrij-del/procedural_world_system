@@ -1,7 +1,9 @@
 #include "planet/landforms.hpp"
 #include "planet/model.hpp"
 #include "planet/rivers.hpp"
+#include "planet/landscape.hpp"
 #include <limits>
+#include <stdexcept>
 
 namespace planet {
 std::optional<Landform> landmarkType(std::string_view name) {
@@ -9,10 +11,17 @@ std::optional<Landform> landmarkType(std::string_view name) {
     if(name=="canyon") return Landform::Canyon;
     if(name=="mountains") return Landform::Mountains;
     if(name=="gorge") return Landform::Gorge;
+    if(name=="wetland" || name=="swamp") return Landform::Wetland;
+    if(name=="pond") return Landform::Pond;
+    if(name=="lake") return Landform::Lake;
+    if(name=="bay") return Landform::Bay;
+    if(name=="cliff") return Landform::Cliff;
+    if(name=="spit") return Landform::Spit;
+    if(name=="grotto") return Landform::Grotto;
     return {};
 }
 std::string_view landformName(Landform type) {
-    constexpr std::array<std::string_view,6> names{"Lowland","Mountains","Plateau","Canyon","Gorge","Karst caves"};
+    constexpr std::array<std::string_view,13> names{"Lowland","Mountains","Plateau","Canyon","Gorge","Karst caves","Wetland","Pond","Lake","Bay","Coastal cliff","Sand spit","Sea grotto"};
     return names.at(static_cast<std::size_t>(type));
 }
 Relief shapeLandforms(Vec3 p,double radius,double seaLevel,std::uint64_t seed,double height,double mountainWeight) {
@@ -76,6 +85,7 @@ Vec3 CaveSite::local(Vec3 unit) const {
     return {dot(unit,right)*radius/facing,0,dot(unit,forward)*radius/facing};
 }
 double CaveSite::cover(Vec3 unit,double original) const {
+    if(coastal) return original;
     const auto p=local(unit);
     const double mask=(1-smoothstep(95,190,std::abs(p.x)))*smoothstep(-140,-85,p.z)*(1-smoothstep(380,500,p.z));
     const double height=68*smoothstep(-40,65,p.z)*(1-smoothstep(310,410,p.z));
@@ -105,6 +115,12 @@ CaveColumn CaveSite::columnLocal(double x,double z) const {
 bool CaveSite::protectedGround(Vec3 unit) const { const auto p=local(unit); return std::abs(p.x)<110 && p.z>-85 && p.z<290; }
 std::optional<CaveSite> World::caveSite(Vec3 p,double reach,bool requireEnabled) const {
     if(!modules_.enabled(Module::Landforms) || (requireEnabled && !modules_.enabled(Module::Caves))) return {};
+    if(const auto patch=landscape()->patch(p)) {
+        if(patch->affects(p)) {
+            if(patch->kind==Landform::Grotto && length(p-patch->anchor)*config_.radius<reach) return patch->cave();
+            if(coastalLandform(patch->kind) || modules_.enabled(Module::InlandWaters)) return {};
+        }
+    }
     const auto address=caveAddress(p,config_.radius,config_.seed);
     if(!address.eligible || length(normalized(p)-address.anchor)*config_.radius>reach) return {};
     if(caveCacheId_!=address.id) {
@@ -118,13 +134,15 @@ std::optional<CaveSite> World::caveSite(Vec3 p,double reach,bool requireEnabled)
 }
 Relief World::relief(Vec3 p) const {
     auto result=rawRelief(p);
+    if(modules_.enabled(Module::Landforms) || modules_.enabled(Module::InlandWaters))
+        result=landscape()->apply(p,result,modules_.enabled(Module::InlandWaters),modules_.enabled(Module::Landforms));
     if(modules_.enabled(Module::Rivers)) {
         const auto river=waterNetwork()->sample(p,result.elevation);
         if(river.channel) result.elevation=river.bed;
     }
     if(const auto site=caveSite(p,550,false)) {
         const double h=site->cover(p,result.elevation);
-        if(std::abs(h-result.elevation)>0.1 || site->protectedGround(p)) result.type=Landform::Karst;
+        if(std::abs(h-result.elevation)>0.1 || site->protectedGround(p)) result.type=site->coastal ? Landform::Grotto : Landform::Karst;
         result.elevation=h;
     }
     return result;
@@ -159,6 +177,15 @@ Landmark World::findCoast() const {
 }
 Landmark World::findLandmark(Landform type,Vec3 around) const {
     around=normalized(around);
+    if(inlandLandform(type)) {
+        if(!modules_.enabled(Module::InlandWaters)) throw std::invalid_argument("Enable Terrain and Lakes and wetlands to visit this site");
+        return landscape()->find(type,around);
+    }
+    if(coastalLandform(type)) {
+        if(!modules_.enabled(Module::Landforms)) throw std::invalid_argument("Enable Terrain and Landforms to visit this site");
+        if(type==Landform::Grotto && !modules_.enabled(Module::Caves)) throw std::invalid_argument("Enable Caves to visit a sea grotto");
+        return landscape()->find(type,findCoast().position);
+    }
     if(!modules_.enabled(Module::Landforms)) return {findLand(),around,Landform::Lowland};
     if(type==Landform::Karst && modules_.enabled(Module::Caves)) {
         double best=1e30; std::optional<CaveSite> chosen;

@@ -22,12 +22,22 @@ const PlantTraits& plantTraits(Species s) {
         {"Field poppy",.85,.28,70,245,30,false,false,{.30f,.46f,.19f}},
         {"Cornflower",.80,.30,85,245,30,false,false,{.29f,.46f,.27f}},
         {"Fireweed",1.65,.23,180,2190,90,false,false,{.21f,.44f,.18f}},
-        {"Buttercup",.55,.40,90,1460,60,false,false,{.28f,.48f,.14f}}
+        {"Buttercup",.55,.40,90,1460,60,false,false,{.28f,.48f,.14f}},
+        {"Willow",18,.42,4200,27000,550,false,true,{.32f,.46f,.20f}},
+        {"Alder",21,.30,4800,36500,650,false,true,{.18f,.37f,.16f}},
+        {"Common reed",2.8,.22,140,1825,120,true,false,{.46f,.53f,.24f}},
+        {"Cattail",2.1,.25,120,1460,100,true,false,{.30f,.46f,.18f}},
+        {"Marsh sedge",.95,.65,100,2200,75,false,false,{.43f,.49f,.17f}},
+        {"Sphagnum moss",.13,4.0,110,2200,120,false,false,{.37f,.52f,.16f}},
+        {"Water lily",.18,3.1,180,3650,60,true,false,{.19f,.41f,.19f}},
+        {"Pondweed",1.7,.32,100,1460,60,true,false,{.24f,.44f,.18f}},
+        {"Marram grass",1.05,.45,170,2600,80,false,false,{.65f,.62f,.34f}}
     }};
     const auto i=static_cast<unsigned>(s);
     if(i>=traits.size()) throw std::invalid_argument("Unknown plant species");
     return traits[i];
 }
+bool freshwaterPlant(Species s) {return s==Species::Reed || s==Species::Cattail || s==Species::WaterLily || s==Species::Pondweed;}
 std::string_view stageName(GrowthStage s) {
     constexpr std::array<std::string_view,6> names{"seed","seedling","juvenile","mature","senescent","dead"};
     const auto i=static_cast<unsigned>(s); return i<names.size() ? names[i] : "unknown";
@@ -36,6 +46,20 @@ double plantSuitability(Species species,const Sample& s,double slope,double rock
     const auto& t=plantTraits(species);
     if(species==Species::None || !std::isfinite(s.temperature) || !std::isfinite(s.precipitation) ||
        !std::isfinite(s.elevation) || !std::isfinite(slope) || !std::isfinite(rock) || !std::isfinite(sea)) return 0;
+    if(species>=Species::Willow) {
+        if(s.ocean || s.temperature<274 || s.temperature>307 || slope>.5) return 0;
+        const double wet=s.wetness,depth=s.freshwater ? s.waterDepth : 0;
+        if(species==Species::Marram) return !s.freshwater && s.sand>.4 && s.elevation>sea+.6 ? clamp(s.sand*(1-slope),0.,1.) : 0;
+        if(wet<.35) return 0;
+        if(species==Species::Willow || species==Species::Alder) return depth<.35 ? wet*.85 : 0;
+        if(species==Species::Sphagnum) return depth<.06 && s.temperature<298 ? wet : 0;
+        if(species==Species::Sedge) return depth<.35 ? wet : 0;
+        if(species==Species::Reed) return depth<1.6 ? wet : 0;
+        if(species==Species::Cattail) return depth>.03 && depth<.85 ? wet : 0;
+        if(species==Species::WaterLily) return depth>.25 && depth<2.8 && s.temperature>280 ? std::exp(-.3*depth) : 0;
+        if(species==Species::Pondweed) return depth>.25 && depth<5 ? std::exp(-.45*depth) : 0;
+        return 0;
+    }
     if(t.aquatic) {
         const double depth=sea-s.elevation;
         if(!s.ocean || depth<.5 || depth>30 || slope>.8) return 0;
@@ -45,7 +69,7 @@ double plantSuitability(Species species,const Sample& s,double slope,double rock
         // Beer-Lambert light attenuation with a prescribed clear-water coefficient.
         return clamp(std::exp(-.12*depth)/.6,.05,1.0);
     }
-    if(s.ocean || s.elevation<=sea+2 || slope>=.65 || s.temperature<=267 || s.temperature>=315 || s.precipitation<=180) return 0;
+    if(s.ocean || s.freshwater || s.wetness>.55 || s.elevation<=sea+2 || slope>=.65 || s.temperature<=267 || s.temperature>=315 || s.precipitation<=180) return 0;
     double low=267,high=312,rain=180;
     switch(species) {
         case Species::Oak: low=282;high=301;rain=600;break;
@@ -108,6 +132,14 @@ const FlowerTraits& flowerTraits(Species species) {
         set(Species::Heather,FlowerForm::Bell,{.84f,.32f,.68f},4,.024,950,500,90);
         set(Species::MeadowGrass,FlowerForm::Spike,{.72f,.66f,.36f},0,.045,300,280,45);
         set(Species::Seagrass,FlowerForm::Spike,{.59f,.73f,.35f},0,.025,200,240,120);
+        set(Species::Willow,FlowerForm::Catkin,{.78f,.77f,.42f},0,.11,80,100,1600);
+        set(Species::Alder,FlowerForm::Catkin,{.62f,.49f,.22f},0,.10,55,90,1900);
+        set(Species::Reed,FlowerForm::Spike,{.71f,.58f,.34f},0,.065,1000,650,100);
+        set(Species::Cattail,FlowerForm::Spike,{.39f,.23f,.10f},0,.07,750,650,90);
+        set(Species::Sedge,FlowerForm::Spike,{.53f,.47f,.21f},0,.04,300,500,70);
+        set(Species::WaterLily,FlowerForm::Cup,{.98f,.91f,.91f},12,.14,450,800,130);
+        set(Species::Pondweed,FlowerForm::Spike,{.62f,.60f,.31f},0,.025,500,500,80);
+        set(Species::Marram,FlowerForm::Spike,{.81f,.75f,.48f},0,.045,550,500,110);
         set(Species::Daisy,FlowerForm::Daisy,{.98f,.97f,.85f},12,.045,300,500,75);
         set(Species::Clover,FlowerForm::Ball,{.87f,.30f,.58f},0,.035,240,650,65);
         set(Species::Poppy,FlowerForm::Cup,{.94f,.12f,.09f},4,.060,230,330,50);

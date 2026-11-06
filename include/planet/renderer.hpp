@@ -61,6 +61,7 @@ public:
     std::size_t caveCount() const { return caveCount_; }
     std::size_t plantCount() const { return plantCount_; }
     std::size_t marineCount() const { return marineCount_; }
+    std::size_t freshwaterCount() const {return freshwaterCount_;}
     std::size_t plantSpeciesCount() const { return plantSpeciesCount_; }
     double plantHeightSum() const { return plantHeightSum_; }
     std::size_t floweringCount() const { return floweringCount_; }
@@ -107,7 +108,7 @@ private:
     std::size_t detailCount_=0;
     std::vector<PlantSite> objectSites_;
     std::optional<SurfaceObject> focusPlant_;
-    std::size_t plantCount_=0,marineCount_=0,plantSpeciesCount_=0;
+    std::size_t plantCount_=0,marineCount_=0,freshwaterCount_=0,plantSpeciesCount_=0;
     std::size_t floweringCount_=0,buddingCount_=0,seedHeadCount_=0;
     double plantHeightSum_=0,lastFloraDay_=-1e30,lastFloraCalendar_=-1e30;
     bool lastYoung_=false;

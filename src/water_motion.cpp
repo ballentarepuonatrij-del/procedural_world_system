@@ -149,10 +149,15 @@ double WaterMotion::significantHeight() const {
     return 4*std::sqrt(variance);
 }
 LiquidSample liquidAt(const World& world,const Hydrology* water,const WaterMotion* motion,Vec3 p) {
-    p=normalized(p); LiquidSample liquid; liquid.bed=water ? water->ground(world,p) : world.elevation(p);
+    p=normalized(p);const auto terrain=world.relief(p);LiquidSample liquid; liquid.bed=water ? water->ground(world,p,terrain.elevation) : terrain.elevation;
+    if(const auto cave=world.caveSite(p);cave && cave->coastal) {
+        const auto column=cave->column(p);if(column.valid()) liquid.bed=std::min(liquid.bed,column.floor);
+    }
     liquid.level=liquid.bed;
     const auto river=world.modules().enabled(Module::Rivers) ? world.waterNetwork()->sample(p) : RiverSample{};
-    if(river.wet && river.level>world.config().seaLevel+.02) {
+    if(terrain.inland && terrain.waterLevel>liquid.bed+.0005) {
+        liquid.present=true;liquid.level=terrain.waterLevel;
+    } else if(river.wet && river.level>world.config().seaLevel+.02) {
         liquid.present=true;liquid.river=true;liquid.level=river.level;
         if(world.modules().enabled(Module::WaterMotion)) liquid.current=river.downstream*river.speed;
     } else if(world.modules().enabled(Module::Ocean) && liquid.bed<world.config().seaLevel) {

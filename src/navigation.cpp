@@ -7,6 +7,7 @@ Explorer::Explorer(const World& world) { teleport(world,world.findLand()); }
 void Explorer::teleport(const World& world, Vec3 position,const Hydrology* water) {
     up_ = normalized(position); heading_ = north(up_); pitch_ = 0;
     altitude_ = (water ? water->ground(world,up_) : world.surface(up_)) + eyeHeight;
+    if(water) altitude_+=water->snow.walkingDepth(up_);
     verticalSpeed_ = 0; grounded_ = true; jumpHeld_ = false;
     underground_=false; cave_=world.caveSite(up_);
     const auto liquid=liquidAt(world,water,nullptr,up_);
@@ -59,8 +60,9 @@ void Explorer::step(const World& world, const Input& input, double dt,const Hydr
     Vec3 tangent = heading_*(input.forward*(swimming_ && underwater_ ? std::cos(pitch_) : 1)) + right()*input.right;
     const double magnitude = length(tangent);
     if (magnitude > 1) tangent = tangent/magnitude;
+    const double snowDepth=water && !underground_ ? water->snow.sample(up_).depth : 0;
     const double speed = flying ? std::min(flightSpeed*(input.sprint ? 8 : 1),cave_ ? 30.0 : 160000.0) :
-        (swimming_ ? (input.sprint ? 2.6 : 1.6) : (input.sprint ? 8.0 : 2.5)/std::max(1.0,1+2*liquid.depth));
+        (swimming_ ? (input.sprint ? 2.6 : 1.6) : (input.sprint ? 8.0 : 2.5)/std::max(1.0,1+2*liquid.depth+2.5*snowDepth));
     Vec3 velocity=tangent*speed;
     if(swimming_) {
         if(liquid.ocean && motion) liquid.current=motion->current(up_,std::max(0.0,liquid.level-altitude_));
@@ -93,7 +95,7 @@ void Explorer::step(const World& world, const Input& input, double dt,const Hydr
     struct Space { double floor,ceiling; bool roof; };
     const auto column=[&](Vec3 p) {
         const double surface=water ? water->ground(world,p) : world.elevation(p);
-        Space result{surface,1e8,false};
+        Space result{surface+(water ? water->snow.walkingDepth(p) : 0),1e8,false};
         if(cave_) {
             const auto c=cave_->column(p);
             if(c.valid() && c.floor<surface) {

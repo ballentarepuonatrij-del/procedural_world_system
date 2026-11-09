@@ -3,6 +3,7 @@
 #include "planet/water_motion.hpp"
 #include "planet/flora.hpp"
 #include "planet/fauna.hpp"
+#include "planet/snow.hpp"
 #include "planet/global_weather.hpp"
 #include <map>
 #include <deque>
@@ -47,9 +48,9 @@ private:
     double spacing_,gravity_;
 };
 struct RunoffBudget {
-    double initialWaterM3{}, storedWaterM3{}, rainM3{}, evaporatedM3{}, drainedM3{}, boundaryM3{}, domainWaterM3{};
+    double initialWaterM3{}, storedWaterM3{}, rainM3{}, meltM3{}, evaporatedM3{}, drainedM3{}, boundaryM3{}, domainWaterM3{};
     double initialSolidKg{}, storedSolidKg{}, sedimentOutKg{}, domainSolidKg{}, erodedKg{}, depositedKg{};
-    double waterResidual() const { return storedWaterM3+evaporatedM3+drainedM3+boundaryM3-initialWaterM3-rainM3-domainWaterM3; }
+    double waterResidual() const { return storedWaterM3+evaporatedM3+drainedM3+boundaryM3-initialWaterM3-rainM3-meltM3-domainWaterM3; }
     double solidResidual() const { return storedSolidKg+sedimentOutKg-initialSolidKg-domainSolidKg; }
 };
 struct GroundSample {
@@ -61,7 +62,7 @@ class Hydrology {
 public:
     static constexpr int resolution=64;
     static constexpr double spacing=4, extent=resolution*spacing, maximumTimeScale=120;
-    Hydrology(const World& world,Vec3 observer);
+    Hydrology(const World& world,Vec3 observer,double solarSeconds=79*86400);
     void synchronize(const World& world,Vec3 observer);
     void step(const World& world,const Weather& weather,double seconds,double experimentRainMmH=0,const WaterMotion* motion=nullptr);
     GroundSample sample(Vec3 unit) const;
@@ -79,6 +80,7 @@ public:
     std::uint64_t revision() const { return revision_; }
     std::uint64_t steps() const { return steps_; }
     RunoffBudget budget() const;
+    Snow snow;
 private:
     GroundCell makeCell(const World& world,int x,int z) const;
     void move(const World& world,Vec3 observer,int x,int z,bool resetChart);

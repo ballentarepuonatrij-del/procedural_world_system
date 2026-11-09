@@ -8,11 +8,11 @@ namespace planet {
 struct TerrainVertex {Vec3 position,normal;Color color;double u,v;};
 struct GridVertex {Vec3 position;float alpha;};
 struct SurfaceWaterVertex {Vec3 up,position;double altitude;bool available,river;double spacing;bool inland=false,wetland=false;double level=0;};
-struct PlantSite {SurfaceObject object;Vec3 base;};
+struct PlantSite {SurfaceObject object;Vec3 base;double snowDepth=0;};
 struct TerrainMesh {
     Vec3 anchor,east,north;
     double spacing=2,eyeHeight=0,seconds=0;
-    std::uint64_t waterRevision=0,waterSteps=0;
+    std::uint64_t waterRevision=0,waterSteps=0,snowRevision=0;
     std::vector<TerrainVertex> terrain,caves;
     std::vector<GridVertex> grid;
     std::vector<Triangle> casters;

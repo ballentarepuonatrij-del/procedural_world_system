@@ -118,6 +118,16 @@ Renderer::Renderer(HDC dc) {
         cloudPixels[i+3]=static_cast<unsigned char>(255*clamp(density,0.0,1.0));
     }
     glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,64,64,0,GL_RGBA,GL_UNSIGNED_BYTE,cloudPixels.data());
+    // White crystals need only a soft alpha footprint, not the clouds' shaded RGB.
+    glGenTextures(1,&snowTexture_);glBindTexture(GL_TEXTURE_2D,snowTexture_);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    std::array<unsigned char,32*32> snowPixels{};
+    for(int y=0;y<32;++y) for(int x=0;x<32;++x)
+        snowPixels[static_cast<std::size_t>(y*32+x)]=static_cast<unsigned char>(255*(1-smoothstep(.3,.96,std::hypot((x+.5)/16-1,(y+.5)/16-1))));
+    glTexImage2D(GL_TEXTURE_2D,0,GL_ALPHA,32,32,0,GL_ALPHA,GL_UNSIGNED_BYTE,snowPixels.data());
 }
 Renderer::~Renderer() {
     discardUpload();if(terrainChunks_) glDeleteLists(terrainChunks_,terrainChunksCount_);
@@ -131,6 +141,7 @@ Renderer::~Renderer() {
     glDeleteLists(font_,96); glDeleteLists(headingFont_,96);
     glDeleteTextures(1,&detailTexture_);
     glDeleteTextures(1,&cloudTexture_);
+    glDeleteTextures(1,&snowTexture_);
 }
 std::string Renderer::device() const {
     const auto* vendor=glGetString(GL_RENDERER);
@@ -160,7 +171,7 @@ void Renderer::uploadTerrain(TerrainMesh mesh) {
 }
 void Renderer::adoptTerrain(TerrainMesh mesh) {
     anchor_=mesh.anchor;east_=mesh.east;north_=mesh.north;terrainStep_=mesh.spacing;terrainEyeHeight_=mesh.eyeHeight;
-    waterRevision_=mesh.waterRevision;waterSteps_=mesh.waterSteps;lastTerrainTime_=mesh.seconds;
+    waterRevision_=mesh.waterRevision;waterSteps_=mesh.waterSteps;snowRevision_=mesh.snowRevision;lastTerrainTime_=mesh.seconds;
     terrainCasters_=std::move(mesh.casters);waterVertices_=std::move(mesh.waterVertices);waterTriangles_=std::move(mesh.waterTriangles);
     objectSites_=std::move(mesh.plants);riverSegments_=std::move(mesh.rivers);caveCount_=mesh.caves.size()/3;
     lastFloraDay_=-1e30;shadowDirty_=true;dirty_=false;
@@ -243,7 +254,8 @@ void Renderer::buildObjects(const World& world,const Flora& flora) {
         const auto mesh=detailMesh(object,site.base,local(object.up),local(east(object.up)),distance>(object.kind==DetailKind::Grass || object.kind==DetailKind::Shrub ? 24 : 100));
         for(const auto& face:mesh) {
             const auto& t=face.triangle;const auto n=normalized(cross(t.b-t.a,t.c-t.a));
-            glNormal3d(n.x,n.y,n.z);glColor3f(face.color.r,face.color.g,face.color.b);
+            const double cover=smoothstep(0.,.08,site.snowDepth)*smoothstep(.15,.6,dot(n,local(object.up)));
+            glNormal3d(n.x,n.y,n.z);glColor3f(static_cast<float>(mix(face.color.r,.88,cover)),static_cast<float>(mix(face.color.g,.93,cover)),static_cast<float>(mix(face.color.b,.97,cover)));
             for(const auto v:{t.a,t.b,t.c}) glVertex3d(v.x,v.y,v.z);
             if(distance<=240 && object.castsSurfaceShadow()) objectCasters_.push_back(t);
         }
@@ -267,7 +279,11 @@ void Renderer::buildGlobe(const World& world,double seconds) {
     const auto emit=[&](int x,int y) {
         const Vec3 p=direction(-pi/2+pi*y/latitudes,tau*x/longitudes);
         const auto sample=world.sample(p,seconds);
-        const auto color=world.color(sample);
+        auto color=world.color(sample);
+        if(world.modules().enabled(Module::Snow)) {
+            const float cover=static_cast<float>(smoothstep(0.,.06,referenceSnowDepth(sample)));
+            color={static_cast<float>(mix(color.r,.87,cover)),static_cast<float>(mix(color.g,.92,cover)),static_cast<float>(mix(color.b,.96,cover))};
+        }
         // True radius, without vertical exaggeration.
         const Vec3 v=p*(1+(sample.ocean || sample.freshwater ? sample.waterLevel : sample.elevation)/world.config().radius);
         glColor3f(color.r,color.g,color.b); glNormal3d(p.x,p.y,p.z); glVertex3d(v.x,v.y,v.z);
@@ -400,13 +416,16 @@ void Renderer::drawShadows(Vec3 sun,bool textured) {
     glPopAttrib();
 }
 void Renderer::draw(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view) {
-    timings_={};deerCount_=0;deerFaces_.clear();deerShadows_.clear();
+    timings_={};deerCount_=0;snowCount_=coarseSnowCount_=blowingSnowCount_=0;deerFaces_.clear();deerShadows_.clear();
     const double travelSpeed=dirty_ || length(previousObserver_)<.5 || view.frameSeconds<=0 ? 0 :
         length(explorer.up()-previousObserver_)*world.config().radius/view.frameSeconds;
     previousObserver_=explorer.up();
     const double detailStep=explorer.flying ? std::ldexp(2.,clamp(static_cast<int>(std::floor(std::log2(std::max(1.,travelSpeed/80)))),0,10)) : 2;
     if(detailStep>flightDetailStep_ || travelSpeed<flightDetailStep_*25 || !explorer.flying) flightDetailStep_=detailStep;
     const auto& water=simulation.water;
+    const auto pack=water.snow.sample(explorer.up());
+    const auto snowAir=water.snow.active() && pack.available && explorer.altitude()-pack.bed<100 && !view.globe && !explorer.underground() ?
+        water.snow.atmosphere(world,simulation.weather,explorer.up(),pack.bed) : SnowAtmosphere{};
     cloudCount_=0;waterCount_=0;rainCount_=0;lightningCount_=0;stormMarkerCount_=0;riverTriangles_=0;
     glViewport(0,0,view.width,view.height);
     const auto sun=orbit(world.config(),view.seconds);
@@ -421,7 +440,12 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
         const auto cloudPoint=normalized(eye+sun.sunDirection*distance);const auto air=simulation.weather.sample(cloudPoint);
         conditions.sunCloudWater=air.available ? air.cloudWater : simulation.global.sample(cloudPoint).cloud;
     }
+    if(snowAir.fallingMmH>.1) {conditions.cloudWater=std::max(conditions.cloudWater,1.5);conditions.sunCloudWater=std::max(conditions.sunCloudWater,1.5);}
     lighting_=lighting(world.config(),explorer.up(),view.seconds,conditions);shadowsUsed_=false;starCount_=0;
+    const double whiteout=clamp(1-snowAir.visibility/3000,0.,.92);
+    const float snowLight=static_cast<float>(.22+.55*lighting_.daylight);
+    const auto snowySky=[&](Color c){return Color{static_cast<float>(mix(c.r,snowLight,whiteout)),static_cast<float>(mix(c.g,snowLight*1.02,whiteout)),static_cast<float>(mix(c.b,snowLight*1.05,whiteout))};};
+    lighting_.horizonColor=snowySky(lighting_.horizonColor);lighting_.zenith=snowySky(lighting_.zenith);lighting_.starVisibility*=1-whiteout;
     const double daylight=lighting_.daylight*(1-.55*lighting_.cloudCover);
     const bool wireframe=view.surfaceStyle==SurfaceStyle::Wireframe && !view.globe;
     const auto liquid=liquidAt(world,&water,&simulation.motion,explorer.up());
@@ -467,7 +491,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
         }
         advanceUpload(simulation.flora,sun.sunDirection);
         if(dirty_) buildTerrain(world,explorer,water,view.seconds);
-        else if(!terrainJob_.valid() && !meshUpload_ && (waterRevision_!=water.revision() || (water.enabled() && water.steps()-waterSteps_>=150) ||
+        else if(!terrainJob_.valid() && !meshUpload_ && (waterRevision_!=water.revision() || snowRevision_!=water.snow.revision() || (water.enabled() && water.steps()-waterSteps_>=150) ||
            length(explorer.up()-anchor_)*world.config().radius>std::max(12.0,terrainStep_*4) ||
            std::abs(explorer.altitude()-terrainEyeHeight_)>std::max(32.0,terrainStep_*4) ||
            terrainSpacing(world,explorer.up(),explorer.altitude(),flightDetailStep_)!=terrainStep_ || std::abs(view.seconds-lastTerrainTime_)>900)) {
@@ -522,7 +546,8 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
             const auto color=skyColor(lighting_,normalized(explorer.forward()-explorer.up()*dot(explorer.forward(),explorer.up())));
             const GLfloat fog[]{color.r,color.g,color.b,1};
             glEnable(GL_FOG); glFogfv(GL_FOG_COLOR,fog); glFogi(GL_FOG_MODE,GL_EXP2);
-            glFogf(GL_FOG_DENSITY,static_cast<float>((.000025+.000018*std::sqrt(rain))*std::exp(-std::max(explorer.altitude(),0.0)/8500)));
+            const double snowFog=snowAir.visibility<100000 ? 1.978/snowAir.visibility : 0;
+            glFogf(GL_FOG_DENSITY,static_cast<float>(std::max((.000025+.000018*std::sqrt(rain))*std::exp(-std::max(explorer.altitude(),0.0)/8500),snowFog)));
         } else glDisable(GL_FOG);
         const bool showGrid=view.surfaceStyle!=SurfaceStyle::Natural;
         if(showGrid) { glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(1.0f,1.0f); }
@@ -580,7 +605,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
         }
         drawWater(world,explorer,simulation,view,daylight);
         drawRivers(world,explorer,simulation,view,daylight);
-        if(!submerged) drawWeather(world,explorer,simulation,view,daylight);
+        if(!submerged) {drawWeather(world,explorer,simulation,view,daylight);drawSnow(world,explorer,simulation,lighting_.daylight);}
     }
     drawHud(world,explorer,simulation,view);
 }
@@ -865,7 +890,8 @@ void Renderer::drawWeather(const World& world,const Explorer& explorer,const Sim
     }
     glEnd(); glDisable(GL_TEXTURE_2D);
     const auto air=weather.sample(explorer.up());
-    const double rain=air.rainRate*3600+simulation.rainExperiment();
+    const auto snow=simulation.water.snow.atmosphere(world,weather,explorer.up(),world.surface(explorer.up()));
+    const double rain=air.rainRate*3600*(1-snow.fraction)+simulation.rainExperiment();
     if(rain>.1) {
         const int count=static_cast<int>(clamp(rain*24,24.0,1800.0));
         const double time=std::remainder(view.seconds,100000.0);
@@ -920,6 +946,34 @@ void Renderer::drawWeather(const World& world,const Explorer& explorer,const Sim
     }
     glDisable(GL_FOG); glDisable(GL_BLEND); glDepthMask(GL_TRUE);
 }
+void Renderer::drawSnow(const World& world,const Explorer& explorer,const Simulation& simulation,double daylight) {
+    DrawTimer timer{timings_.snow};if(explorer.underground()) return;
+    const auto flakes=simulation.water.snow.particles(world,simulation.weather,explorer.up(),explorer.altitude());
+    if(flakes.empty()) return;
+    const auto local=[&](Vec3 p) {const auto q=p-anchor_*world.config().radius;return Vec3{dot(q,east_),dot(q,anchor_),dot(q,north_)};};
+    const auto vector=[&](Vec3 p) {return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)};};
+    const auto eye=explorer.up()*(world.config().radius+explorer.altitude());
+    const auto right=vector(explorer.right()),up=vector(normalized(cross(explorer.right(),explorer.forward())));
+    const float light=static_cast<float>(.38+.62*daylight);
+    glPushAttrib(GL_ALL_ATTRIB_BITS);glDisable(GL_LIGHTING);glDisable(GL_FOG);glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDepthMask(GL_FALSE);
+    glEnable(GL_TEXTURE_2D);glBindTexture(GL_TEXTURE_2D,snowTexture_);glBegin(GL_QUADS);
+    for(const auto& p:flakes) {
+        const auto position=p.up*(world.config().radius+p.altitude);const double distance=length(position-eye);
+        if(dot(position-eye,explorer.forward())<.1 || p.opacity<.005) continue;
+        const auto center=local(position);
+        // Subpixel crystals are represented by bounded sprites; their count is
+        // a visual sample of precipitation, not a count of physical snow grains.
+        const double radius=std::max(p.radius,distance*(p.coarse ? .0025 : .001));
+        const auto horizontal=right*(radius*(p.blowing ? 2.5 : 1)),vertical=up*radius;
+        glColor4f(light*.94f,light*.98f,light,static_cast<float>(p.opacity));
+        const auto emit=[](Vec3 v,double u,double w){glTexCoord2d(u,w);glVertex3d(v.x,v.y,v.z);};
+        emit(center-horizontal-vertical,0,0);emit(center+horizontal-vertical,1,0);
+        emit(center+horizontal+vertical,1,1);emit(center-horizontal+vertical,0,1);
+        ++snowCount_;if(p.coarse) ++coarseSnowCount_;if(p.blowing) ++blowingSnowCount_;
+    }
+    glEnd();glPopAttrib();
+}
 void Renderer::text(float x,float y,const std::string& value,Color color,bool large) {
     glColor3f(color.r,color.g,color.b); glRasterPos2f(x,y);
     glListBase((large ? headingFont_ : font_)-32);
@@ -958,6 +1012,14 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(40,165,"DEPTH "+fixed(depth,1)+" m   "+fixed(pressure/100000,2)+" bar",white);
         text(40,187,"BOTTOM "+fixed(explorer.altitude()-liquid.bed,1)+" m below eye",white);
         text(40,215,"SPACE up / CTRL dive / WASD swim",muted);
+    } else if(water.snow.enabled() && (water.snow.sample(explorer.up()).depth>.01 || water.snow.experiment()!=SnowExperiment::Natural)) {
+        const auto pack=water.snow.sample(explorer.up());const auto a=water.snow.atmosphere(world,weather,explorer.up(),pack.bed);
+        rect(22,120,292,111,panel,.88f);
+        text(40,143,"SNOW / "+std::string(snowExperimentName(water.snow.experiment())),mint);
+        text(40,165,"PACK "+fixed(pack.depth,2)+" m  SWE "+fixed(pack.swe*1000,0)+" mm",white);
+        text(40,187,"AIR "+fixed(a.forcing.temperature-273.15,1)+" C  FALL "+fixed(a.fallingMmH,1)+" mm/h",white);
+        text(40,215,"WIND "+fixed(std::hypot(a.forcing.wind.east,a.forcing.wind.north),0)+" m/s  VIS "+
+            (a.visibility<1000 ? fixed(a.visibility,0)+" m" : fixed(a.visibility/1000,1)+" km"),muted);
     } else if(weather.windEnabled()) {
         const auto air=weather.sample(explorer.up());
         const auto synoptic=simulation.global.sample(explorer.up());
@@ -1041,12 +1103,12 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(40,h-104,"AIR     " + fixed(sample.density,3) + " kg/m3",muted);
     } else text(40,h-126,"ATMOSPHERE DISABLED",muted);
     text(40,h-82,"RAIN    " + (world.modules().enabled(Module::Climate) ? fixed(sample.precipitation,0)+" mm/y (estimate)" : "--"),muted);
-    rect(w-288,98,266,274,panel,0.90f);
-    text(w-272,118,"SIMULATION MODULES",mint);
+    rect(w-288,85,266,289,panel,0.90f);
+    text(w-272,106,"SIMULATION MODULES",mint);
     for(unsigned i=0;i<moduleCount;++i) {
         const auto m=static_cast<Module>(i);
         const bool on=world.modules().enabled(m);
-        const float y=139+12*static_cast<float>(i);
+        const float y=128+12*static_cast<float>(i);
         text(w-272,y,std::string(moduleNames[i]),on?white:muted);
         text(w-90,y,on ? "ON" : (world.modules().requested(m) ? "WAIT" : "OFF"),on?mint:muted);
     }
@@ -1062,7 +1124,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(w-340,h-143,"+/- time  P pause  CTRL+S seed",white);
         text(w-340,h-122,"ESC settings / HOME landing",white);
         text(w-340,h-101,"F7 rivers  F8 meadow  X grove",muted);
-        text(w-340,h-80,"F9 lakes  F10 coasts  F11 deer",mint);
+        text(w-340,h-80,"F9 lakes F10 coast F11 deer F12 snow",mint);
     }
     if(!view.globe) {
         const float cx=w/2,cy=h/2;

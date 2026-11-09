@@ -91,7 +91,7 @@ TerrainMesh makeTerrainMesh(const World& world,const Hydrology& water,Vec3 obser
     }
     const int columns=static_cast<int>(xs.size()),rows=static_cast<int>(ys.size());
     const double aboveGround=std::max(0.0,altitude-world.surface(mesh.anchor));
-    struct Vertex { Vec3 position; Color color; double u,v; float gridAlpha; Vec3 normal{}; bool ocean{}; Vec3 unit{}; double height{}; CaveColumn cavity{}; Color rockColor{}; };
+    struct Vertex { Vec3 position; Color color; double u,v; float gridAlpha; Vec3 normal{}; bool ocean{}; Vec3 unit{}; double height{}; CaveColumn cavity{}; Color rockColor{}; double snow=0; };
     std::vector<Vertex> vertices(xs.size()*ys.size());
     mesh.waterVertices.clear(); mesh.waterTriangles.clear();
     mesh.waterVertices.reserve(vertices.size());
@@ -103,7 +103,8 @@ TerrainMesh makeTerrainMesh(const World& world,const Hydrology& water,Vec3 obser
         const auto river=world.modules().enabled(Module::Rivers) ? world.waterNetwork()->sample(p) : RiverSample{};
         const double original=sample.elevation;
         const double h=ground.available ? river.channel ? original+ground.bedChange*ground.weight : mix(original,ground.bed,ground.weight) : original;
-        const Vec3 relative=p*(radius+h)-mesh.anchor*radius;
+        const double snow=cave && cave->protectedGround(p) ? 0 : water.snow.depth(p,sample);
+        const Vec3 relative=p*(radius+h+snow)-mesh.anchor*radius;
         auto color=world.color(sample);
         if(sample.ocean) {
             const float shallow=static_cast<float>(1-clamp((world.config().seaLevel-sample.elevation)/150,0.0,1.0));
@@ -131,7 +132,7 @@ TerrainMesh makeTerrainMesh(const World& world,const Hydrology& water,Vec3 obser
         else if(sample.landform==Landform::Mountains || sample.landform==Landform::Gorge) rock={0.39f,0.41f,0.42f};
         if(cave && cave->protectedGround(p)) color=rock;
         vertices[static_cast<std::size_t>(y*columns+x)]={position,color,
-            (global.x+global.z)*0.25,(global.y+global.z*0.37)*0.25,alpha,{},sample.ocean,p,h,cave ? cave->column(p) : CaveColumn{},rock};
+            (global.x+global.z)*0.25,(global.y+global.z*0.37)*0.25,alpha,{},sample.ocean,p,h+snow,cave ? cave->column(p) : CaveColumn{},rock,snow};
     }
     const auto at=[&](int x,int y)->Vertex& { return vertices[static_cast<std::size_t>(y*columns+x)]; };
     for(int y=0;y<rows;++y) for(int x=0;x<columns;++x) {
@@ -141,7 +142,9 @@ TerrainMesh makeTerrainMesh(const World& world,const Hydrology& water,Vec3 obser
         if(!v.ocean) {
             const float rock=static_cast<float>(smoothstep(0.12,0.42,1-v.normal.y));
             v.color={static_cast<float>(mix(v.color.r,v.rockColor.r,rock)),static_cast<float>(mix(v.color.g,v.rockColor.g,rock)),
-                     static_cast<float>(mix(v.color.b,v.rockColor.b,rock))};
+                    static_cast<float>(mix(v.color.b,v.rockColor.b,rock))};
+            const double cover=smoothstep(0.,.06,v.snow)*smoothstep(.25,.8,v.normal.y);
+            v.color={static_cast<float>(mix(v.color.r,.87,cover)),static_cast<float>(mix(v.color.g,.92,cover)),static_cast<float>(mix(v.color.b,.96,cover))};
         }
         // Grazing lines cover subpixel cells near the horizon. Fade them instead
         // of accumulating a bright, flickering band of overlapping edges.
@@ -273,9 +276,14 @@ TerrainMesh makeTerrainMesh(const World& world,const Hydrology& water,Vec3 obser
                 const auto relative=object.up*(radius+object.elevation)-mesh.anchor*radius;
                 base={dot(relative,mesh.east),dot(relative,mesh.anchor),dot(relative,mesh.north)};
             }
-            mesh.plants.push_back({object,base});
+            double snow=0;
+            if(water.snow.enabled() && !plantTraits(object.species).aquatic) {
+                const auto pack=water.snow.sample(object.up);
+                snow=pack.available && pack.weight==1 ? pack.depth : water.snow.depth(object.up,world.sample(object.up,seconds));
+            }
+            mesh.plants.push_back({object,base,snow});
         }
     }
-    mesh.seconds=seconds;return mesh;
+    mesh.seconds=seconds;mesh.snowRevision=water.snow.revision();return mesh;
 }
 } // namespace planet

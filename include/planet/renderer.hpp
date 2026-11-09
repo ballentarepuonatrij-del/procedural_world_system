@@ -43,7 +43,7 @@ struct ViewState {
 };
 bool globeHudHit(const ViewState& view,int x,int y);
 struct RenderTimings {
-    double terrain=0,plants=0,shadowBuild=0,shadows=0,water=0,rivers=0,weather=0,sky=0,fauna=0;
+    double terrain=0,plants=0,shadowBuild=0,shadows=0,water=0,rivers=0,weather=0,sky=0,fauna=0,snow=0;
 };
 class Renderer {
 public:
@@ -82,6 +82,9 @@ public:
     std::uint64_t terrainDiscarded() const {return terrainDiscarded_;}
     double surfaceSpacing() const {return terrainStep_;}
     std::size_t deerCount() const {return deerCount_;}
+    std::size_t snowCount() const {return snowCount_;}
+    std::size_t coarseSnowCount() const {return coarseSnowCount_;}
+    std::size_t blowingSnowCount() const {return blowingSnowCount_;}
 private:
     RenderTimings timings_;
     void buildTerrain(const World& world,const Explorer& explorer,const Hydrology& water,double seconds);
@@ -99,6 +102,7 @@ private:
     void prepareFauna(const World& world,const Explorer& explorer,const Fauna& fauna,bool shadows,Vec3 sun);
     void emitFauna();
     void drawWeather(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight);
+    void drawSnow(const World& world,const Explorer& explorer,const Simulation& simulation,double daylight);
     void drawGlobalWeather(const GlobalWeather& weather,const ViewState& view);
     void drawWater(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight);
     void drawRivers(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight);
@@ -115,7 +119,7 @@ private:
     std::size_t floweringCount_=0,buddingCount_=0,seedHeadCount_=0;
     double plantHeightSum_=0,lastFloraDay_=-1e30,lastFloraCalendar_=-1e30;
     bool lastYoung_=false;
-    GLuint cloudTexture_=0;
+    GLuint cloudTexture_=0,snowTexture_=0;
     std::size_t cloudCount_=0;
     std::vector<SurfaceWaterVertex> waterVertices_;
     std::vector<std::array<std::size_t,3>> waterTriangles_;
@@ -124,7 +128,7 @@ private:
     std::vector<GroundSample> waterGround_;
     std::vector<unsigned char> waterVisible_;
     std::size_t waterCount_=0;
-    std::uint64_t waterRevision_=0,waterSteps_=0;
+    std::uint64_t waterRevision_=0,waterSteps_=0,snowRevision_=0;
     Vec3 anchor_{1,0,0}, east_{0,0,1}, north_{0,1,0};
     double lastTerrainTime_=-1e30, lastGlobeTime_=-1e30;
     double terrainStep_=2, terrainEyeHeight_=0;
@@ -151,6 +155,7 @@ private:
     std::vector<MeshFace> deerFaces_;
     std::vector<Triangle> deerShadows_;
     std::size_t deerCount_=0;
+    std::size_t snowCount_=0,coarseSnowCount_=0,blowingSnowCount_=0;
     GLuint shadows_=0;
     Vec3 shadowSun_{};
     bool shadowDirty_=true,shadowsUsed_=false,stencilWrap_=false;

@@ -49,6 +49,7 @@ bool Modules::enabled(Module m) const {
     if (m == Module::Landforms) return enabled(Module::Terrain);
     if (m == Module::Caves) return enabled(Module::Landforms);
     if (m == Module::Rivers) return enabled(Module::Terrain);
+    if (m == Module::Snow) return enabled(Module::Terrain) && enabled(Module::Climate);
     if (m == Module::Fauna) return enabled(Module::Terrain) && enabled(Module::Biomes);
     if (m == Module::InlandWaters) return enabled(Module::Terrain);
     if (m == Module::WaterMotion) return enabled(Module::Ocean) || enabled(Module::Hydrology) || enabled(Module::Rivers) || enabled(Module::InlandWaters);

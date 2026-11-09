@@ -152,7 +152,7 @@ RunoffExchange RunoffGrid::advance(double seconds,std::span<const double> rain,d
     }
     return result;
 }
-Hydrology::Hydrology(const World& world,Vec3 observer) : config_(world.config()),anchor_(normalized(observer)),
+Hydrology::Hydrology(const World& world,Vec3 observer,double solarSeconds) : snow(world,observer,solarSeconds),config_(world.config()),anchor_(normalized(observer)),
     east_(east(anchor_)),north_(north(anchor_)),grid_(resolution,spacing,config_.gravity) {
     geometryMask_=(world.modules().enabled(Module::Landforms) ? 1U : 0U)|(world.modules().enabled(Module::Caves) ? 2U : 0U)|(world.modules().enabled(Module::Rivers) ? 4U : 0U)|(world.modules().enabled(Module::InlandWaters) ? 8U : 0U);
     const auto climate=world.climatology(anchor_);
@@ -208,6 +208,7 @@ void Hydrology::move(const World& world,Vec3 observer,int x,int z,bool resetChar
     ++revision_;
 }
 void Hydrology::synchronize(const World& world,Vec3 observer) {
+    snow.synchronize(world,observer);
     if(world.config().seed!=config_.seed || world.config().radius!=config_.radius)
         throw std::invalid_argument("Reset hydrology after changing the planet");
     const bool next=world.modules().enabled(Module::Hydrology);
@@ -244,12 +245,20 @@ void Hydrology::synchronize(const World& world,Vec3 observer) {
 void Hydrology::step(const World& world,const Weather& weather,double seconds,double experimentRain,const WaterMotion* motion) {
     if(!std::isfinite(seconds) || seconds<0 || seconds>120 || !std::isfinite(experimentRain) || experimentRain<0 || experimentRain>200)
         throw std::invalid_argument("Invalid hydrology step or rain experiment");
+    snow.step(world,weather,seconds);
     if(!enabled_ || seconds==0) return;
     std::vector<double> rain(grid_.cells.size());
     std::vector<Wind2> stress(grid_.cells.size());
+    double meltVolume=0;
     for(int z=0;z<resolution;++z) for(int x=0;x<resolution;++x) {
         const auto p=directionAt(cellX(x),cellZ(z)); const auto air=weather.sample(p);
-        rain[static_cast<std::size_t>(z*resolution+x)]=air.rainRate/1000+experimentRain/3.6e6;
+        const auto index=static_cast<std::size_t>(z*resolution+x);const auto frozen=snow.sample(p);
+        const bool coupled=snow.active() && frozen.available;
+        const double melt=coupled ? frozen.meltRate : 0;
+        const double rainRate=coupled ? (snow.experiment()==SnowExperiment::Natural ? air.rainRate/1000*(1-snow.solidFraction()) : snow.liquidRate()) : air.rainRate/1000;
+        rain[index]=rainRate+experimentRain/3.6e6+melt;
+        const auto& cell=grid_.cells[index];
+        if(!cell.sea && !cell.reservoir && !cell.masked) meltVolume+=melt*seconds*spacing*spacing;
         if(motion && motion->enabled()) {
             const auto wind=motion->windAt(weather,p);
             stress[static_cast<std::size_t>(z*resolution+x)]=windStress({dot(wind,east_),dot(wind,north_)},grid_.velocity(x,z));
@@ -258,7 +267,7 @@ void Hydrology::step(const World& world,const Weather& weather,double seconds,do
     const auto air=weather.sample(directionAt(cellX(resolution/2),cellZ(resolution/2)));
     const double evaporation=weather.cloudsEnabled() ? 4e-8*std::max(0.0,1-air.humidity)*(0.5+length(air.velocity)/10) : 0;
     const auto change=grid_.advance(seconds,rain,evaporation,erosion_,true,world.modules().enabled(Module::Ocean),config_.seaLevel,stress);
-    totals_.rainM3+=change.rainM3; totals_.evaporatedM3+=change.evaporatedM3; totals_.drainedM3+=change.drainedM3;
+    totals_.rainM3+=change.rainM3-meltVolume;totals_.meltM3+=meltVolume; totals_.evaporatedM3+=change.evaporatedM3; totals_.drainedM3+=change.drainedM3;
     totals_.boundaryM3+=change.boundaryM3; totals_.sedimentOutKg+=change.sedimentOutKg;
     totals_.erodedKg+=change.erodedKg; totals_.depositedKg+=change.depositedKg;
     for(auto& p:tracers_) {
@@ -313,21 +322,22 @@ double Hydrology::ground(const World& world,Vec3 unit,std::optional<double> know
 RunoffBudget Hydrology::budget() const {
     auto b=totals_; b.storedWaterM3=grid_.waterVolume(); b.storedSolidKg=grid_.solidMass(); return b;
 }
-Simulation::Simulation(const World& world,Vec3 observer,double seconds,std::optional<double> waterWind,double globalHours) : global(world,seconds,globalHours),weather(world,observer,seconds+global.elapsed(),&global),water(world,observer),motion(world,observer) {
+Simulation::Simulation(const World& world,Vec3 observer,double seconds,std::optional<double> waterWind,double globalHours) : global(world,seconds,globalHours),weather(world,observer,seconds+global.elapsed(),&global),water(world,observer,seconds+global.elapsed()),motion(world,observer) {
     flora.setCalendarDay((seconds+global.elapsed())/86400);
     motion.setWindExperiment(waterWind); motion.synchronize(world,weather,observer);
 }
-void Simulation::setClock(double seconds) { weather.setClock(seconds); global.setSolarClock(seconds); pending_=0; }
+void Simulation::setClock(double seconds) { weather.setClock(seconds); global.setSolarClock(seconds);water.snow.setClock(seconds); pending_=0; }
 void Simulation::setRainExperiment(double rain) {
     if(!std::isfinite(rain) || rain<0 || rain>200) throw std::invalid_argument("Rain experiment must be in [0,200] mm/h");
     experimentRain_=rain;
 }
 void Simulation::advance(const World& world,Vec3 observer,double seconds) {
-    const bool active=world.modules().enabled(Module::Wind) || world.modules().enabled(Module::Hydrology) || world.modules().enabled(Module::WaterMotion);
+    const bool active=world.modules().enabled(Module::Wind) || world.modules().enabled(Module::Hydrology) || world.modules().enabled(Module::WaterMotion) || world.modules().enabled(Module::Snow);
     if(!std::isfinite(seconds) || seconds<0 || seconds>(active ? 120 : 86400))
         throw std::invalid_argument("Simulation timestep exceeds its supported range");
     global.advance(world,0);global.advanceEffects(seconds);
     water.synchronize(world,observer); weather.advance(world,observer,0,&global);
+    water.snow.animate(world,weather,observer,seconds);
     flora.advance(world,seconds);
     motion.synchronize(world,weather,observer); motion.advanceClock(seconds);
     if(!active) { weather.setClock(weather.seconds()+pending_+seconds); pending_=0; return; }

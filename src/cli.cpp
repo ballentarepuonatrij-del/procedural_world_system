@@ -39,7 +39,8 @@ int main(int argc, char** argv) {
         bool audioDurationSet=false,soundEnabled=true;
         bool sample = false,coast=false;
         bool riverOutput=false,riversEnabled=true,inlandEnabled=true;std::optional<planet::RiverKind> riverSite;
-        bool deer=false,faunaEnabled=true;std::optional<double> faunaSeconds;
+        bool deer=false,faunaEnabled=true,snowEnabled=true;std::optional<double> faunaSeconds,snowSeconds;
+        std::optional<planet::SnowExperiment> snowSite;
         for (int i=1; i<argc; ++i) {
             const std::string arg = argv[i];
             const auto next = [&]() -> std::string {
@@ -52,6 +53,15 @@ int main(int argc, char** argv) {
                 if (error != std::errc{} || end != value.data()+value.size()) throw std::invalid_argument("Invalid seed");
             } else if (arg == "--sample") { lat = number(next()); lon = number(next()); sample = true; }
             else if(arg=="--rivers") riverOutput=true;
+            else if(arg=="--snow") {
+                snowSite=planet::snowExperiment(next());
+                if(!snowSite) throw std::invalid_argument("Snow must be natural, fine, large, blizzard, drifting or thaw");
+            }
+            else if(arg=="--no-snow") snowEnabled=false;
+            else if(arg=="--snow-seconds") {
+                snowSeconds=number(next());
+                if(*snowSeconds<0 || *snowSeconds>3600) throw std::invalid_argument("Snow preview must be 0..3600 seconds");
+            }
             else if(arg=="--deer") deer=true;
             else if(arg=="--no-fauna") faunaEnabled=false;
             else if(arg=="--fauna-seconds") {
@@ -117,6 +127,7 @@ int main(int argc, char** argv) {
                 std::cout << "Global weather: [--storm cyclone|hurricane|thunderstorm] [--global-hours 0..240] [--no-global-weather]\n";
                 std::cout << "Global water: [--rivers] [--river stream|river|major] [--no-rivers] [--no-inland-waters]\n";
                 std::cout << "Flowering: [--meadow] [--flora-day days_since_perihelion]\n";
+                std::cout << "Snow: [--snow natural|fine|large|blizzard|drifting|thaw] [--snow-seconds 0..3600] [--no-snow]\n";
                 std::cout << "Animals: [--deer] [--fauna-seconds 0..3600] [--no-fauna]\n";
                 std::cout << "Procedural audio: [--audio output.wav] [--audio-seconds 0.1..60] [--volume 0..100] [--no-sound]\n";
                 return 0;
@@ -128,10 +139,11 @@ int main(int argc, char** argv) {
         if(rainMmH>0 && !waterSeconds) throw std::invalid_argument("--rain-mm-h requires --water duration");
         if(audioDurationSet && audioPath.empty()) throw std::invalid_argument("--audio-seconds requires --audio output.wav");
         if(faunaSeconds && !deer) throw std::invalid_argument("--fauna-seconds requires --deer");
-        const double duration=waterSeconds.value_or(weatherSeconds.value_or(0));
+        if(snowSeconds && !snowSite) throw std::invalid_argument("--snow-seconds requires --snow");
+        const double duration=waterSeconds.value_or(weatherSeconds.value_or(0))+snowSeconds.value_or(0);
         planet::World world(config);world.modules().set(planet::Module::GlobalWeather,globalEnabled);
         world.modules().set(planet::Module::Sound,soundEnabled);
-        world.modules().set(planet::Module::Fauna,faunaEnabled);
+        world.modules().set(planet::Module::Fauna,faunaEnabled);world.modules().set(planet::Module::Snow,snowEnabled);
         world.modules().set(planet::Module::Rivers,riversEnabled);world.modules().set(planet::Module::InlandWaters,inlandEnabled);
         if(floraOutput && !sample && !coast && !landmark) {
             const auto p=world.findLand();lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
@@ -158,6 +170,10 @@ int main(int argc, char** argv) {
             lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
         }
         auto location=planet::direction(planet::radians(lat),planet::radians(lon));
+        if(snowSite) {
+            location=planet::findSnowfield(world,sample ? location : world.findLand(),day*86400);
+            lat=planet::degrees(planet::latitude(location));lon=planet::degrees(planet::longitude(location));sample=true;
+        }
         planet::Fauna fauna;
         if(deer) {
             const auto site=planet::findDeerHabitat(world,sample ? location : world.findLand());
@@ -168,13 +184,14 @@ int main(int argc, char** argv) {
         }
         std::optional<planet::Simulation> model;
         double previewSeconds=0;
-        if(weatherSeconds || waterSeconds || waterWind || coast || globalOutput || !audioPath.empty()) {
+        if(weatherSeconds || waterSeconds || waterWind || coast || globalOutput || snowSite || !audioPath.empty()) {
             model.emplace(world,location,day*86400,waterWind,globalHours);previewSeconds=model->global.elapsed();
             if(storm) {
                 if(!model->global.strongest(*storm)) throw std::runtime_error("No active storm of the requested kind on this planet");
                 location=model->global.observation(*storm);lat=planet::degrees(planet::latitude(location));lon=planet::degrees(planet::longitude(location));
                 model->advance(world,location,0);
             }
+            if(snowSite) model->water.snow.setExperiment(*snowSite);
             model->setRainExperiment(rainMmH);
             for(double remaining=duration;remaining>1e-9;) {
                 const double step=std::min(60.0,remaining);model->advance(world,location,step);remaining-=step;
@@ -211,6 +228,21 @@ int main(int argc, char** argv) {
                       << ",\n  \"water_depth_m\": " << s.waterDepth
                       << ",\n  \"wetness\": " << s.wetness
                       << ",\n  \"biome\": \"" << planet::biomeName(s.biome) << '"';
+            if(snowSite || !snowEnabled) {
+                const auto pack=model ? model->water.snow.sample(location) : planet::SnowSample{};
+                const auto b=model ? model->water.snow.budget() : planet::SnowBudget{};
+                const auto a=model ? model->water.snow.atmosphere(world,model->weather,location,world.surface(location)) : planet::SnowAtmosphere{};
+                std::cout << ",\n  \"snow\": {\"enabled\": " << (snowEnabled ? "true" : "false")
+                    << ", \"experiment\": \"" << planet::snowExperimentName(snowSite.value_or(planet::SnowExperiment::Natural))
+                    << "\", \"elapsed_s\": " << (model ? model->water.snow.seconds() : 0)
+                    << ", \"depth_m\": " << pack.depth << ", \"swe_mm\": " << pack.swe*1000
+                    << ", \"falling_mm_h\": " << a.fallingMmH << ", \"large_fraction\": " << a.large
+                    << ", \"visibility_m\": " << a.visibility << ", \"blowing\": " << a.blowing
+                    << ", \"stored_m3\": " << b.storedM3 << ", \"snowfall_m3\": " << b.snowfallM3
+                    << ", \"melt_m3\": " << b.meltM3 << ", \"sublimated_m3\": " << b.sublimatedM3
+                    << ", \"export_m3\": " << b.exportM3 << ", \"transported_m3\": " << b.redistributedM3
+                    << ", \"residual_m3\": " << b.residual() << '}';
+            }
             if(deer || !faunaEnabled) {
                 const auto animals=fauna.visible(location);
                 std::cout << ",\n  \"fauna\": {\"enabled\": " << (faunaEnabled ? "true" : "false")
@@ -316,7 +348,8 @@ int main(int argc, char** argv) {
                         << ",\n    \"flow_east_m_s\": " << ground.velocity.east << ",\n    \"flow_north_m_s\": " << ground.velocity.north
                         << ",\n    \"soil_saturation\": " << ground.saturation << ",\n    \"bed_change_m\": " << ground.bedChange
                         << ",\n    \"maximum_bed_change_m\": " << maximumChange << ",\n    \"stored_water_m3\": " << runoff.storedWaterM3
-                        << ",\n    \"rain_m3\": " << runoff.rainM3 << ",\n    \"evaporated_m3\": " << runoff.evaporatedM3
+                        << ",\n    \"rain_m3\": " << runoff.rainM3 << ",\n    \"melt_m3\": " << runoff.meltM3
+                        << ",\n    \"evaporated_m3\": " << runoff.evaporatedM3
                         << ",\n    \"drained_m3\": " << runoff.drainedM3 << ",\n    \"boundary_water_m3\": " << runoff.boundaryM3
                         << ",\n    \"water_error_m3\": " << runoff.waterResidual() << ",\n    \"solid_error_kg\": " << runoff.solidResidual()
                         << ",\n    \"eroded_kg\": " << runoff.erodedKg << ",\n    \"deposited_kg\": " << runoff.depositedKg << "\n  }";

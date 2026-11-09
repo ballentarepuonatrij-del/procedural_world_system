@@ -337,6 +337,34 @@ void Renderer::drawSky(const World& world,const Explorer& explorer,const ViewSta
     }
     glMatrixMode(GL_MODELVIEW);glPopMatrix();glMatrixMode(GL_PROJECTION);glPopMatrix();glMatrixMode(GL_MODELVIEW);glPopAttrib();
 }
+void Renderer::prepareFauna(const World& world,const Explorer& explorer,const Fauna& fauna,bool shadows,Vec3 sun) {
+    DrawTimer timer{timings_.fauna};deerFaces_.clear();deerShadows_.clear();deerCount_=0;
+    if(explorer.underground() || !world.modules().enabled(Module::Fauna)) return;
+    const auto local=[&](Vec3 p){return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)};};
+    std::vector<Triangle> casters;
+    for(const auto& deer:fauna.visible(explorer.up())) {
+        const double range=length(deer.up-explorer.up())*world.config().radius;
+        const auto delta=deer.up*(world.config().radius+deer.elevation+1)-explorer.up()*(world.config().radius+explorer.altitude());
+        if(dot(delta,explorer.forward())<-3) continue;
+        const auto right=normalized(cross(deer.up,deer.heading));
+        const auto base=deer.up*(world.config().radius+deer.elevation)-anchor_*world.config().radius;
+        const auto transform=[&](Vec3 v){return local(base+right*v.x+deer.up*v.y+deer.heading*v.z);};
+        for(const auto& face:deerMesh(deer,range>60)) {
+            const Triangle t{transform(face.triangle.a),transform(face.triangle.b),transform(face.triangle.c)};
+            deerFaces_.push_back({t,face.color});if(shadows && range<160) casters.push_back(t);
+        }
+        ++deerCount_;
+    }
+    if(!casters.empty()) deerShadows_=shadowVolume(casters,local(sun),150,.015);
+}
+void Renderer::emitFauna() {
+    glBegin(GL_TRIANGLES);
+    for(const auto& f:deerFaces_) {
+        const auto& t=f.triangle;const auto n=normalized(cross(t.b-t.a,t.c-t.a));glNormal3d(n.x,n.y,n.z);glColor3f(f.color.r,f.color.g,f.color.b);
+        for(const auto p:{t.a,t.b,t.c}) glVertex3d(p.x,p.y,p.z);
+    }
+    glEnd();
+}
 void Renderer::drawShadows(Vec3 sun,bool textured) {
     DrawTimer timer{timings_.shadows};
     if(shadowDirty_ || length(sun-shadowSun_)>radians(.02)) {
@@ -347,7 +375,7 @@ void Renderer::drawShadows(Vec3 sun,bool textured) {
         for(const auto& t:volume) for(const auto p:{t.a,t.b,t.c}) glVertex3d(p.x,p.y,p.z);
         glEnd();glEndList();shadowSun_=sun;shadowDirty_=false;
     }
-    if(!shadowCount_) return;
+    if(!shadowCount_ && deerShadows_.empty()) return;
     shadowsUsed_=true;
     glPushAttrib(GL_ALL_ATTRIB_BITS);
     glDisable(GL_LIGHTING);glDisable(GL_FOG);glDisable(GL_TEXTURE_2D);glDisable(GL_BLEND);
@@ -359,19 +387,20 @@ void Renderer::drawShadows(Vec3 sun,bool textured) {
     glEnable(GL_STENCIL_TEST);glStencilMask(255);glClearStencil(0);glClear(GL_STENCIL_BUFFER_BIT);glStencilFunc(GL_ALWAYS,0,255);
     glEnable(GL_CULL_FACE);glFrontFace(GL_CCW);
     // Closed-volume depth-fail counting also works with the eye inside a shadow.
-    glCullFace(GL_FRONT);glStencilOp(GL_KEEP,stencilWrap_ ? 0x8507 : GL_INCR,GL_KEEP);glCallList(shadows_);
-    glCullFace(GL_BACK);glStencilOp(GL_KEEP,stencilWrap_ ? 0x8508 : GL_DECR,GL_KEEP);glCallList(shadows_);
+    const auto dynamicVolumes=[&] {glBegin(GL_TRIANGLES);for(const auto& t:deerShadows_) for(const auto p:{t.a,t.b,t.c}) glVertex3d(p.x,p.y,p.z);glEnd();};
+    glCullFace(GL_FRONT);glStencilOp(GL_KEEP,stencilWrap_ ? 0x8507 : GL_INCR,GL_KEEP);glCallList(shadows_);dynamicVolumes();
+    glCullFace(GL_BACK);glStencilOp(GL_KEEP,stencilWrap_ ? 0x8508 : GL_DECR,GL_KEEP);glCallList(shadows_);dynamicVolumes();
     glPopAttrib();
     glPushAttrib(GL_ALL_ATTRIB_BITS);
     glEnable(GL_STENCIL_TEST);glStencilMask(0);glStencilFunc(GL_NOTEQUAL,0,255);glStencilOp(GL_KEEP,GL_KEEP,GL_KEEP);
     glDepthMask(GL_FALSE);glDepthFunc(GL_LEQUAL);glDisable(GL_BLEND);glEnable(GL_LIGHTING);glDisable(GL_LIGHT0);
     if(textured) {glEnable(GL_TEXTURE_2D);glBindTexture(GL_TEXTURE_2D,detailTexture_);}
     glCallList(terrain_);glDisable(GL_TEXTURE_2D);
-    glLightModeli(GL_LIGHT_MODEL_TWO_SIDE,GL_TRUE);glCallList(objects_);
+    glLightModeli(GL_LIGHT_MODEL_TWO_SIDE,GL_TRUE);glCallList(objects_);emitFauna();
     glPopAttrib();
 }
 void Renderer::draw(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view) {
-    timings_={};
+    timings_={};deerCount_=0;deerFaces_.clear();deerShadows_.clear();
     const double travelSpeed=dirty_ || length(previousObserver_)<.5 || view.frameSeconds<=0 ? 0 :
         length(explorer.up()-previousObserver_)*world.config().radius/view.frameSeconds;
     previousObserver_=explorer.up();
@@ -507,6 +536,8 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
         // Leaves and marine blades are thin sheets, lit from either side.
         glLightModeli(GL_LIGHT_MODEL_TWO_SIDE,GL_TRUE);
         glCallList(objects_);
+        prepareFauna(world,explorer,simulation.fauna,view.shadowsEnabled && shadowSupport() && !submerged && lighting_.direct>.002,sun.sunDirection);
+        emitFauna();
         glLightModeli(GL_LIGHT_MODEL_TWO_SIDE,GL_FALSE);
         if(caveCount_>0) {
             glPushAttrib(GL_ENABLE_BIT|GL_LIGHTING_BIT);
@@ -948,6 +979,17 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
             (view.weatherLayer==WeatherLayer::Wind ? "BLUE 0 -- RED 70 m/s [10 m]" : waterLayer ? "CYAN: rivers / current direction" : "WHITE: column cloud / subgrid"),white);
         text(40,323,waterLayer ? "F7 visit rivers / TAB surface" : "CYAN cyclone / ORANGE tropical",white);
         text(40,346,"F3: weather / rivers / currents",muted);
+    } else if(view.faunaInfo) {
+        rect(22,241,292,117,panel,.88f);
+        auto deer=simulation.fauna.visible(explorer.up());
+        std::sort(deer.begin(),deer.end(),[&](const auto& a,const auto& b){return length(a.up-explorer.up())<length(b.up-explorer.up());});
+        text(40,264,"DEER / "+std::to_string(deer.size())+" nearby",mint);
+        if(!deer.empty()) {
+            const auto& d=deer.front();unsigned group=0;for(const auto& herd:simulation.fauna.herds()) if(herd.habitat.id==d.herd) group=static_cast<unsigned>(herd.members.size());
+            text(40,287,"HERD "+std::to_string(group)+" / "+std::string(deerActivityName(d.activity)),white);
+            text(40,310,fixed(length(d.up-explorer.up())*world.config().radius,0)+" m away  "+fixed(d.speed,1)+" m/s",muted);
+        } else text(40,289,"No deer in view range",muted);
+        text(40,344,"F11 visit herd / E next panel",muted);
     } else if(view.floraInfo) {
         rect(22,238,292,120,panel,.90f);
         text(40,259,"FLORA / nearest; "+std::to_string(plantSpeciesCount_)+" kinds",mint);
@@ -999,16 +1041,16 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(40,h-104,"AIR     " + fixed(sample.density,3) + " kg/m3",muted);
     } else text(40,h-126,"ATMOSPHERE DISABLED",muted);
     text(40,h-82,"RAIN    " + (world.modules().enabled(Module::Climate) ? fixed(sample.precipitation,0)+" mm/y (estimate)" : "--"),muted);
-    rect(w-288,98,266,287,panel,0.90f);
-    text(w-272,123,"SIMULATION MODULES",mint);
+    rect(w-288,98,266,274,panel,0.90f);
+    text(w-272,118,"SIMULATION MODULES",mint);
     for(unsigned i=0;i<moduleCount;++i) {
         const auto m=static_cast<Module>(i);
         const bool on=world.modules().enabled(m);
-        const float y=145+13*static_cast<float>(i);
+        const float y=139+12*static_cast<float>(i);
         text(w-272,y,std::string(moduleNames[i]),on?white:muted);
         text(w-90,y,on ? "ON" : (world.modules().requested(m) ? "WAIT" : "OFF"),on?mint:muted);
     }
-    text(w-272,380,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
+    text(w-272,370,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
     rect(22,h-51,w-44,29,panel,0.9f);
     text(35,h-31,view.globe ? "RMB drag: rotate   LMB: travel   TAB surface   ESC settings   CTRL+U interface" :
         (view.captured ? "ESC release mouse" : "CLICK look / ESC settings") + std::string("   WASD  F fly  TAB globe  CTRL+U interface"),white);
@@ -1020,7 +1062,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(w-340,h-143,"+/- time  P pause  CTRL+S seed",white);
         text(w-340,h-122,"ESC settings / HOME landing",white);
         text(w-340,h-101,"F7 rivers  F8 meadow  X grove",muted);
-        text(w-340,h-80,"F9 wetlands  F10 coasts",mint);
+        text(w-340,h-80,"F9 lakes  F10 coasts  F11 deer",mint);
     }
     if(!view.globe) {
         const float cx=w/2,cy=h/2;

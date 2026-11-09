@@ -2,6 +2,7 @@
 #include "planet/weather.hpp"
 #include "planet/water_motion.hpp"
 #include "planet/flora.hpp"
+#include "planet/fauna.hpp"
 #include "planet/global_weather.hpp"
 #include <map>
 #include <deque>
@@ -109,6 +110,7 @@ public:
     Hydrology water;
     WaterMotion motion;
     Flora flora;
+    Fauna fauna;
 private:
     double pending_=0,experimentRain_=0;
 };

@@ -32,7 +32,7 @@ struct ViewState {
     bool globe=false, help=true, captured=false, paused=false;
     // Flow markers are opt-in diagnostics; ordinary exploration starts clean.
     bool windTracers=false,waterTracers=false,headlamp=true;
-    bool floraInfo=true;
+    bool floraInfo=true,faunaInfo=false;
     SurfaceStyle surfaceStyle=SurfaceStyle::Natural;
     WeatherLayer weatherLayer=WeatherLayer::Clouds;
     double volume=.55;
@@ -43,7 +43,7 @@ struct ViewState {
 };
 bool globeHudHit(const ViewState& view,int x,int y);
 struct RenderTimings {
-    double terrain=0,plants=0,shadowBuild=0,shadows=0,water=0,rivers=0,weather=0,sky=0;
+    double terrain=0,plants=0,shadowBuild=0,shadows=0,water=0,rivers=0,weather=0,sky=0,fauna=0;
 };
 class Renderer {
 public:
@@ -81,6 +81,7 @@ public:
     std::uint64_t terrainUploads() const {return terrainUploads_;}
     std::uint64_t terrainDiscarded() const {return terrainDiscarded_;}
     double surfaceSpacing() const {return terrainStep_;}
+    std::size_t deerCount() const {return deerCount_;}
 private:
     RenderTimings timings_;
     void buildTerrain(const World& world,const Explorer& explorer,const Hydrology& water,double seconds);
@@ -95,6 +96,8 @@ private:
     void buildObjects(const World& world,const Flora& flora);
     void drawSky(const World& world,const Explorer& explorer,const ViewState& view);
     void drawShadows(Vec3 sun,bool textured);
+    void prepareFauna(const World& world,const Explorer& explorer,const Fauna& fauna,bool shadows,Vec3 sun);
+    void emitFauna();
     void drawWeather(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight);
     void drawGlobalWeather(const GlobalWeather& weather,const ViewState& view);
     void drawWater(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight);
@@ -145,6 +148,9 @@ private:
     std::vector<Star> stars_;
     std::uint64_t starSeed_=0;
     std::vector<Triangle> terrainCasters_,objectCasters_;
+    std::vector<MeshFace> deerFaces_;
+    std::vector<Triangle> deerShadows_;
+    std::size_t deerCount_=0;
     GLuint shadows_=0;
     Vec3 shadowSun_{};
     bool shadowDirty_=true,shadowsUsed_=false,stencilWrap_=false;

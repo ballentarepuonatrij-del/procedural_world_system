@@ -64,10 +64,10 @@ INT_PTR CALLBACK procedure(HWND dialog,UINT message,WPARAM wParam,LPARAM lParam)
                 SetFocus(edit);return FALSE;
             }
             control(dialog,L"STATIC",L"Модули симуляции",0,-1,12,10,336,16);
-            constexpr std::array<const wchar_t*,moduleCount> labels{L"Рельеф",L"Океан",L"Атмосфера",L"Климат",L"Биомы",L"Детали поверхности",L"Ветер",L"Облака",L"Поверхностная вода",L"Эрозия",L"Формы рельефа",L"Пещеры",L"Волны и течения",L"Рост растений",L"Глобальная погода",L"Звук",L"Реки",L"Озёра и болота"};
+            constexpr std::array<const wchar_t*,moduleCount> labels{L"Рельеф",L"Океан",L"Атмосфера",L"Климат",L"Биомы",L"Детали поверхности",L"Ветер",L"Облака",L"Поверхностная вода",L"Эрозия",L"Формы рельефа",L"Пещеры",L"Волны и течения",L"Рост растений",L"Глобальная погода",L"Звук",L"Реки",L"Озёра и болота",L"Животные"};
             for(unsigned i=0;i<moduleCount;++i) {
                 const auto id=moduleId+static_cast<int>(i);
-                control(dialog,L"BUTTON",labels[i],WS_TABSTOP|BS_AUTOCHECKBOX,id,12+static_cast<int>(i/9)*174,30+static_cast<int>(i%9)*19,162,17);
+                control(dialog,L"BUTTON",labels[i],WS_TABSTOP|BS_AUTOCHECKBOX,id,12+static_cast<int>(i/10)*174,30+static_cast<int>(i%10)*17,162,17);
                 CheckDlgButton(dialog,id,data->preferences.modules.requested(static_cast<Module>(i)) ? BST_CHECKED : BST_UNCHECKED);
             }
             control(dialog,L"STATIC",L"Зависимые модули работают, когда включены их основы. Базовая планета всегда активна.",0,-1,12,204,336,28);

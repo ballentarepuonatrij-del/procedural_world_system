@@ -39,6 +39,7 @@ int main(int argc, char** argv) {
         bool audioDurationSet=false,soundEnabled=true;
         bool sample = false,coast=false;
         bool riverOutput=false,riversEnabled=true,inlandEnabled=true;std::optional<planet::RiverKind> riverSite;
+        bool deer=false,faunaEnabled=true;std::optional<double> faunaSeconds;
         for (int i=1; i<argc; ++i) {
             const std::string arg = argv[i];
             const auto next = [&]() -> std::string {
@@ -51,6 +52,12 @@ int main(int argc, char** argv) {
                 if (error != std::errc{} || end != value.data()+value.size()) throw std::invalid_argument("Invalid seed");
             } else if (arg == "--sample") { lat = number(next()); lon = number(next()); sample = true; }
             else if(arg=="--rivers") riverOutput=true;
+            else if(arg=="--deer") deer=true;
+            else if(arg=="--no-fauna") faunaEnabled=false;
+            else if(arg=="--fauna-seconds") {
+                faunaSeconds=number(next());
+                if(*faunaSeconds<0 || *faunaSeconds>3600) throw std::invalid_argument("Fauna preview must be 0..3600 seconds");
+            }
             else if(arg=="--no-inland-waters") inlandEnabled=false;
             else if(arg=="--no-rivers") {riversEnabled=false;riverOutput=true;}
             else if(arg=="--river") {riverSite=planet::riverKind(next());riverOutput=true;if(!riverSite) throw std::invalid_argument("River must be stream, river or major");}
@@ -110,6 +117,7 @@ int main(int argc, char** argv) {
                 std::cout << "Global weather: [--storm cyclone|hurricane|thunderstorm] [--global-hours 0..240] [--no-global-weather]\n";
                 std::cout << "Global water: [--rivers] [--river stream|river|major] [--no-rivers] [--no-inland-waters]\n";
                 std::cout << "Flowering: [--meadow] [--flora-day days_since_perihelion]\n";
+                std::cout << "Animals: [--deer] [--fauna-seconds 0..3600] [--no-fauna]\n";
                 std::cout << "Procedural audio: [--audio output.wav] [--audio-seconds 0.1..60] [--volume 0..100] [--no-sound]\n";
                 return 0;
             } else throw std::invalid_argument("Unknown option: " + arg);
@@ -119,9 +127,11 @@ int main(int argc, char** argv) {
             throw std::invalid_argument("Weather and water share one duration; supply the same seconds");
         if(rainMmH>0 && !waterSeconds) throw std::invalid_argument("--rain-mm-h requires --water duration");
         if(audioDurationSet && audioPath.empty()) throw std::invalid_argument("--audio-seconds requires --audio output.wav");
+        if(faunaSeconds && !deer) throw std::invalid_argument("--fauna-seconds requires --deer");
         const double duration=waterSeconds.value_or(weatherSeconds.value_or(0));
         planet::World world(config);world.modules().set(planet::Module::GlobalWeather,globalEnabled);
         world.modules().set(planet::Module::Sound,soundEnabled);
+        world.modules().set(planet::Module::Fauna,faunaEnabled);
         world.modules().set(planet::Module::Rivers,riversEnabled);world.modules().set(planet::Module::InlandWaters,inlandEnabled);
         if(floraOutput && !sample && !coast && !landmark) {
             const auto p=world.findLand();lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
@@ -148,6 +158,14 @@ int main(int argc, char** argv) {
             lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
         }
         auto location=planet::direction(planet::radians(lat),planet::radians(lon));
+        planet::Fauna fauna;
+        if(deer) {
+            const auto site=planet::findDeerHabitat(world,sample ? location : world.findLand());
+            if(!fauna.focus(world,site)) throw std::runtime_error("Deer habitat has insufficient clear ground for the herd");
+            location=planet::normalized(site.home+site.outward*(110/config.radius));
+            lat=planet::degrees(planet::latitude(location));lon=planet::degrees(planet::longitude(location));sample=true;
+            fauna.advance(world,location,faunaSeconds.value_or(0),world.surface(location)+1.75,true,false);
+        }
         std::optional<planet::Simulation> model;
         double previewSeconds=0;
         if(weatherSeconds || waterSeconds || waterWind || coast || globalOutput || !audioPath.empty()) {
@@ -193,6 +211,18 @@ int main(int argc, char** argv) {
                       << ",\n  \"water_depth_m\": " << s.waterDepth
                       << ",\n  \"wetness\": " << s.wetness
                       << ",\n  \"biome\": \"" << planet::biomeName(s.biome) << '"';
+            if(deer || !faunaEnabled) {
+                const auto animals=fauna.visible(location);
+                std::cout << ",\n  \"fauna\": {\"enabled\": " << (faunaEnabled ? "true" : "false")
+                    << ", \"elapsed_s\": " << fauna.elapsed() << ", \"steps\": " << fauna.steps() << ", \"deer\": [";
+                for(std::size_t i=0;i<animals.size();++i) {
+                    const auto& a=animals[i];if(i) std::cout << ',';
+                    std::cout << "{\"id\": \"" << a.id << "\", \"herd_id\": \"" << a.herd << "\", \"activity\": \"" << planet::deerActivityName(a.activity)
+                        << "\", \"latitude_deg\": " << planet::degrees(planet::latitude(a.up)) << ", \"longitude_deg\": " << planet::degrees(planet::longitude(a.up))
+                        << ", \"speed_m_s\": " << a.speed << ", \"male\": " << (a.male ? "true" : "false") << '}';
+                }
+                std::cout << "]}";
+            }
             if(riverOutput) {
                 const auto atlas=world.waterNetwork();const auto river=riversEnabled ? atlas->sample(location) : planet::RiverSample{};
                 const auto current=atlas->oceanCurrent(location);

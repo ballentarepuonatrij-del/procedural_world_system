@@ -985,7 +985,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         std::sort(deer.begin(),deer.end(),[&](const auto& a,const auto& b){return length(a.up-explorer.up())<length(b.up-explorer.up());});
         text(40,264,"DEER / "+std::to_string(deer.size())+" nearby",mint);
         if(!deer.empty()) {
-            const auto& d=deer.front();unsigned group=0;for(const auto& h:simulation.fauna.herds()) if(h.habitat.id==d.herd) group=static_cast<unsigned>(h.members.size());
+            const auto& d=deer.front();unsigned group=0;for(const auto& herd:simulation.fauna.herds()) if(herd.habitat.id==d.herd) group=static_cast<unsigned>(herd.members.size());
             text(40,287,"HERD "+std::to_string(group)+" / "+std::string(deerActivityName(d.activity)),white);
             text(40,310,fixed(length(d.up-explorer.up())*world.config().radius,0)+" m away  "+fixed(d.speed,1)+" m/s",muted);
         } else text(40,289,"No deer in view range",muted);

@@ -21,6 +21,7 @@ struct DeerHerd {
     DeerHabitat habitat;
     std::vector<Deer> members;
     std::vector<SurfaceObject> obstacles;
+    Vec3 obstacleCenter{};
     DeerActivity activity=DeerActivity::Grazing;
     double remaining=0,thirst=.5,alarm=0;
     std::uint64_t decisions=0,lastSeen=0;

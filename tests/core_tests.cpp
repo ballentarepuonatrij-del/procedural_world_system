@@ -45,8 +45,10 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
     throw std::runtime_error("Walkable cave route was blocked");
 }
 #include "landscape_tests.hpp"
+#include "fauna_tests.hpp"
 void registerTests() {
     registerLandscapeTests();
+    registerFaunaTests();
     test("detail","CPU terrain snapshots preserve coordinates and bound flight detail",[] {
         World w;const auto p=w.findLand();Hydrology water(w,p);const double height=w.surface(p)+1.75;
         const auto fine=makeTerrainMesh(w,water,p,height,79*86400),fast=makeTerrainMesh(w,water,p,height,79*86400,64);

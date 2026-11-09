@@ -88,7 +88,7 @@ void targets(DeerHerd& herd,const World& w,bool drinking) {
         auto& d=herd.members[i];
         if(drinking) {
             const auto side=normalized(cross(herd.habitat.outward,herd.habitat.bank));
-            const auto wet=offset(herd.habitat.water,side,(static_cast<double>(i)-(herd.members.size()-1)*.5)*2.7,radius);
+            const auto wet=offset(herd.habitat.water,side,(static_cast<double>(i)-static_cast<double>(herd.members.size()-1)*.5)*2.7,radius);
             const auto edge=shore(w,offset(wet,-herd.habitat.outward,3,radius),herd.habitat.outward,40);
             d.target=edge ? edge->first : herd.habitat.bank;
         } else {
@@ -107,7 +107,7 @@ DeerHabitat findDeerHabitat(const World& w,Vec3 near) {
     if(w.modules().enabled(Module::Rivers)) {
         for(auto kind:{RiverKind::Stream,RiverKind::River}) {
             const auto site=w.waterNetwork()->find(kind,near);
-            for(const auto [r,s]:w.waterNetwork()->nearby(site.center,300)) if(const auto h=riverHabitat(w,r,s)) return *h;
+            for(const auto& [r,s]:w.waterNetwork()->nearby(site.center,300)) if(const auto h=riverHabitat(w,r,s)) return *h;
         }
     }
     throw std::runtime_error("No suitable deer habitat with fresh drinking water was found");
@@ -124,7 +124,7 @@ bool Fauna::focus(const World& w,const DeerHabitat& site) {
     synchronize(w);if(!enabled_) return false;
     for(auto& h:herds_) if(h.habitat.id==site.id) {h.lastSeen=++visit_;return true;}
     DeerHerd herd;herd.habitat=site;herd.lastSeen=++visit_;herd.remaining=35+40*randomUnit(site.id+1);herd.thirst=.5+.3*randomUnit(site.id+2);
-    herd.obstacles=surfaceObjects(w,site.home,180,false);
+    herd.obstacleCenter=site.home;herd.obstacles=surfaceObjects(w,site.home,180,false);
     std::erase_if(herd.obstacles,[](const auto& o){return o.collisionRadius()<=.05;});
     const unsigned count=3+static_cast<unsigned>(hash64(site.id)%5);
     for(unsigned i=0;i<count;++i) {
@@ -142,6 +142,7 @@ bool Fauna::focus(const World& w,const DeerHabitat& site) {
         d.previous=d.up;d.heading=d.previousHeading=toward(d.up,site.bank);d.target=d.up;
         d.lowerHead=d.previousHead=.8;herd.members.push_back(d);
     }
+    targets(herd,w,false);
     if(herds_.size()>=cacheLimit) herds_.erase(std::min_element(herds_.begin(),herds_.end(),[](const auto& a,const auto& b){return a.lastSeen<b.lastSeen;}));
     herds_.push_back(std::move(herd));return true;
 }
@@ -155,7 +156,7 @@ void Fauna::discover(const World& w,Vec3 observer) {
     }
     if(w.modules().enabled(Module::Rivers)) {
         unsigned checked=0;
-        for(const auto [r,s]:w.waterNetwork()->nearby(observer,activeRadius)) {
+        for(const auto& [r,s]:w.waterNetwork()->nearby(observer,activeRadius)) {
             if(distance(w.waterNetwork()->point(r,s,.5).up,observer,config_.radius)>activeRadius) continue;
             if(const auto h=riverHabitat(w,r,s)) (void)focus(w,*h);
             if(++checked>=2) break;
@@ -185,6 +186,10 @@ void Fauna::tick(const World& w,Vec3 observer,double altitude,bool threat) {
         Vec3 center{};bool alarm=false;double nearest=1e30;
         for(const auto& d:herd.members) {center+=d.up;const double range=std::hypot(distance(d.up,observer,radius),altitude-d.elevation-1.0);nearest=std::min(nearest,range);}
         center=normalized(center);alarm=threat && nearest<42;
+        if(distance(center,herd.obstacleCenter,radius)>80) {
+            herd.obstacleCenter=center;herd.obstacles=surfaceObjects(w,center,180,false);
+            std::erase_if(herd.obstacles,[](const auto& o){return o.collisionRadius()<=.05;});
+        }
         if(alarm) {herd.alarm=14;herd.activity=DeerActivity::Fleeing;}
         else if(!threat || nearest>95) herd.alarm=std::max(0.,herd.alarm-dt);
         herd.remaining-=dt;herd.thirst=std::min(1.,herd.thirst+dt/420);
@@ -203,32 +208,37 @@ void Fauna::tick(const World& w,Vec3 observer,double altitude,bool threat) {
         for(auto& d:herd.members) {
             d.previous=d.up;d.previousElevation=d.elevation;d.previousHeading=d.heading;d.previousStride=d.stride;d.previousHead=d.lowerHead;d.previousFold=d.foldLegs;
             auto activity=herd.activity;Vec3 desired=toward(d.up,d.target);double targetSpeed=0;
+            const double targetDistance=distance(d.up,d.target,radius);
+            const bool atWater=activity==DeerActivity::Walking || activity==DeerActivity::Drinking;
             if(activity==DeerActivity::Fleeing) {
                 desired=toward(observer,d.up)+toward(d.up,center)*clamp((distance(d.up,center,radius)-12)/28,0.,.65);
                 targetSpeed=10+2*randomUnit(d.id+4);
-            } else if(activity==DeerActivity::Walking || activity==DeerActivity::Drinking) {
-                if(distance(d.up,d.target,radius)<1.0) {
+            } else if(atWater) {
+                if(targetDistance<.25) {
                     const auto wet=ground(w,offset(d.up,-herd.habitat.outward,1.5,radius));
                     if(!wet.ocean && wet.level-wet.bed>.01 && d.elevation-wet.level<.5) {activity=DeerActivity::Drinking;++drinking;desired=-herd.habitat.outward;}
                     else activity=DeerActivity::Walking;
-                } else {activity=DeerActivity::Walking;targetSpeed=1.1;}
-            } else if(activity==DeerActivity::Grazing) targetSpeed=distance(d.up,d.target,radius)>1.8 ? .42 : 0;
+                } else {activity=DeerActivity::Walking;targetSpeed=std::min(1.1,targetDistance*1.5);}
+            } else if(activity==DeerActivity::Grazing) targetSpeed=targetDistance>1.8 ? .42 : 0;
             Vec3 separation{};
             for(const auto& other:old) if(other.id!=d.id) {
                 const double gap=distance(d.up,other.up,radius);
                 if(gap<3) separation+=toward(other.up,d.up)*((3-gap)/3);
             }
-            desired+=separation*.9;desired=normalized(desired-d.up*dot(desired,d.up));
+            desired+=separation*(atWater ? .9*clamp(targetDistance/4,0.,1.) : .9);
+            desired=normalized(desired-d.up*dot(desired,d.up));
             const double turn=std::atan2(dot(cross(d.heading,desired),d.up),dot(d.heading,desired));
             const auto heading=normalized(rotate(d.heading,d.up,clamp(turn,-2.8*dt,2.8*dt)));
             const double speed=d.speed+clamp(targetSpeed-d.speed,-8*dt,4*dt);bool moved=false;
             if(speed>.005) for(double angle:{0.,.55,-.55,1.1,-1.1,1.7,-1.7}) {
                 const auto axis=rotate(heading,d.up,angle);const auto next=offset(d.up,axis,speed*dt,radius);
-                const auto ahead=offset(d.up,axis,std::max(speed*dt,1.5),radius);
+                // Do not reject the last dry step because a look-ahead extends into the pond.
+                const double lookAhead=atWater ? std::min(1.5,targetDistance) : 1.5;
+                const auto ahead=offset(d.up,axis,std::max(speed*dt,lookAhead),radius);
                 if(!path(w,d.up,ahead,d.elevation,herd.obstacles)) continue;
                 d.up=next;d.elevation=ground(w,next).bed;d.heading=toward(d.previous,next);d.speed=speed;d.stride+=speed*dt/(speed>4 ? 2.5 : 1.4);moved=true;break;
             }
-            if(!moved) {d.speed=0;d.heading=heading;}
+            if(!moved) {d.speed=0;d.heading=heading;d.stride+=dt*.12;}
             d.activity=activity;
             const double head=(activity==DeerActivity::Drinking || (activity==DeerActivity::Grazing && d.speed<.6)) ? 1 : 0;
             const double folded=activity==DeerActivity::Resting && d.speed<.1 ? 1 : 0;

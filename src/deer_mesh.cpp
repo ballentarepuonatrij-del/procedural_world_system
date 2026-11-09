@@ -6,6 +6,7 @@ std::vector<MeshFace> deerMesh(const DeerPose& p,bool simple) {
     const float tone=static_cast<float>(.88+.18*randomUnit(p.id));
     const Color coat{.55f*tone,.32f*tone,.16f*tone},dark{.18f,.10f,.055f},belly{.77f,.66f,.45f},black{.045f,.035f,.025f};
     const double folded=p.foldLegs,head=p.lowerHead;
+    const double feeding=head*.025*std::sin(tau*p.stride);
     const double bob=(p.speed>4 ? .055*std::cos(tau*p.stride*2) : .012*std::sin(tau*p.stride*2))*(1-folded);
     const double bodyY=1.02-.57*folded+bob;
     const auto triangle=[&](Vec3 a,Vec3 b,Vec3 c,Color color) {
@@ -40,7 +41,7 @@ std::vector<MeshFace> deerMesh(const DeerPose& p,bool simple) {
         tube(hip,knee,.080,.052,coat);tube(knee,foot,.046,.027,dark);
         ball(foot+Vec3{0,-.015,.025},{.055,.055,.095},black,5);
     }
-    const Vec3 shoulder{0,bodyY+.15,.48},headCenter{0,mix(bodyY+.64,.29,head),mix(.83,1.03,head)};
+    const Vec3 shoulder{0,bodyY+.15,.48},headCenter{0,mix(bodyY+.64,.29,head)+feeding,mix(.83,1.03,head)};
     tube(shoulder,headCenter,.18,.12,coat,6);
     ball(headCenter,{.13,.18,.26},coat,simple ? 6 : 8);
     const Vec3 snout=headCenter+Vec3{0,-.065-.055*head,.24};

@@ -47,10 +47,12 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
 #include "landscape_tests.hpp"
 #include "fauna_tests.hpp"
 #include "snow_tests.hpp"
+#include "biome_tests.hpp"
 void registerTests() {
     registerLandscapeTests();
     registerFaunaTests();
     registerSnowTests();
+    registerBiomeTests();
     test("detail","CPU terrain snapshots preserve coordinates and bound flight detail",[] {
         World w;const auto p=w.findLand();Hydrology water(w,p);const double height=w.surface(p)+1.75;
         const auto fine=makeTerrainMesh(w,water,p,height,79*86400),fast=makeTerrainMesh(w,water,p,height,79*86400,64);
@@ -705,7 +707,7 @@ void registerTests() {
             if(t.aquatic) {if(freshwaterPlant(static_cast<Species>(i))) ++fresh;else ++marine;}
             if(t.woody) ++woody;
         }
-        require(marine==3 && fresh==4 && woody==8,"Marine, freshwater and woody archetypes");
+        require(marine==3 && fresh==4 && woody==16,"Marine, freshwater and woody archetypes");
         require(plantTraits(Species::Oak).maturityDays>plantTraits(Species::MeadowGrass).maturityDays*50,"Trees take years, herbs months");
     });
     test("flora","Growth is continuous bounded and follows its analytic size curve",[] {
@@ -1100,7 +1102,7 @@ void registerTests() {
         World w; int land=0,sea=0;
         for(int i=0;i<5000;++i) {
             const auto h=w.elevation(point(i,5000));
-            require(std::isfinite(h) && h>-6000 && h<8000,"Terrestrial terrain range");
+            require(std::isfinite(h) && h>-6000 && h<9000,"Terrestrial terrain range (including high massifs)");
             if(h>0) ++land; else ++sea;
         }
         require(land>150 && sea>150,"Both land and ocean exist");

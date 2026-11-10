@@ -27,7 +27,7 @@ SoundScene soundScene(const World& world,const Simulation& simulation,const Expl
     s.wind=clamp(speed/45,0.0,1.0);s.windPan=speed>0 ? clamp(-dot(wind,explorer.right())/speed,-1.0,1.0) : 0;
     s.rain=clamp(std::sqrt((air.rainRate*3600*(1-snow.fraction)+simulation.rainExperiment())/80),0.0,1.0);
     if(world.modules().enabled(Module::SurfaceDetail) && world.modules().enabled(Module::Biomes) && !climate.ocean) {
-        const double vegetation=(climate.biome==Biome::Forest || climate.biome==Biome::Rainforest) ? 1 :
+        const double vegetation=forestBiome(climate.biome) ? 1 :
             (climate.biome==Biome::Grassland ? .3 : (climate.biome==Biome::Tundra ? .05 : 0));
         s.rustle=vegetation*clamp(speed/14,0.0,1.0);
     }

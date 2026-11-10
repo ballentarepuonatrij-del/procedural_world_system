@@ -42,7 +42,7 @@ Landmark findGrove(const World& world) {
     for(int i=0;i<768;++i) {
         const auto p=direction(std::asin(1-2*(i+.5)/768),i*pi*(3-std::sqrt(5.0))+randomUnit(world.config().seed)*tau);
         const auto s=world.climatology(p);
-        if(s.ocean || (s.biome!=Biome::Forest && s.biome!=Biome::Rainforest) || s.temperature<279 || s.temperature>305) continue;
+        if(s.ocean || !forestBiome(s.biome) || s.temperature<279 || s.temperature>305) continue;
         const double score=length(p-home)+std::abs(s.temperature-289)*.10;
         candidates.emplace_back(score,p);
     }
@@ -58,12 +58,47 @@ Landmark findGrove(const World& world) {
     }
     return {home,home,Landform::Lowland};
 }
+Landmark findForest(const World& world,Biome biome,double seconds) {
+    if(!forestBiome(biome) || !world.modules().enabled(Module::Biomes) || !world.modules().enabled(Module::SurfaceDetail))
+        throw std::invalid_argument("Enable Biomes and Surface detail to visit a forest");
+    const auto home=world.findLand();std::vector<std::pair<double,Vec3>> candidates;
+    for(int i=0;i<3072;++i) {
+        const auto p=direction(std::asin(1-2*(i+.5)/3072),i*pi*(3-std::sqrt(5.)));
+        const auto s=world.climatology(p);if(s.biome!=biome || s.elevation<world.config().seaLevel+20 || s.elevation>2500) continue;
+        const double slope=std::abs(world.elevation(normalized(p+east(p)*(50/world.config().radius)))-s.elevation)/50;
+        if(slope>.3) continue;
+        const double seasonal=world.sample(p,seconds).temperature;
+        const double temperateLatitude=biome==Biome::TemperateRainforest ? std::max(0.,30-std::abs(degrees(latitude(p))))*.2 : 0;
+        candidates.emplace_back(length(p-home)+slope*4+.15*std::abs(seasonal-292)+temperateLatitude,p);
+    }
+    std::sort(candidates.begin(),candidates.end(),[](const auto& a,const auto& b){return a.first<b.first;});
+    // Prefer a giant canopy, but a seed with younger/sparser tropical islands
+    // must still offer a route into its actual forest habitat.
+    for(int pass=0;pass<2;++pass) for(std::size_t i=0;i<std::min<std::size_t>(32,candidates.size());++i) {
+        const auto trees=surfaceObjects(world,candidates[i].second,100,false);const SurfaceObject* target=nullptr;
+        for(const auto& o:trees) if(o.kind==DetailKind::Tree && (!target || o.height>target->height)) target=&o;
+        if(!target || target->height<(pass==0 ? biome==Biome::Rainforest ? 45 : biome==Biome::TemperateRainforest ? 50 : 25 : 25)) continue;
+        for(int ray=0;ray<24;++ray) {
+            const auto axis=east(target->up)*std::cos(tau*ray/24)+north(target->up)*std::sin(tau*ray/24);
+            const double range=std::max(25.,target->height*.65);
+            const auto p=normalized(target->up+axis*(range/world.config().radius));
+            const auto h=world.climatology(p);if(h.biome!=biome || h.freshwater || std::abs(h.elevation-target->elevation)>range*.3) continue;
+            bool clear=true;for(const auto& tree:trees) if(length(tree.up-p)*world.config().radius<tree.collisionRadius()+1) {clear=false;break;}
+            if(clear && !world.caveSite(p)) return {p,target->up,h.landform};
+        }
+    }
+    throw std::runtime_error("No accessible mature forest of this type was found");
+}
 double SurfaceObject::collisionRadius() const {
-    if(kind==DetailKind::Tree) return height*0.025;
+    if(kind==DetailKind::Tree) return height*(species==Species::Redwood || species==Species::Kapok || species==Species::StranglerFig ? .033 : species==Species::Palm ? .014 : .025);
     return kind==DetailKind::Rock ? radius*0.8 : 0;
 }
 double SurfaceObject::collisionHeight() const {
     return kind==DetailKind::Tree ? height*0.65 : height;
+}
+unsigned SurfaceObject::lianas() const {
+    if(!tropicalCanopy(species) || height<12 || plant.stage==GrowthStage::Dead) return 0;
+    return species==Species::StranglerFig ? 5U : randomUnit(id+1901)<.75 ? 2U+static_cast<unsigned>(3*randomUnit(id+1902)) : 0U;
 }
 SurfaceObject grownObject(SurfaceObject object,const Flora* flora) {
     if(object.species==Species::None) return object;
@@ -89,9 +124,10 @@ std::vector<SurfaceObject> surfaceSites(const World& world,Vec3 center,double ra
     const auto seed=world.config().seed;
     const Noise patches(seed^0x7ace1359ULL);
     constexpr std::array<Vec3,6> faces{{{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}}};
-    for(unsigned layer=0;layer<(groundCover ? 2U : 1U);++layer) {
-        const double reach=layer==0 ? radius : std::min(radius,80.0);
-        const double cell=layer==0 ? 24.0 : 5.0;
+    for(unsigned layer=0;layer<3;++layer) {
+        if((layer==1 && !groundCover) || (layer==2 && !world.modules().enabled(Module::Biomes))) continue;
+        const double reach=layer==1 ? std::min(radius,80.0) : radius;
+        const double cell=layer==0 ? 24.0 : layer==1 ? 5.0 : 16.0;
         for(std::size_t faceIndex=0;faceIndex<faces.size();++faceIndex) {
             const Vec3 face=faces[faceIndex];
             const double facing=dot(center,face);
@@ -119,6 +155,7 @@ std::vector<SurfaceObject> surfaceSites(const World& world,Vec3 center,double ra
                 const double area=std::pow(dot(p,face),3);
                 if(randomUnit(id+2)>area) continue;
                 const auto habitat=world.climatology(p);
+                if(layer==2 && !forestBiome(habitat.biome)) continue;
                 if(world.modules().enabled(Module::Rivers) && world.waterNetwork()->sample(p).wet) continue;
                 const double depth=habitat.ocean ? world.config().seaLevel-habitat.elevation : habitat.waterDepth;
                 if(habitat.ocean && (depth<.5 || depth>30)) continue;
@@ -130,20 +167,23 @@ std::vector<SurfaceObject> surfaceSites(const World& world,Vec3 center,double ra
                 const bool plants=world.modules().enabled(Module::Biomes) &&
                     habitat.temperature>267 && habitat.temperature<315 &&
                     h>world.config().seaLevel+2 && habitat.precipitation>180 && slope<0.65;
-                const double patch=clamp(0.55+0.65*patches.value(p*(planetRadius/95))+.25*habitat.wetness,0.08,1.0);
+                const bool woods=forestBiome(habitat.biome);
+                const double patch=clamp((woods ? .85 : .55)+.65*patches.value(p*(planetRadius/95))+.25*habitat.wetness,woods ? .60 : .08,1.0);
                 const double choice=randomUnit(id+3);
                 SurfaceObject object{id,DetailKind::Rock,p,h,0,0,tau*randomUnit(id+4),false,Species::None,0,{},{},{}};
                 object.waterDepth=depth;
                 if(habitat.ocean || (habitat.freshwater && (layer==1 || depth>.35))) {
                     if(layer==0 || !world.modules().enabled(Module::Biomes) || choice>patch*.85) continue;
                     object.kind=DetailKind::Grass;
+                } else if(layer==2) {
+                    if(!plants || choice>patch*.90) continue;
+                    object.kind=DetailKind::Tree;
                 } else if(layer==1) {
                     if(!plants || choice>patch*0.85) continue;
                     object.kind=habitat.biome==Biome::Desert || choice<0.06 ? DetailKind::Shrub : DetailKind::Grass;
                     object.height=object.kind==DetailKind::Shrub ? 0.35+0.65*randomUnit(id+5) : 0.18+0.40*randomUnit(id+5);
                     object.radius=object.height*0.65;
                 } else {
-                    const bool woods=habitat.biome==Biome::Forest || habitat.biome==Biome::Rainforest;
                     const double trees=woods ? 0.82 : habitat.wetness>.4 ? .42 : (habitat.biome==Biome::Grassland ? 0.12 : 0.0);
                     if(plants && choice<trees*patch) {
                         object.kind=DetailKind::Tree;
@@ -165,25 +205,31 @@ std::vector<SurfaceObject> surfaceSites(const World& world,Vec3 center,double ra
                     for(unsigned i=1;i<speciesCount;++i) {
                         const auto species=static_cast<Species>(i);
                         const auto& traits=plantTraits(species);
-                        const bool tree=traits.woody && traits.height>5;
+                        const bool tree=treeSpecies(species);
                         const bool shrub=species==Species::Juniper || species==Species::Heather;
                         const bool matches=habitat.ocean ? traits.aquatic :
                             (object.kind==DetailKind::Tree ? tree : (object.kind==DetailKind::Shrub ? shrub : (!tree && !shrub && (!traits.aquatic || freshwaterPlant(species)))));
-                        if(matches) weights[i]=plantSuitability(species,habitat,slope,rockiness,world.config().seaLevel);
+                        if(matches && !(layer==2 && (species==Species::Redwood || species==Species::Kapok)))
+                            weights[i]=plantSuitability(species,habitat,slope,rockiness,world.config().seaLevel);
+                        if(woods && layer==1 && species>=Species::Daisy && species<=Species::Buttercup) weights[i]*=.15;
+                        if(habitat.biome==Biome::Rainforest && (species==Species::Oak || species==Species::Acacia || species==Species::Juniper ||
+                            species==Species::Beech || species==Species::MeadowGrass)) weights[i]*=.12;
                         total+=weights[i];
                     }
                     if(total<=0) continue;
                     double pick=randomUnit(id+149)*total;
                     for(unsigned i=1;i<speciesCount;++i) if(weights[i]>0) {
                         pick-=weights[i];
-                        object.species=static_cast<Species>(i);object.suitability=weights[i];
+                        object.species=static_cast<Species>(i);
                         if(pick<=0) break;
                     }
+                    // Relative abundance is separate from an individual's growth potential.
+                    object.suitability=plantSuitability(object.species,habitat,slope,rockiness,world.config().seaLevel);
                     const auto& traits=plantTraits(object.species);
                     object.height=traits.height*(.72+.40*randomUnit(id+5));
                     if((traits.aquatic && !freshwaterPlant(object.species)) || object.species==Species::Pondweed) object.height=std::min(object.height,depth*.85);
                     object.radius=object.height*traits.widthRatio;
-                    object.evergreen=object.species==Species::Pine;
+                    object.evergreen=coniferSpecies(object.species);
                     object.flowerCycle=flowerCycle(object.species,id,world.config(),p,habitat);
                 }
                 result.push_back(object);

@@ -130,6 +130,7 @@ Renderer::Renderer(HDC dc) {
     glTexImage2D(GL_TEXTURE_2D,0,GL_ALPHA,32,32,0,GL_ALPHA,GL_UNSIGNED_BYTE,snowPixels.data());
 }
 Renderer::~Renderer() {
+    discardSunUpload();if(sunChunks_) glDeleteLists(sunChunks_,sunChunksCount_);
     discardUpload();if(terrainChunks_) glDeleteLists(terrainChunks_,terrainChunksCount_);
     glDeleteLists(terrain_,1); glDeleteLists(globe_,1);
     glDeleteLists(terrainGrid_,1);
@@ -166,7 +167,7 @@ void Renderer::uploadTerrain(TerrainMesh mesh) {
     for(const auto& v:mesh.grid) {glColor4f(.20f,.82f,1.f,v.alpha);glVertex3d(v.position.x,v.position.y,v.position.z);}
     glEnd();glEndList();glNewList(shadows_,GL_COMPILE);glEndList();
     if(terrainChunks_) glDeleteLists(terrainChunks_,terrainChunksCount_);
-    terrainChunks_=0;terrainChunksCount_=0;preparedFlora_.reset();preparedShadow_=false;
+    terrainChunks_=0;terrainChunksCount_=0;
     adoptTerrain(std::move(mesh));
 }
 void Renderer::adoptTerrain(TerrainMesh mesh) {
@@ -186,14 +187,14 @@ void Renderer::beginUpload(SceneMesh scene) {
     discardUpload();MeshUpload upload;upload.scene=std::move(scene);upload.epoch=terrainEpoch_;
     constexpr std::size_t chunk=3072;
     const auto& mesh=upload.scene.terrain;
-    const std::array sizes{mesh.terrain.size(),mesh.caves.size(),mesh.grid.size(),upload.scene.shadows.size()*3};
+    const std::array sizes{mesh.terrain.size(),mesh.caves.size(),mesh.grid.size(),upload.scene.shadows.size()*3,upload.scene.plants.vertices.size()};
     std::size_t count=0;
     for(std::size_t i=0;i<sizes.size();++i) {upload.chunks[i]=(sizes[i]+chunk-1)/chunk;count+=upload.chunks[i];}
     upload.lists=glGenLists(static_cast<GLsizei>(count));
     if(!upload.lists) throw std::runtime_error("Cannot allocate streamed terrain display lists");
     meshUpload_=std::move(upload);
 }
-void Renderer::advanceUpload(const Flora& flora,Vec3 sunlight) {
+void Renderer::advanceUpload(const Flora& flora) {
     if(!meshUpload_) return;
     if(meshUpload_->epoch!=terrainEpoch_) {discardUpload();++terrainDiscarded_;return;}
     DrawTimer timer{timings_.terrain};const auto start=std::chrono::steady_clock::now();
@@ -204,11 +205,11 @@ void Renderer::advanceUpload(const Flora& flora,Vec3 sunlight) {
     // uploaded mesh, and budget driver work independently of CPU generation.
     do {
         std::size_t section=0,part=upload.next;
-        while(section<3 && part>=upload.chunks[section]) part-=upload.chunks[section++];
+        while(section<4 && part>=upload.chunks[section]) part-=upload.chunks[section++];
         const auto first=part*chunk;
         glNewList(upload.lists+static_cast<GLuint>(upload.next),GL_COMPILE);glBegin(section==2 ? GL_LINES : GL_TRIANGLES);
-        if(section<2) {
-            const auto& vertices=section==0 ? mesh.terrain : mesh.caves;
+        if(section<2 || section==4) {
+            const auto& vertices=section==0 ? mesh.terrain : section==1 ? mesh.caves : scene.plants.vertices;
             for(std::size_t i=first;i<std::min(first+chunk,vertices.size());++i) {const auto& v=vertices[i];
                 glNormal3d(v.normal.x,v.normal.y,v.normal.z);glColor3f(v.color.r,v.color.g,v.color.b);
                 glTexCoord2d(v.u,v.v);glVertex3d(v.position.x,v.position.y,v.position.z);
@@ -223,7 +224,7 @@ void Renderer::advanceUpload(const Flora& flora,Vec3 sunlight) {
         glEnd();glEndList();++upload.next;
     } while(upload.next<count && std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()<3);
     if(upload.next<count) return;
-    const std::array<GLuint,4> parents{terrain_,caves_,terrainGrid_,shadows_};std::size_t offset=0;
+    const std::array<GLuint,5> parents{terrain_,caves_,terrainGrid_,shadows_,objects_};std::size_t offset=0;
     for(std::size_t section=0;section<parents.size();++section) {
         glNewList(parents[section],GL_COMPILE);
         for(std::size_t i=0;i<upload.chunks[section];++i) glCallList(upload.lists+static_cast<GLuint>(offset+i));
@@ -231,46 +232,34 @@ void Renderer::advanceUpload(const Flora& flora,Vec3 sunlight) {
     }
     if(terrainChunks_) glDeleteLists(terrainChunks_,terrainChunksCount_);
     terrainChunks_=upload.lists;terrainChunksCount_=static_cast<GLsizei>(count);upload.lists=0;
-    const Vec3 localSun{dot(sunlight,mesh.east),dot(sunlight,mesh.anchor),dot(sunlight,mesh.north)};
     const bool sameFlora=std::abs(flora.days()-scene.flora.days())<.25 &&
         std::abs(flora.calendarDay()-scene.flora.calendarDay())<.25 && flora.young()==scene.flora.young();
-    preparedFlora_=sameFlora ? std::optional<Flora>{scene.flora} : std::nullopt;
-    preparedShadow_=sameFlora && scene.hasShadows && length(localSun-scene.sun)<=radians(.02);
     shadowSun_=scene.sun;shadowCount_=scene.shadows.size();
-    adoptTerrain(std::move(mesh));meshUpload_.reset();++terrainUploads_;
+    // A changed sun direction can be refreshed asynchronously after adopting
+    // geometrically matching shadows. Never stall adoption for the solar clock.
+    const bool validShadow=sameFlora && scene.hasShadows;
+    adoptTerrain(std::move(mesh));adoptObjects(std::move(scene.plants),scene.flora);shadowDirty_=!validShadow;
+    meshUpload_.reset();++terrainUploads_;
 }
 void Renderer::buildObjects(const World& world,const Flora& flora) {
     DrawTimer timer{timings_.plants};
-    objectCasters_.clear();shadowDirty_=true;
+    auto mesh=makePlantMesh(objectSites_,anchor_,east_,north_,world.config().radius,flora);
     glNewList(objects_,GL_COMPILE);glBegin(GL_TRIANGLES);
-    detailCount_=0;plantCount_=0;marineCount_=0;freshwaterCount_=0;plantHeightSum_=0;focusPlant_.reset();
-    floweringCount_=buddingCount_=seedHeadCount_=0;
-    std::array<bool,speciesCount> species{};double nearest=1e30;
-    const auto local=[&](Vec3 p) { return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)}; };
-    for(const auto& site:objectSites_) {
-        const auto object=grownObject(site.object,&flora);
-        if(object.height<.015) continue;
-        const double distance=length(object.up-anchor_)*world.config().radius;
-        const auto mesh=detailMesh(object,site.base,local(object.up),local(east(object.up)),distance>(object.kind==DetailKind::Grass || object.kind==DetailKind::Shrub ? 24 : 100));
-        for(const auto& face:mesh) {
-            const auto& t=face.triangle;const auto n=normalized(cross(t.b-t.a,t.c-t.a));
-            const double cover=smoothstep(0.,.08,site.snowDepth)*smoothstep(.15,.6,dot(n,local(object.up)));
-            glNormal3d(n.x,n.y,n.z);glColor3f(static_cast<float>(mix(face.color.r,.88,cover)),static_cast<float>(mix(face.color.g,.93,cover)),static_cast<float>(mix(face.color.b,.97,cover)));
-            for(const auto v:{t.a,t.b,t.c}) glVertex3d(v.x,v.y,v.z);
-            if(distance<=240 && object.castsSurfaceShadow()) objectCasters_.push_back(t);
-        }
-        ++detailCount_;
-        if(object.species!=Species::None) {
-            ++plantCount_;species[static_cast<unsigned>(object.species)]=true;plantHeightSum_+=object.height;
-            if(plantTraits(object.species).aquatic) {if(freshwaterPlant(object.species)) ++freshwaterCount_;else ++marineCount_;}
-            if(object.flowers.bloom>.02) ++floweringCount_;
-            if(object.flowers.buds>.02) ++buddingCount_;
-            if(object.flowers.seeds>.02) ++seedHeadCount_;
-            if(distance<nearest) { nearest=distance;focusPlant_=object; }
-        }
+    for(const auto& v:mesh.vertices) {
+        glNormal3d(v.normal.x,v.normal.y,v.normal.z);glColor3f(v.color.r,v.color.g,v.color.b);
+        glVertex3d(v.position.x,v.position.y,v.position.z);
     }
-    glEnd();glEndList();
-    plantSpeciesCount_=static_cast<std::size_t>(std::count(species.begin(),species.end(),true));
+    glEnd();glEndList();adoptObjects(std::move(mesh),flora);
+}
+void Renderer::adoptObjects(PlantMesh mesh,const Flora& flora) {
+    ++shadowRevision_;discardSunUpload();
+    if(sunChunks_) glDeleteLists(sunChunks_,sunChunksCount_);
+    sunChunks_=0;sunChunksCount_=0;
+    objectCasters_=std::move(mesh.casters);shadowDirty_=true;focusPlant_=mesh.focus;
+    detailCount_=mesh.objects;plantCount_=mesh.plants;marineCount_=mesh.marine;freshwaterCount_=mesh.freshwater;
+    plantHeightSum_=mesh.heightSum;plantSpeciesCount_=mesh.species;
+    floweringCount_=mesh.flowering;buddingCount_=mesh.budding;seedHeadCount_=mesh.seedHeads;
+    treeCount_=mesh.trees;lianaHosts_=mesh.lianaHosts;maximumPlantHeight_=mesh.maximumHeight;
     lastFloraDay_=flora.days();lastFloraCalendar_=flora.calendarDay();lastYoung_=flora.young();
 }
 void Renderer::buildGlobe(const World& world,double seconds) {
@@ -381,15 +370,59 @@ void Renderer::emitFauna() {
     }
     glEnd();
 }
+void Renderer::discardSunUpload() {
+    if(sunUpload_ && sunUpload_->lists) glDeleteLists(sunUpload_->lists,static_cast<GLsizei>(sunUpload_->chunks));
+    sunUpload_.reset();
+}
 void Renderer::drawShadows(Vec3 sun,bool textured) {
     DrawTimer timer{timings_.shadows};
-    if(shadowDirty_ || length(sun-shadowSun_)>radians(.02)) {
+    constexpr std::size_t chunk=3072;
+    if(sunJob_.valid() && sunJob_.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+        auto result=sunJob_.get();
+        if(result.revision==shadowRevision_ && !shadowDirty_) {
+            discardSunUpload();SunUpload upload;upload.shadow=std::move(result);
+            upload.chunks=std::max<std::size_t>(1,(upload.shadow.volume.size()*3+chunk-1)/chunk);
+            upload.lists=glGenLists(static_cast<GLsizei>(upload.chunks));
+            if(!upload.lists) throw std::runtime_error("Cannot allocate streamed sunlight shadows");
+            sunUpload_=std::move(upload);
+        }
+    }
+    if(shadowDirty_) {
         DrawTimer buildTimer{timings_.shadowBuild};
+        discardSunUpload();
         std::vector<Triangle> casters=terrainCasters_;casters.insert(casters.end(),objectCasters_.begin(),objectCasters_.end());
         const auto volume=shadowVolume(casters,sun);shadowCount_=volume.size();
         glNewList(shadows_,GL_COMPILE);glBegin(GL_TRIANGLES);
         for(const auto& t:volume) for(const auto p:{t.a,t.b,t.c}) glVertex3d(p.x,p.y,p.z);
         glEnd();glEndList();shadowSun_=sun;shadowDirty_=false;
+    } else {
+        if(sunUpload_) {
+            DrawTimer buildTimer{timings_.shadowBuild};const auto start=std::chrono::steady_clock::now();auto& upload=*sunUpload_;
+            // Each list closes within the frame; old complete shadows stay live.
+            do {
+                glNewList(upload.lists+static_cast<GLuint>(upload.next),GL_COMPILE);glBegin(GL_TRIANGLES);
+                const auto& volume=upload.shadow.volume;const auto first=upload.next*chunk;
+                for(std::size_t i=first;i<std::min(first+chunk,volume.size()*3);++i) {
+                    const auto& t=volume[i/3];const auto p=i%3==0 ? t.a : i%3==1 ? t.b : t.c;glVertex3d(p.x,p.y,p.z);
+                }
+                glEnd();glEndList();++upload.next;
+            } while(upload.next<upload.chunks && std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()<3);
+            if(upload.next==upload.chunks) {
+                glNewList(shadows_,GL_COMPILE);
+                for(std::size_t i=0;i<upload.chunks;++i) glCallList(upload.lists+static_cast<GLuint>(i));
+                glEndList();if(sunChunks_) glDeleteLists(sunChunks_,sunChunksCount_);
+                sunChunks_=upload.lists;sunChunksCount_=static_cast<GLsizei>(upload.chunks);upload.lists=0;
+                shadowSun_=upload.shadow.sun;shadowCount_=upload.shadow.volume.size();sunUpload_.reset();++shadowUploads_;
+            }
+        }
+        if(!sunJob_.valid() && !sunUpload_ && length(sun-shadowSun_)>radians(.02)) {
+            DrawTimer buildTimer{timings_.shadowBuild};
+            auto casters=terrainCasters_;casters.insert(casters.end(),objectCasters_.begin(),objectCasters_.end());
+            ++shadowJobs_;
+            sunJob_=std::async(std::launch::async,[casters=std::move(casters),sun,revision=shadowRevision_] {
+                return SunShadow{sun,shadowVolume(casters,sun),revision};
+            });
+        }
     }
     if(!shadowCount_ && deerShadows_.empty()) return;
     shadowsUsed_=true;
@@ -489,7 +522,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
             if(terrainJobEpoch_==terrainEpoch_) beginUpload(std::move(mesh));
             else ++terrainDiscarded_;
         }
-        advanceUpload(simulation.flora,sun.sunDirection);
+        advanceUpload(simulation.flora);
         if(dirty_) buildTerrain(world,explorer,water,view.seconds);
         else if(!terrainJob_.valid() && !meshUpload_ && (waterRevision_!=water.revision() || snowRevision_!=water.snow.revision() || (water.enabled() && water.steps()-waterSteps_>=150) ||
            length(explorer.up()-anchor_)*world.config().radius>std::max(12.0,terrainStep_*4) ||
@@ -505,23 +538,17 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
                 SceneMesh scene;scene.terrain=makeTerrainMesh(worldCopy,waterCopy,observer,altitude,seconds,step);scene.flora=flora;
                 const auto& mesh=scene.terrain;const auto local=[&](Vec3 p){return Vec3{dot(p,mesh.east),dot(p,mesh.anchor),dot(p,mesh.north)};};
                 scene.sun=local(sunlight);scene.hasShadows=shadows;
+                scene.plants=makePlantMesh(mesh.plants,mesh.anchor,mesh.east,mesh.north,worldCopy.config().radius,flora);
                 if(shadows) {
                     auto casters=mesh.casters;
-                    for(const auto& site:mesh.plants) {
-                        const auto object=grownObject(site.object,&flora);const double distance=length(object.up-mesh.anchor)*worldCopy.config().radius;
-                        if(object.height<.015 || distance>240 || !object.castsSurfaceShadow()) continue;
-                        const bool simple=distance>(object.kind==DetailKind::Grass || object.kind==DetailKind::Shrub ? 24 : 100);
-                        for(const auto& face:detailMesh(object,site.base,local(object.up),local(east(object.up)),simple)) casters.push_back(face.triangle);
-                    }
+                    casters.insert(casters.end(),scene.plants.casters.begin(),scene.plants.casters.end());
                     scene.shadows=shadowVolume(casters,scene.sun);
                 }
                 return scene;
             });
         }
         if(std::abs(simulation.flora.days()-lastFloraDay_)>=.25 || std::abs(simulation.flora.calendarDay()-lastFloraCalendar_)>=.25 || simulation.flora.young()!=lastYoung_) {
-            buildObjects(world,preparedFlora_ ? *preparedFlora_ : simulation.flora);
-            if(preparedShadow_) shadowDirty_=false;
-            preparedFlora_.reset();preparedShadow_=false;
+            buildObjects(world,simulation.flora);
         }
         perspective(radians(72),static_cast<double>(view.width)/view.height,explorer.underground() || submerged ? 0.08 : 0.25,400000);
         const auto local=[&](Vec3 p) { return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)}; };
@@ -1123,7 +1150,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(w-340,h-164,"CTRL down      WHEEL flight speed",white);
         text(w-340,h-143,"+/- time  P pause  CTRL+S seed",white);
         text(w-340,h-122,"ESC settings / HOME landing",white);
-        text(w-340,h-101,"F7 rivers  F8 meadow  X grove",muted);
+        text(w-340,h-101,"F7 rivers  X forests  J mountains",muted);
         text(w-340,h-80,"F9 lakes F10 coast F11 deer F12 snow",mint);
     }
     if(!view.globe) {

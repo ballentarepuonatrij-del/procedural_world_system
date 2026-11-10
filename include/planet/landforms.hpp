@@ -5,7 +5,7 @@
 #include <string_view>
 
 namespace planet {
-enum class Landform { Lowland, Mountains, Plateau, Canyon, Gorge, Karst, Wetland, Pond, Lake, Bay, Cliff, Spit, Grotto };
+enum class Landform { Lowland, Mountains, Plateau, Canyon, Gorge, Karst, Wetland, Pond, Lake, Bay, Cliff, Spit, Grotto, MountainValley };
 std::string_view landformName(Landform type);
 std::optional<Landform> landmarkType(std::string_view name);
 struct Relief {

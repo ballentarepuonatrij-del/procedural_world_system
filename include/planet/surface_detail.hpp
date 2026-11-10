@@ -18,6 +18,7 @@ struct SurfaceObject {
     double waterDepth=0; // reference depth at the fixed root; floating leaves use this offset
     double collisionRadius() const;
     double collisionHeight() const;
+    unsigned lianas() const;
     bool castsSurfaceShadow() const {return !plantTraits(species).aquatic || height>waterDepth+.02;}
 };
 // A finite spherical neighbourhood. Coordinates, identity and shape depend on
@@ -30,5 +31,6 @@ std::vector<SurfaceObject> surfaceObjects(const World& world, Vec3 center,
 std::vector<SurfaceObject> surfaceSites(const World& world,Vec3 center,double radius,bool groundCover=true);
 SurfaceObject grownObject(SurfaceObject site,const Flora* flora=nullptr);
 Landmark findGrove(const World& world);
+Landmark findForest(const World& world,Biome biome,double seconds=79*86400);
 Landmark findMeadow(const World& world);
 } // namespace planet

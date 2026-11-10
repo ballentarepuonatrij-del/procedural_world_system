@@ -10,6 +10,7 @@ std::optional<Landform> landmarkType(std::string_view name) {
     if(name=="cave") return Landform::Karst;
     if(name=="canyon") return Landform::Canyon;
     if(name=="mountains") return Landform::Mountains;
+    if(name=="valley") return Landform::MountainValley;
     if(name=="gorge") return Landform::Gorge;
     if(name=="wetland" || name=="swamp") return Landform::Wetland;
     if(name=="pond") return Landform::Pond;
@@ -21,7 +22,7 @@ std::optional<Landform> landmarkType(std::string_view name) {
     return {};
 }
 std::string_view landformName(Landform type) {
-    constexpr std::array<std::string_view,13> names{"Lowland","Mountains","Plateau","Canyon","Gorge","Karst caves","Wetland","Pond","Lake","Bay","Coastal cliff","Sand spit","Sea grotto"};
+    constexpr std::array<std::string_view,14> names{"Lowland","Mountains","Plateau","Canyon","Gorge","Karst caves","Wetland","Pond","Lake","Bay","Coastal cliff","Sand spit","Sea grotto","Mountain valley"};
     return names.at(static_cast<std::size_t>(type));
 }
 Relief shapeLandforms(Vec3 p,double radius,double seaLevel,std::uint64_t seed,double height,double mountainWeight) {
@@ -48,6 +49,22 @@ Relief shapeLandforms(Vec3 p,double radius,double seaLevel,std::uint64_t seed,do
     if(plateau>0.45) result.type=Landform::Plateau;
     if(canyon>0.25) result.type=Landform::Canyon;
     if(gorge>0.25 && canyon<0.25) result.type=Landform::Gorge;
+    // Broad ranges follow the existing convergent plate uplift. Metric folds
+    // form kilometre-scale peaks and broad, flat-bottomed glacial-style valleys;
+    // this is a continuous geometric landscape, not simulated ice erosion.
+    const double massif=smoothstep(.25,.85,mountainWeight)*dry;
+    if(massif>0) {
+        const double primary=1-std::abs(std::sin((m.x*.57+m.y*.33+m.z*.75)/23000+1.7*bend));
+        const double crossRidge=1-std::abs(std::sin((m.x*.74-m.y*.61+m.z*.28)/6200+bend));
+        const double valleyDistance=std::abs(std::sin((m.x*.25+m.y*.81-m.z*.53)/14500+1.4*bend));
+        const double valley=1-smoothstep(.055,.38,valleyDistance);
+        const double lift=massif*(1250+2400*std::pow(primary,1.5)*(.35+.65*crossRidge)+850*ridges);
+        const double cut=massif*1650*valley;
+        result.elevation+=lift-cut;result.incision+=cut;
+        if(result.elevation>seaLevel+7000) result.elevation=seaLevel+7000+1800*std::tanh((result.elevation-seaLevel-7000)/1800);
+        if(massif>.3) result.type=valley>.8 ? Landform::MountainValley : Landform::Mountains;
+        result.ruggedness=std::max(result.ruggedness,massif);
+    }
     return result;
 }
 CaveAddress caveAddress(Vec3 p,double radius,std::uint64_t seed,int offsetX,int offsetY) {
@@ -201,12 +218,19 @@ Landmark World::findLandmark(Landform type,Vec3 around) const {
         if(chosen) return {chosen->directionAt(0,-95),chosen->directionAt(0,40),Landform::Karst};
     }
     double best=-1e30; Vec3 target=around;
+    const auto grade=[&](Vec3 p,double h) {
+        double slope=0;
+        for(const auto axis:{east(p),-east(p),north(p),-north(p)})
+            slope=std::max(slope,std::abs(elevation(normalized(p+axis*(30/config_.radius)))-h)/30);
+        return slope;
+    };
     // High mountain belts can lie far inland from the lowland landing site.
-    const double surveyStep=type==Landform::Mountains ? 30000 : 2500;
+    const double surveyStep=type==Landform::Mountains || type==Landform::MountainValley ? 30000 : 2500;
     for(int y=-40;y<=40;++y) for(int x=-40;x<=40;++x) {
         const auto p=normalized(around+(east(around)*(x*surveyStep)+north(around)*(y*surveyStep))/config_.radius);
         const auto r=relief(p);
         if(r.type!=type || r.elevation<config_.seaLevel+50) continue;
+        if(type==Landform::MountainValley && grade(p,r.elevation)>.28) continue;
         double merit=r.incision*5-std::hypot(x,y)*12;
         if(type==Landform::Mountains) {
             double low=r.elevation;
@@ -220,28 +244,46 @@ Landmark World::findLandmark(Landform type,Vec3 around) const {
     // Resolve a local summit / channel bottom missed by the regional search.
     const Vec3 regional=target;
     double localBest=-1e30;
-    for(int y=-10;y<=10;++y) for(int x=-10;x<=10;++x) {
-        const auto p=normalized(regional+(east(regional)*(x*125)+north(regional)*(y*125))/config_.radius);
+    const int refinement=type==Landform::Mountains ? 30 : 10;
+    const double refinementStep=type==Landform::Mountains ? 500 : 125;
+    for(int y=-refinement;y<=refinement;++y) for(int x=-refinement;x<=refinement;++x) {
+        const auto p=normalized(regional+(east(regional)*(x*refinementStep)+north(regional)*(y*refinementStep))/config_.radius);
         const auto r=relief(p);
         if(r.type!=type || r.elevation<config_.seaLevel+50) continue;
+        if(type==Landform::MountainValley && grade(p,r.elevation)>.28) continue;
         const double merit=type==Landform::Mountains ? r.elevation : r.incision*5-r.elevation*0.1;
         if(merit>localBest) { localBest=merit; target=p; }
     }
     // Pick an exposed dry viewpoint, penalizing terrain that hides the feature.
     double score=-1e30; Vec3 position=target;
     const double targetHeight=elevation(target);
+    if(type==Landform::MountainValley) {
+        Vec3 summit=target;double high=-1e30;
+        for(int ring=1;ring<=4;++ring) for(int i=0;i<32;++i) {
+            const auto p=normalized(target+(east(target)*std::cos(tau*i/32)+north(target)*std::sin(tau*i/32))*(ring*1800/config_.radius));
+            const double h=elevation(p);double obstruction=0;
+            for(int j=1;j<24;++j) {
+                const double t=j/24.;const auto q=normalized(target*(1-t)+p*t);
+                obstruction=std::max(obstruction,elevation(q)-mix(targetHeight+1.75,h,t));
+            }
+            const double value=h-10*obstruction;
+            if(value>high) {high=value;summit=p;}
+        }
+        return {target,summit,type};
+    }
     for(int ring=0;ring<4;++ring) for(int i=0;i<32;++i) {
-        const double range=type==Landform::Mountains ? 1200+600*ring : 80+120*ring;
+        const double range=type==Landform::Mountains ? 2500+1400*ring : 80+120*ring;
         const auto p=normalized(target+(east(target)*std::cos(tau*i/32)+north(target)*std::sin(tau*i/32))*(range/config_.radius));
         const double h=elevation(p);
         if(h<=config_.seaLevel+10) continue;
+        if(type==Landform::Mountains && grade(p,h)>.4) continue;
         double obstruction=0;
         for(int j=1;j<32;++j) {
             const double t=j/32.0;
             const auto q=normalized(p*(1-t)+target*t);
             obstruction=std::max(obstruction,elevation(q)-mix(h+1.75,targetHeight+8,t));
         }
-        const double value=(type==Landform::Mountains ? -std::abs(h-targetHeight+650) : h-targetHeight)-12*obstruction;
+        const double value=(type==Landform::Mountains ? -std::abs(h-targetHeight+1500) : h-targetHeight)-12*obstruction;
         if(h>config_.seaLevel+10 && value>score) { score=value; position=p; }
     }
     return {position,target,type};

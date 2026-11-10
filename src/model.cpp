@@ -116,8 +116,16 @@ Atmosphere standardAtmosphere(double altitude, double seaTemperature, double sur
 }
 
 std::string_view biomeName(Biome b) {
-    constexpr std::array<std::string_view, 11> names{"Ocean", "Ice", "Tundra", "Desert", "Grassland", "Forest", "Rainforest", "Rock", "Wetland", "Freshwater", "Beach"};
+    constexpr std::array<std::string_view, 14> names{"Ocean", "Ice", "Tundra", "Desert", "Grassland", "Forest", "Rainforest", "Rock", "Wetland", "Freshwater", "Beach", "Boreal forest", "Temperate rainforest", "Alpine meadow"};
     return names.at(static_cast<std::size_t>(b));
+}
+bool forestBiome(Biome b) {return b==Biome::Forest || b==Biome::Rainforest || b==Biome::BorealForest || b==Biome::TemperateRainforest;}
+std::optional<Biome> forestType(std::string_view name) {
+    if(name=="jungle") return Biome::Rainforest;
+    if(name=="temperate") return Biome::TemperateRainforest;
+    if(name=="taiga") return Biome::BorealForest;
+    if(name=="mixed") return Biome::Forest;
+    return {};
 }
 World::World(Config config) : config_(config), noise_(config.seed) {
     if (!std::isfinite(config.radius) || config.radius < 100000 || config.radius > 1e8 ||
@@ -231,7 +239,7 @@ Sample World::evaluate(Vec3 p, double seconds, bool annualMean) const {
     const double annual = annualInsolation(lat);
     const auto sun = orbit(config_,seconds);
     s.insolation = annualMean ? annual : sun.irradiance * std::max(0.0,dot(p,sun.sunDirection));
-    double seaTemperature = 288.15;
+    double seaTemperature = 288.15, meanSeaTemperature=288.15;
     if (modules_.enabled(Module::Climate)) {
         const double transported = 0.65*annual + 0.35*config_.solarConstant/4;
         const double equilibrium = std::pow(transported*(1-config_.albedo)/(stefanBoltzmann*config_.emissivity),0.25);
@@ -242,6 +250,7 @@ Sample World::evaluate(Vec3 p, double seconds, bool annualMean) const {
         const double damping = feedback/std::hypot(feedback,omega*heatCapacity);
         const double anomaly = (dailyInsolation(config_,lat,seconds-lag)-annual)*(1-config_.albedo)*damping/feedback;
         seaTemperature = clamp(equilibrium + (annualMean ? 0 : anomaly), 180.0, 340.0);
+        meanSeaTemperature=clamp(equilibrium,180.0,340.0);
     }
     if (modules_.enabled(Module::Atmosphere)) {
         const auto air = standardAtmosphere(height, seaTemperature, 101325, config_.radius, config_.gravity);
@@ -256,16 +265,22 @@ Sample World::evaluate(Vec3 p, double seconds, bool annualMean) const {
         const double westerlies = 1000*std::exp(-std::pow((latDegrees-52)/17,2));
         s.precipitation = std::max(0.0, (120+tropical+westerlies)*(0.75+0.5*noise_.value(p*18)));
     }
+    // Biomes describe the long-term habitat. Winter changes snow and weather,
+    // not a forest into tundra. Atmospheric lapse layers are linear in surface T.
+    const double biomeTemperature=s.temperature+meanSeaTemperature-seaTemperature;
     if (s.ocean) s.biome = Biome::Ocean;
     else if (modules_.enabled(Module::Biomes)) {
         if(s.wetness>.3) s.biome=terrain.type==Landform::Wetland || s.waterDepth<.08 ? Biome::Wetland : Biome::Freshwater;
         else if(s.freshwater) s.biome=Biome::Freshwater;
         else if(s.sand>.25) s.biome=Biome::Beach;
-        else if (s.temperature < 263.15) s.biome = Biome::Ice;
-        else if (s.temperature < 277.15) s.biome = Biome::Tundra;
+        else if (biomeTemperature < 263.15) s.biome = Biome::Ice;
+        else if (s.elevation>2000 && biomeTemperature<281.15 && s.precipitation>350) s.biome=Biome::AlpineMeadow;
+        else if (biomeTemperature < 277.15) s.biome = Biome::Tundra;
         else if (s.precipitation < 280) s.biome = Biome::Desert;
         else if (s.precipitation < 800) s.biome = Biome::Grassland;
-        else if (s.temperature > 295 && s.precipitation > 1700) s.biome = Biome::Rainforest;
+        else if (biomeTemperature > 294 && s.precipitation > 1550) s.biome = Biome::Rainforest;
+        else if (biomeTemperature<282.15) s.biome=Biome::BorealForest;
+        else if (biomeTemperature<295 && s.precipitation>1050) s.biome=Biome::TemperateRainforest;
         else s.biome = Biome::Forest;
     }
     return s;
@@ -279,6 +294,9 @@ Color World::color(const Sample& s) const {
         case Biome::Grassland: return {0.40f,0.45f,0.24f};
         case Biome::Forest: return {0.20f,0.33f,0.22f};
         case Biome::Rainforest: return {0.13f,0.29f,0.20f};
+        case Biome::BorealForest: return {.17f,.29f,.24f};
+        case Biome::TemperateRainforest: return {.14f,.30f,.20f};
+        case Biome::AlpineMeadow: return {.39f,.45f,.28f};
         case Biome::Wetland: return {.25f,.32f,.15f};
         case Biome::Freshwater: return {.16f,.29f,.24f};
         case Biome::Beach: return {.72f,.64f,.44f};

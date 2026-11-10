@@ -3,6 +3,36 @@
 #include <stdexcept>
 
 namespace planet {
+PlantMesh makePlantMesh(std::span<const PlantSite> sites,Vec3 anchor,Vec3 eastAxis,Vec3 northAxis,double radius,const Flora& flora) {
+    PlantMesh result;std::array<bool,speciesCount> species{};double nearest=1e30;
+    const auto local=[&](Vec3 p){return Vec3{dot(p,eastAxis),dot(p,anchor),dot(p,northAxis)};};
+    for(const auto& site:sites) {
+        const auto object=grownObject(site.object,&flora);if(object.height<.015) continue;
+        const double distance=length(object.up-anchor)*radius;
+        const auto up=local(object.up);
+        const bool simple=distance>(object.kind==DetailKind::Grass || object.kind==DetailKind::Shrub ? 24 : 60);
+        const bool shadow=distance<=std::max(160.,std::min(240.,object.height*4)) && object.castsSurfaceShadow();
+        for(const auto& face:detailMesh(object,site.base,up,local(east(object.up)),simple)) {
+            const auto& t=face.triangle;const auto n=normalized(cross(t.b-t.a,t.c-t.a));
+            const double cover=smoothstep(0.,.08,site.snowDepth)*smoothstep(.15,.6,dot(n,up));
+            const Color color{static_cast<float>(mix(face.color.r,.88,cover)),static_cast<float>(mix(face.color.g,.93,cover)),static_cast<float>(mix(face.color.b,.97,cover))};
+            for(const auto p:{t.a,t.b,t.c}) result.vertices.push_back({p,n,color,0,0});
+            if(shadow) result.casters.push_back(t);
+        }
+        ++result.objects;
+        if(object.species==Species::None) continue;
+        ++result.plants;species[static_cast<unsigned>(object.species)]=true;result.heightSum+=object.height;
+        result.maximumHeight=std::max(result.maximumHeight,object.height);
+        if(object.kind==DetailKind::Tree) ++result.trees;
+        if(object.lianas()) ++result.lianaHosts;
+        if(plantTraits(object.species).aquatic) {if(freshwaterPlant(object.species)) ++result.freshwater;else ++result.marine;}
+        if(object.flowers.bloom>.02) ++result.flowering;
+        if(object.flowers.buds>.02) ++result.budding;
+        if(object.flowers.seeds>.02) ++result.seedHeads;
+        if(distance<nearest) {nearest=distance;result.focus=object;}
+    }
+    result.species=static_cast<std::size_t>(std::count(species.begin(),species.end(),true));return result;
+}
 namespace {
 std::vector<double> terrainAxis(double center,double step) {
     std::vector<double> points;

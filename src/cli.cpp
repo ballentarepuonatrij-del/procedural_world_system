@@ -41,6 +41,7 @@ int main(int argc, char** argv) {
         bool riverOutput=false,riversEnabled=true,inlandEnabled=true;std::optional<planet::RiverKind> riverSite;
         bool deer=false,faunaEnabled=true,snowEnabled=true;std::optional<double> faunaSeconds,snowSeconds;
         std::optional<planet::SnowExperiment> snowSite;
+        std::optional<planet::Biome> forestSite;
         for (int i=1; i<argc; ++i) {
             const std::string arg = argv[i];
             const auto next = [&]() -> std::string {
@@ -63,6 +64,10 @@ int main(int argc, char** argv) {
                 if(*snowSeconds<0 || *snowSeconds>3600) throw std::invalid_argument("Snow preview must be 0..3600 seconds");
             }
             else if(arg=="--deer") deer=true;
+            else if(arg=="--forest") {
+                forestSite=planet::forestType(next());floraOutput=true;
+                if(!forestSite) throw std::invalid_argument("Forest must be jungle, temperate, taiga or mixed");
+            }
             else if(arg=="--no-fauna") faunaEnabled=false;
             else if(arg=="--fauna-seconds") {
                 faunaSeconds=number(next());
@@ -120,13 +125,14 @@ int main(int argc, char** argv) {
             }
             else if(arg=="--landmark") {
                 landmark=planet::landmarkType(next());
-                if(!landmark) throw std::invalid_argument("Landmark must be cave, canyon, mountains, gorge, wetland, pond, lake, bay, cliff, spit or grotto");
+                if(!landmark) throw std::invalid_argument("Landmark must be cave, canyon, mountains, valley, gorge, wetland, pond, lake, bay, cliff, spit or grotto");
             }
             else if (arg == "--help") {
-                std::cout << "planet_cli [--seed uint64] [--sample latitude longitude] [--day days_since_perihelion] [--map world.ppm] [--weather 0..3600_seconds] [--water 0..3600_seconds] [--rain-mm-h 0..200] [--landmark cave|canyon|mountains|gorge|wetland|pond|lake|bay|cliff|spit|grotto] [--coast] [--wind-m-s 0..40] [--flora] [--grove] [--young-flora] [--grow-days 0..365250]\n";
+                std::cout << "planet_cli [--seed uint64] [--sample latitude longitude] [--day days_since_perihelion] [--map world.ppm] [--weather 0..3600_seconds] [--water 0..3600_seconds] [--rain-mm-h 0..200] [--landmark cave|canyon|mountains|valley|gorge|wetland|pond|lake|bay|cliff|spit|grotto] [--coast] [--wind-m-s 0..40] [--flora] [--grove] [--young-flora] [--grow-days 0..365250]\n";
                 std::cout << "Global weather: [--storm cyclone|hurricane|thunderstorm] [--global-hours 0..240] [--no-global-weather]\n";
                 std::cout << "Global water: [--rivers] [--river stream|river|major] [--no-rivers] [--no-inland-waters]\n";
                 std::cout << "Flowering: [--meadow] [--flora-day days_since_perihelion]\n";
+                std::cout << "Forests: [--forest jungle|temperate|taiga|mixed]; highlands: --landmark mountains|valley\n";
                 std::cout << "Snow: [--snow natural|fine|large|blizzard|drifting|thaw] [--snow-seconds 0..3600] [--no-snow]\n";
                 std::cout << "Animals: [--deer] [--fauna-seconds 0..3600] [--no-fauna]\n";
                 std::cout << "Procedural audio: [--audio output.wav] [--audio-seconds 0.1..60] [--volume 0..100] [--no-sound]\n";
@@ -158,6 +164,10 @@ int main(int argc, char** argv) {
         }
         if(grove && !coast) {
             const auto p=planet::findGrove(world).position;
+            lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
+        }
+        if(forestSite) {
+            const auto p=planet::findForest(world,*forestSite,day*86400).position;
             lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
         }
         if(meadow) {
@@ -276,14 +286,16 @@ int main(int argc, char** argv) {
                 std::erase_if(plants,[](const auto& o) { return o.species==planet::Species::None; });
                 std::sort(plants.begin(),plants.end(),[&](const auto& a,const auto& b) { return planet::length(a.up-location)<planet::length(b.up-location); });
                 std::array<unsigned,planet::speciesCount> counts{};
-                double heightSum=0;unsigned marine=0,freshwater=0,blooming=0,budding=0,seeding=0;
+                double heightSum=0,maximumHeight=0;unsigned marine=0,freshwater=0,blooming=0,budding=0,seeding=0,trees=0,lianaHosts=0;
                 for(const auto& p:plants) { ++counts[static_cast<unsigned>(p.species)];heightSum+=p.height;if(planet::plantTraits(p.species).aquatic) {if(planet::freshwaterPlant(p.species)) ++freshwater;else ++marine;}
+                    maximumHeight=std::max(maximumHeight,p.height);if(p.kind==planet::DetailKind::Tree) ++trees;if(p.lianas()) ++lianaHosts;
                     if(p.flowers.bloom>.02) ++blooming;
                     if(p.flowers.buds>.02) ++budding;
                     if(p.flowers.seeds>.02) ++seeding;
                 }
                 std::cout << ",\n  \"flora\": {\n    \"elapsed_days\": " << flora.days() << ",\n    \"plants\": " << plants.size()
                     << ",\n    \"marine_plants\": " << marine << ",\n    \"freshwater_plants\": " << freshwater << ",\n    \"height_sum_m\": " << heightSum
+                    << ",\n    \"maximum_height_m\": " << maximumHeight << ",\n    \"trees\": " << trees << ",\n    \"liana_hosts\": " << lianaHosts
                     << ",\n    \"calendar_day\": " << flora.calendarDay() << ",\n    \"flowering_plants\": " << blooming
                     << ",\n    \"budding_plants\": " << budding << ",\n    \"seed_head_plants\": " << seeding << ",\n    \"species\": [";
                 bool comma=false;

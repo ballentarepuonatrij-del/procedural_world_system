@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(PlanetLab VERSION 0.18.0 LANGUAGES CXX)
+project(PlanetLab VERSION 0.19.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -50,7 +50,7 @@ if(BUILD_TESTING)
     if(MINGW)
         target_link_options(planet_tests PRIVATE -static -static-libgcc -static-libstdc++)
     endif()
-    foreach(suite IN ITEMS astronomy atmosphere terrain modules navigation climate detail weather hydrology landforms water_motion flora global_weather sound preferences globe_camera lighting shadows rivers landscape fauna snow)
+    foreach(suite IN ITEMS astronomy atmosphere terrain modules navigation climate detail weather hydrology landforms water_motion flora global_weather sound preferences globe_camera lighting shadows rivers landscape fauna snow biomes)
         add_test(NAME ${suite} COMMAND planet_tests ${suite})
     endforeach()
     add_test(NAME cli_sample COMMAND ${CMAKE_COMMAND}

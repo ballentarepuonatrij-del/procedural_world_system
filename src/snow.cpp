@@ -117,7 +117,7 @@ SnowCell Snow::makeCell(const World& w,int x,int z) const {
     const auto p=directionAt(x*spacing,z*spacing);const auto s=w.sample(p,solar_);
     SnowCell c;c.bed=s.elevation;c.solid=!s.ocean && !s.freshwater;
     if(const auto cave=w.caveSite(p);cave && cave->protectedGround(p)) c.solid=false;
-    c.vegetation=s.biome==Biome::Forest || s.biome==Biome::Rainforest ? .75 : s.biome==Biome::Grassland ? .3 : .08;
+    c.vegetation=forestBiome(s.biome) ? .75 : s.biome==Biome::Grassland ? .3 : .08;
     if(c.solid) {c.depth=referenceSnowDepth(s);c.swe=c.depth*.25;}
     return c;
 }

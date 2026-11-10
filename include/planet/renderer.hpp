@@ -64,6 +64,9 @@ public:
     std::size_t freshwaterCount() const {return freshwaterCount_;}
     std::size_t plantSpeciesCount() const { return plantSpeciesCount_; }
     double plantHeightSum() const { return plantHeightSum_; }
+    double maximumPlantHeight() const {return maximumPlantHeight_;}
+    std::size_t treeCount() const {return treeCount_;}
+    std::size_t lianaHosts() const {return lianaHosts_;}
     std::size_t floweringCount() const { return floweringCount_; }
     std::size_t buddingCount() const { return buddingCount_; }
     std::size_t seedHeadCount() const { return seedHeadCount_; }
@@ -80,6 +83,8 @@ public:
     std::uint64_t terrainJobs() const {return terrainJobs_;}
     std::uint64_t terrainUploads() const {return terrainUploads_;}
     std::uint64_t terrainDiscarded() const {return terrainDiscarded_;}
+    std::uint64_t shadowJobs() const {return shadowJobs_;}
+    std::uint64_t shadowUploads() const {return shadowUploads_;}
     double surfaceSpacing() const {return terrainStep_;}
     std::size_t deerCount() const {return deerCount_;}
     std::size_t snowCount() const {return snowCount_;}
@@ -90,15 +95,17 @@ private:
     void buildTerrain(const World& world,const Explorer& explorer,const Hydrology& water,double seconds);
     void uploadTerrain(TerrainMesh mesh);
     void adoptTerrain(TerrainMesh mesh);
-    struct SceneMesh {TerrainMesh terrain;Flora flora;Vec3 sun;std::vector<Triangle> shadows;bool hasShadows=false;};
-    struct MeshUpload {SceneMesh scene;GLuint lists=0;std::array<std::size_t,4> chunks{};std::size_t next=0;std::uint64_t epoch=0;};
+    struct SceneMesh {TerrainMesh terrain;PlantMesh plants;Flora flora;Vec3 sun;std::vector<Triangle> shadows;bool hasShadows=false;};
+    struct MeshUpload {SceneMesh scene;GLuint lists=0;std::array<std::size_t,5> chunks{};std::size_t next=0;std::uint64_t epoch=0;};
     void beginUpload(SceneMesh scene);
-    void advanceUpload(const Flora& flora,Vec3 sunlight);
+    void advanceUpload(const Flora& flora);
     void discardUpload();
     void buildGlobe(const World& world,double seconds);
     void buildObjects(const World& world,const Flora& flora);
+    void adoptObjects(PlantMesh mesh,const Flora& flora);
     void drawSky(const World& world,const Explorer& explorer,const ViewState& view);
     void drawShadows(Vec3 sun,bool textured);
+    void discardSunUpload();
     void prepareFauna(const World& world,const Explorer& explorer,const Fauna& fauna,bool shadows,Vec3 sun);
     void emitFauna();
     void drawWeather(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight);
@@ -117,6 +124,8 @@ private:
     std::optional<SurfaceObject> focusPlant_;
     std::size_t plantCount_=0,marineCount_=0,freshwaterCount_=0,plantSpeciesCount_=0;
     std::size_t floweringCount_=0,buddingCount_=0,seedHeadCount_=0;
+    std::size_t treeCount_=0,lianaHosts_=0;
+    double maximumPlantHeight_=0;
     double plantHeightSum_=0,lastFloraDay_=-1e30,lastFloraCalendar_=-1e30;
     bool lastYoung_=false;
     GLuint cloudTexture_=0,snowTexture_=0;
@@ -137,8 +146,6 @@ private:
     std::optional<MeshUpload> meshUpload_;
     GLuint terrainChunks_=0;
     GLsizei terrainChunksCount_=0;
-    std::optional<Flora> preparedFlora_;
-    bool preparedShadow_=false;
     std::uint64_t terrainEpoch_=0,terrainJobEpoch_=0;
     std::uint64_t terrainJobs_=0,terrainUploads_=0,terrainDiscarded_=0;
     Vec3 previousObserver_{};
@@ -161,6 +168,13 @@ private:
     bool shadowDirty_=true,shadowsUsed_=false,stencilWrap_=false;
     GLint stencilBits_=0;
     std::size_t starCount_=0,shadowCount_=0;
+    struct SunShadow {Vec3 sun;std::vector<Triangle> volume;std::uint64_t revision=0;};
+    struct SunUpload {SunShadow shadow;GLuint lists=0;std::size_t chunks=0,next=0;};
+    std::future<SunShadow> sunJob_;
+    std::optional<SunUpload> sunUpload_;
+    GLuint sunChunks_=0;
+    GLsizei sunChunksCount_=0;
+    std::uint64_t shadowRevision_=0,shadowJobs_=0,shadowUploads_=0;
     std::vector<std::pair<std::size_t,std::size_t>> riverSegments_;
     std::size_t riverTriangles_=0;
     GLuint waterMap_=0,riverTexture_=0;

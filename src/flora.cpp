@@ -31,13 +31,28 @@ const PlantTraits& plantTraits(Species s) {
         {"Sphagnum moss",.13,4.0,110,2200,120,false,false,{.37f,.52f,.16f}},
         {"Water lily",.18,3.1,180,3650,60,true,false,{.19f,.41f,.19f}},
         {"Pondweed",1.7,.32,100,1460,60,true,false,{.24f,.44f,.18f}},
-        {"Marram grass",1.05,.45,170,2600,80,false,false,{.65f,.62f,.34f}}
+        {"Marram grass",1.05,.45,170,2600,80,false,false,{.65f,.62f,.34f}},
+        {"Spruce",42,.20,9000,91000,900,false,true,{.10f,.28f,.20f}},
+        {"Fir",48,.18,11000,110000,1100,false,true,{.13f,.34f,.24f}},
+        {"Beech",38,.30,10000,91000,900,false,true,{.24f,.44f,.16f}},
+        {"Coast redwood",82,.18,21000,550000,1800,false,true,{.15f,.34f,.23f}},
+        {"Kapok",62,.29,13000,180000,1000,false,true,{.16f,.40f,.17f}},
+        {"Strangler fig",41,.43,10000,140000,900,false,true,{.12f,.36f,.14f}},
+        {"Canopy palm",24,.26,4500,30000,500,false,true,{.22f,.46f,.16f}},
+        {"Tree fern",6.5,.54,900,14000,180,false,false,{.17f,.46f,.22f}},
+        {"Giant bamboo",17,.19,550,22000,90,false,true,{.32f,.49f,.17f}},
+        {"Monstera",2.7,.75,420,7300,90,false,false,{.10f,.40f,.19f}},
+        {"Bromeliad",.85,.72,270,2190,60,false,false,{.26f,.45f,.20f}},
+        {"Forest moss",.10,5.0,100,2600,90,false,false,{.29f,.44f,.14f}}
     }};
     const auto i=static_cast<unsigned>(s);
     if(i>=traits.size()) throw std::invalid_argument("Unknown plant species");
     return traits[i];
 }
 bool freshwaterPlant(Species s) {return s==Species::Reed || s==Species::Cattail || s==Species::WaterLily || s==Species::Pondweed;}
+bool treeSpecies(Species s) {const auto& t=plantTraits(s);return (t.woody && t.height>5) || s==Species::TreeFern;}
+bool coniferSpecies(Species s) {return s==Species::Pine || s==Species::Spruce || s==Species::Fir || s==Species::Redwood;}
+bool tropicalCanopy(Species s) {return s==Species::TropicalTree || s==Species::Kapok || s==Species::StranglerFig;}
 std::string_view stageName(GrowthStage s) {
     constexpr std::array<std::string_view,6> names{"seed","seedling","juvenile","mature","senescent","dead"};
     const auto i=static_cast<unsigned>(s); return i<names.size() ? names[i] : "unknown";
@@ -46,7 +61,7 @@ double plantSuitability(Species species,const Sample& s,double slope,double rock
     const auto& t=plantTraits(species);
     if(species==Species::None || !std::isfinite(s.temperature) || !std::isfinite(s.precipitation) ||
        !std::isfinite(s.elevation) || !std::isfinite(slope) || !std::isfinite(rock) || !std::isfinite(sea)) return 0;
-    if(species>=Species::Willow) {
+    if(species>=Species::Willow && species<=Species::Marram) {
         if(s.ocean || s.temperature<274 || s.temperature>307 || slope>.5) return 0;
         const double wet=s.wetness,depth=s.freshwater ? s.waterDepth : 0;
         if(species==Species::Marram) return !s.freshwater && s.sand>.4 && s.elevation>sea+.6 ? clamp(s.sand*(1-slope),0.,1.) : 0;
@@ -70,6 +85,11 @@ double plantSuitability(Species species,const Sample& s,double slope,double rock
         return clamp(std::exp(-.12*depth)/.6,.05,1.0);
     }
     if(s.ocean || s.freshwater || s.wetness>.55 || s.elevation<=sea+2 || slope>=.65 || s.temperature<=267 || s.temperature>=315 || s.precipitation<=180) return 0;
+    if(treeSpecies(species) && (s.biome==Biome::Ice || s.biome==Biome::Tundra || s.biome==Biome::AlpineMeadow)) return 0;
+    if(species>=Species::Spruce && !forestBiome(s.biome)) return 0;
+    if(species==Species::Redwood && s.biome!=Biome::TemperateRainforest) return 0;
+    if((species==Species::Kapok || species==Species::StranglerFig || species==Species::Palm || species==Species::Bamboo ||
+        species==Species::Monstera || species==Species::Bromeliad) && s.biome!=Biome::Rainforest) return 0;
     double low=267,high=312,rain=180;
     switch(species) {
         case Species::Oak: low=282;high=301;rain=600;break;
@@ -86,6 +106,17 @@ double plantSuitability(Species species,const Sample& s,double slope,double rock
         case Species::Cornflower: low=278;high=300;rain=300;break;
         case Species::Fireweed: low=273;high=294;rain=500;break;
         case Species::Buttercup: low=277;high=298;rain=700;break;
+        case Species::Spruce: low=272;high=289;rain=650;break;
+        case Species::Fir: low=277;high=293;rain=800;break;
+        case Species::Beech: low=281;high=297;rain=800;break;
+        case Species::Redwood: low=282;high=295;rain=1050;break;
+        case Species::Kapok: case Species::StranglerFig: low=293;high=315;rain=1550;break;
+        case Species::Palm: low=291;high=314;rain=1400;break;
+        case Species::TreeFern: low=282;high=310;rain=1000;break;
+        case Species::Bamboo: low=290;high=313;rain=1350;break;
+        case Species::Monstera: low=293;high=313;rain=1400;break;
+        case Species::Bromeliad: low=294;high=314;rain=1500;break;
+        case Species::ForestMoss: low=272;high=298;rain=700;break;
         default: break;
     }
     if(s.temperature<=low || s.temperature>=high || s.precipitation<rain) return 0;
@@ -140,6 +171,9 @@ const FlowerTraits& flowerTraits(Species species) {
         set(Species::WaterLily,FlowerForm::Cup,{.98f,.91f,.91f},12,.14,450,800,130);
         set(Species::Pondweed,FlowerForm::Spike,{.62f,.60f,.31f},0,.025,500,500,80);
         set(Species::Marram,FlowerForm::Spike,{.81f,.75f,.48f},0,.045,550,500,110);
+        set(Species::Beech,FlowerForm::Ball,{.68f,.70f,.28f},0,.08,160,100,5500);
+        set(Species::Kapok,FlowerForm::Star,{.98f,.83f,.69f},5,.18,450,700,3500);
+        set(Species::Bromeliad,FlowerForm::Spike,{.96f,.24f,.18f},5,.12,400,850,200);
         set(Species::Daisy,FlowerForm::Daisy,{.98f,.97f,.85f},12,.045,300,500,75);
         set(Species::Clover,FlowerForm::Ball,{.87f,.30f,.58f},0,.035,240,650,65);
         set(Species::Poppy,FlowerForm::Cup,{.94f,.12f,.09f},4,.060,230,330,50);

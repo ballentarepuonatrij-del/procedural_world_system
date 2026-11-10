@@ -56,8 +56,10 @@ Atmosphere standardAtmosphere(double altitude, double seaTemperature = 288.15,
                               double surfacePressure = 101325.0, double radius = 6'371'000.0,
                               double gravity = standardGravity);
 
-enum class Biome { Ocean, Ice, Tundra, Desert, Grassland, Forest, Rainforest, Rock, Wetland, Freshwater, Beach };
+enum class Biome { Ocean, Ice, Tundra, Desert, Grassland, Forest, Rainforest, Rock, Wetland, Freshwater, Beach, BorealForest, TemperateRainforest, AlpineMeadow };
 std::string_view biomeName(Biome biome);
+bool forestBiome(Biome biome);
+std::optional<Biome> forestType(std::string_view name);
 struct Color { float r, g, b; };
 struct Sample {
     double elevation{};

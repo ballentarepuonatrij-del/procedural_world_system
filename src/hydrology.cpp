@@ -157,7 +157,7 @@ Hydrology::Hydrology(const World& world,Vec3 observer,double solarSeconds) : sno
     geometryMask_=(world.modules().enabled(Module::Landforms) ? 1U : 0U)|(world.modules().enabled(Module::Caves) ? 2U : 0U)|(world.modules().enabled(Module::Rivers) ? 4U : 0U)|(world.modules().enabled(Module::InlandWaters) ? 8U : 0U);
     const auto climate=world.climatology(anchor_);
     climateWetness_=clamp(climate.precipitation/1800,0.0,1.0);
-    vegetation_=(climate.biome==Biome::Forest || climate.biome==Biome::Rainforest) ? 0.8 :
+    vegetation_=forestBiome(climate.biome) ? 0.8 :
                 (climate.biome==Biome::Grassland ? 0.5 : 0.1);
     World relief=world; relief.modules().set(Module::Terrain,true);
     for(int z=0;z<resolution;++z) for(int x=0;x<resolution;++x)
@@ -188,7 +188,7 @@ void Hydrology::move(const World& world,Vec3 observer,int x,int z,bool resetChar
         cache_.clear(); cacheOrder_.clear(); anchor_=normalized(observer); east_=east(anchor_); north_=north(anchor_);
         const auto climate=world.climatology(anchor_);
         climateWetness_=clamp(climate.precipitation/1800,0.0,1.0);
-        vegetation_=(climate.biome==Biome::Forest || climate.biome==Biome::Rainforest) ? 0.8 :
+        vegetation_=forestBiome(climate.biome) ? 0.8 :
                     (climate.biome==Biome::Grassland ? 0.5 : 0.1);
     } else {
         for(int j=0;j<resolution;++j) for(int i=0;i<resolution;++i) {

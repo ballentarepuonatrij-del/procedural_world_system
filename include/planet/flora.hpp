@@ -3,7 +3,7 @@
 
 namespace planet {
 // Ecological archetypes, not a calibrated model of individual botanical species.
-enum class Species : unsigned { None, Oak, Birch, Pine, Acacia, TropicalTree, Juniper, Heather, MeadowGrass, Fern, Seagrass, Kelp, Rockweed, Daisy, Clover, Poppy, Cornflower, Fireweed, Buttercup, Willow, Alder, Reed, Cattail, Sedge, Sphagnum, WaterLily, Pondweed, Marram, Count };
+enum class Species : unsigned { None, Oak, Birch, Pine, Acacia, TropicalTree, Juniper, Heather, MeadowGrass, Fern, Seagrass, Kelp, Rockweed, Daisy, Clover, Poppy, Cornflower, Fireweed, Buttercup, Willow, Alder, Reed, Cattail, Sedge, Sphagnum, WaterLily, Pondweed, Marram, Spruce, Fir, Beech, Redwood, Kapok, StranglerFig, Palm, TreeFern, Bamboo, Monstera, Bromeliad, ForestMoss, Count };
 constexpr auto speciesCount=static_cast<unsigned>(Species::Count);
 enum class GrowthStage { Seed, Seedling, Juvenile, Mature, Senescent, Dead };
 struct PlantTraits {
@@ -14,6 +14,9 @@ struct PlantTraits {
 };
 const PlantTraits& plantTraits(Species species);
 bool freshwaterPlant(Species species);
+bool treeSpecies(Species species);
+bool coniferSpecies(Species species);
+bool tropicalCanopy(Species species);
 std::string_view stageName(GrowthStage stage);
 // Relative growth potential, under a fixed annual climate and substrate.
 double plantSuitability(Species species,const Sample& habitat,double slope,double rockiness,double seaLevel);

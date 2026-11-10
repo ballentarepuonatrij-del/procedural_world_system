@@ -39,6 +39,7 @@ struct Options {
     double faunaSeconds=0,snowSeconds=0;
     bool snow=true;
     std::optional<SnowExperiment> snowSite;
+    std::optional<Biome> forestSite;
     std::optional<RiverKind> riverSite;
     std::optional<double> solarHour;
     std::optional<std::array<double,2>> look;
@@ -142,6 +143,10 @@ Options parseOptions() {
             else if(arg==L"--no-water-motion") options.waterMotion=false;
             else if(arg==L"--young-flora") options.youngFlora=true;
             else if(arg==L"--grove") options.grove=true;
+            else if(arg==L"--forest") {
+                const auto value=next();options.forestSite=forestType(std::string(value.begin(),value.end()));
+                if(!options.forestSite) throw std::invalid_argument("Forest must be jungle, temperate, taiga or mixed");
+            }
             else if(arg==L"--meadow") options.meadow=true;
             else if(arg==L"--flora-day") {
                 const auto value=next();std::size_t used=0;const double day=std::stod(value,&used);
@@ -181,7 +186,7 @@ Options parseOptions() {
             }
             else if(arg==L"--landmark") {
                 const auto value=next(); options.landmark=landmarkType(std::string(value.begin(),value.end()));
-                if(!options.landmark) throw std::invalid_argument("Landmark must be cave, canyon, mountains, gorge, wetland, pond, lake, bay, cliff, spit or grotto");
+                if(!options.landmark) throw std::invalid_argument("Landmark must be cave, canyon, mountains, valley, gorge, wetland, pond, lake, bay, cliff, spit or grotto");
             }
             else if(arg==L"--walk-seconds") {
                 const auto value=next(); std::size_t used=0; options.walkSeconds=std::stod(value,&used);
@@ -242,6 +247,7 @@ public:
         orientLanding(); noon();
         if(options_.landmark) visitLandmark(*options_.landmark,options_.diveDepth.has_value());
         if(options_.grove) visitGrove();
+        if(options_.forestSite) visitForest(*options_.forestSite);
         if(options_.meadow) visitMeadow();
         if(options_.deer) visitDeer();
         if(options_.snowSite) visitSnow(*options_.snowSite);
@@ -389,6 +395,7 @@ public:
             if(!out) throw std::runtime_error("Cannot open smoke report");
             out << "terrain_async_started=" << renderer_->terrainJobs() << "\nterrain_async_uploaded=" << renderer_->terrainUploads()
                 << "\nterrain_async_discarded=" << renderer_->terrainDiscarded() << "\nterrain_spacing_m=" << renderer_->surfaceSpacing() << '\n';
+            out << "shadow_async_started=" << renderer_->shadowJobs() << "\nshadow_async_uploaded=" << renderer_->shadowUploads() << '\n';
             for(std::size_t i=0;i<phaseNames.size();++i) out << "profile_" << phaseNames[i] << "_mean_ms=" << phaseTotals[i]/std::max(1,frames)
                 << "\nprofile_" << phaseNames[i] << "_steady_ms=" << steadyTotals[i]/std::max(1U,steadyCount)
                 << "\nprofile_" << phaseNames[i] << "_max_ms=" << phasePeaks[i] << '\n';
@@ -417,6 +424,7 @@ public:
                 << "\nyoung_flora=" << simulation_.flora.young() << "\nflora_panel=" << view_.floraInfo
                 << "\nflora_plants=" << renderer_->plantCount() << "\nmarine_plants=" << renderer_->marineCount() << "\nfreshwater_plants=" << renderer_->freshwaterCount()
                 << "\nflora_species=" << renderer_->plantSpeciesCount() << "\nflora_height_sum_m=" << renderer_->plantHeightSum()
+                << "\nflora_maximum_height_m=" << renderer_->maximumPlantHeight() << "\nflora_trees=" << renderer_->treeCount() << "\nflora_liana_hosts=" << renderer_->lianaHosts()
                 << "\nflora_calendar_day=" << simulation_.flora.calendarDay() << "\nflowering_plants=" << renderer_->floweringCount()
                 << "\nbudding_plants=" << renderer_->buddingCount() << "\nseed_head_plants=" << renderer_->seedHeadCount() << '\n';
             const auto habitat=world_.climatology(explorer_.up());
@@ -609,6 +617,13 @@ private:
         explorer_.look(std::atan2(dot(look,east(place.position)),dot(look,north(place.position))),radians(-31));
         view_.globe=false;view_.floraInfo=true;noon();if(renderer_) renderer_->invalidate();
     }
+    void visitForest(Biome kind) {
+        const auto place=findForest(world_,kind,view_.seconds);explorer_.flying=false;explorer_.teleport(world_,place.position);
+        simulation_.advance(world_,place.position,0);explorer_.teleport(world_,place.position,&simulation_.water);
+        const auto look=normalized(place.lookToward-place.position);
+        explorer_.look(std::atan2(dot(look,east(place.position)),dot(look,north(place.position))),radians(18));
+        view_.globe=false;view_.floraInfo=true;view_.faunaInfo=false;noon();if(renderer_) renderer_->invalidate();
+    }
     void visitGrove() {
         const auto place=findGrove(world_);
         explorer_.teleport(world_,place.position);simulation_.advance(world_,place.position,0);
@@ -739,13 +754,16 @@ private:
             simulation_.flora.setYoung(true);simulation_.flora.setRate(rate);simulation_.flora.setCalendarDay(calendar);renderer_->invalidate();
         }
         else if(key=='O') visitCoast();
-        else if(key=='X') visitGrove();
+        else if(key=='X') modalAction([&] {
+            constexpr std::array tour{Biome::TemperateRainforest,Biome::Rainforest,Biome::BorealForest,Biome::Forest};
+            visitForest(tour[forestIndex_++%tour.size()]);
+        });
         else if(key=='N') {
             const auto wind=simulation_.motion.windExperiment();
             simulation_.motion.setWindExperiment(!wind ? std::optional<double>{8} : (*wind<12 ? std::optional<double>{16} : std::nullopt));
         }
         else if(key=='J') {
-            constexpr std::array<Landform,4> tour{Landform::Karst,Landform::Canyon,Landform::Mountains,Landform::Gorge};
+            constexpr std::array<Landform,5> tour{Landform::Karst,Landform::Canyon,Landform::Mountains,Landform::MountainValley,Landform::Gorge};
             visitLandmark(tour[landmarkIndex_++%tour.size()]);
         }
         else if(key=='B') simulation_.setRainExperiment(simulation_.rainExperiment()<1 ? 30 : (simulation_.rainExperiment()<60 ? 80 : 0));
@@ -847,7 +865,7 @@ private:
     unsigned settingsOpened_=0,settingsSaved_=0,teleportRequests_=0,teleportsConfirmed_=0,seedChanges_=0;
     std::size_t landmarkIndex_=0;
     std::size_t stormIndex_=0;
-    std::size_t riverIndex_=0,snowIndex_=0;
+    std::size_t riverIndex_=0,snowIndex_=0,forestIndex_=0;
 };
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int show) {

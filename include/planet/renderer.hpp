@@ -6,6 +6,7 @@
 #include "planet/shadows.hpp"
 #include "planet/rivers.hpp"
 #include "planet/terrain_mesh.hpp"
+#include "planet/phenomena.hpp"
 #include <windows.h>
 #include <GL/gl.h>
 #include <filesystem>
@@ -39,11 +40,13 @@ struct ViewState {
     bool audioAvailable=false;
     bool interfaceVisible=true;
     bool skyEnabled=true,shadowsEnabled=true;
+    Phenomenon phenomenon=Phenomenon::Natural;
+    double phenomenonEpoch=0;
     GlobeCamera globeCamera;
 };
 bool globeHudHit(const ViewState& view,int x,int y);
 struct RenderTimings {
-    double terrain=0,plants=0,shadowBuild=0,shadows=0,water=0,rivers=0,weather=0,sky=0,fauna=0,snow=0;
+    double terrain=0,plants=0,shadowBuild=0,shadows=0,water=0,rivers=0,weather=0,sky=0,fauna=0,snow=0,phenomena=0;
 };
 class Renderer {
 public:
@@ -90,6 +93,9 @@ public:
     std::size_t snowCount() const {return snowCount_;}
     std::size_t coarseSnowCount() const {return coarseSnowCount_;}
     std::size_t blowingSnowCount() const {return blowingSnowCount_;}
+    const PhenomenaState& phenomena() const {return phenomena_;}
+    std::size_t opticalTriangles() const {return opticalTriangles_;}
+    std::size_t dustCount() const {return dustCount_;}
 private:
     RenderTimings timings_;
     void buildTerrain(const World& world,const Explorer& explorer,const Hydrology& water,double seconds);
@@ -104,6 +110,8 @@ private:
     void buildObjects(const World& world,const Flora& flora);
     void adoptObjects(PlantMesh mesh,const Flora& flora);
     void drawSky(const World& world,const Explorer& explorer,const ViewState& view);
+    void drawAtmosphericSky(const World& world,const Explorer& explorer,const ViewState& view);
+    void drawDust(const World& world,const Explorer& explorer);
     void drawShadows(Vec3 sun,bool textured);
     void discardSunUpload();
     void prepareFauna(const World& world,const Explorer& explorer,const Fauna& fauna,bool shadows,Vec3 sun);
@@ -156,6 +164,10 @@ private:
     bool weatherDirty_=true,lastGlobalClouds_=true;
     std::size_t rainCount_=0,lightningCount_=0,stormMarkerCount_=0;
     Lighting lighting_;
+    PhenomenaState phenomena_;
+    PhenomenaForcing phenomenaForcing_;
+    double phenomenaSeconds_=0;
+    std::size_t opticalTriangles_=0,dustCount_=0;
     std::vector<Star> stars_;
     std::uint64_t starSeed_=0;
     std::vector<Triangle> terrainCasters_,objectCasters_;

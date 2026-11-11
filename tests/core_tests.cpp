@@ -5,6 +5,7 @@
 #include "planet/preferences.hpp"
 #include "planet/globe_camera.hpp"
 #include "planet/lighting.hpp"
+#include "planet/phenomena.hpp"
 #include "planet/shadows.hpp"
 #include "planet/rivers.hpp"
 #include "planet/terrain_mesh.hpp"
@@ -48,11 +49,13 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
 #include "fauna_tests.hpp"
 #include "snow_tests.hpp"
 #include "biome_tests.hpp"
+#include "phenomena_tests.hpp"
 void registerTests() {
     registerLandscapeTests();
     registerFaunaTests();
     registerSnowTests();
     registerBiomeTests();
+    registerPhenomenaTests();
     test("detail","CPU terrain snapshots preserve coordinates and bound flight detail",[] {
         World w;const auto p=w.findLand();Hydrology water(w,p);const double height=w.surface(p)+1.75;
         const auto fine=makeTerrainMesh(w,water,p,height,79*86400),fast=makeTerrainMesh(w,water,p,height,79*86400,64);
@@ -1163,6 +1166,7 @@ void registerTests() {
             for(unsigned i=0;i<moduleCount;++i) w.modules().set(static_cast<Module>(i),(bits&(1U<<i))!=0);
             const auto s=w.sample(direction(0.5,0.3),100*86400);
             require(std::isfinite(s.elevation) && std::isfinite(s.pressure) && std::isfinite(s.precipitation),"Finite sample");
+            require(w.modules().enabled(Module::Phenomena)==(w.modules().requested(Module::Phenomena) && w.modules().enabled(Module::Atmosphere)),"Phenomena dependency in every mask");
         }
     });
     test("navigation","Latitude longitude coordinate roundtrip",[] {

@@ -7,7 +7,8 @@
 
 namespace planet {
 namespace {
-constexpr int moduleId=100,gridId=120,volumeId=121,volumeTextId=122,interfaceId=123,skyId=124,shadowsId=125,seedId=200;
+constexpr int moduleId=100,gridId=moduleId+moduleCount,volumeId=gridId+1,volumeTextId=gridId+2,interfaceId=gridId+3,skyId=gridId+4,shadowsId=gridId+5,seedId=200;
+constexpr int moduleRows=(moduleCount+1)/2,extraHeight=(moduleRows-10)*17;
 struct DialogData {
     Preferences preferences;
     bool seedOnly=false;
@@ -16,7 +17,7 @@ struct DialogData {
 };
 std::vector<WORD> dialogTemplate(bool seed) {
     const DLGTEMPLATE header{WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME|DS_CENTER|DS_SETFONT,0,0,0,0,
-        static_cast<short>(seed ? 320 : 360),static_cast<short>(seed ? 134 : 343)};
+        static_cast<short>(seed ? 320 : 360),static_cast<short>(seed ? 134 : 343+extraHeight)};
     std::vector<WORD> data((sizeof(header)+1)/2);std::memcpy(data.data(),&header,sizeof(header));
     data.insert(data.end(),{0,0,0,10}); // No menu/class/title; 10 pt font follows.
     for(wchar_t ch:std::wstring(L"Segoe UI")) data.push_back(static_cast<WORD>(ch));
@@ -64,29 +65,29 @@ INT_PTR CALLBACK procedure(HWND dialog,UINT message,WPARAM wParam,LPARAM lParam)
                 SetFocus(edit);return FALSE;
             }
             control(dialog,L"STATIC",L"Модули симуляции",0,-1,12,10,336,16);
-            constexpr std::array<const wchar_t*,moduleCount> labels{L"Рельеф",L"Океан",L"Атмосфера",L"Климат",L"Биомы",L"Детали поверхности",L"Ветер",L"Облака",L"Поверхностная вода",L"Эрозия",L"Формы рельефа",L"Пещеры",L"Волны и течения",L"Рост растений",L"Глобальная погода",L"Звук",L"Реки",L"Озёра и болота",L"Животные",L"Снег"};
+            constexpr std::array<const wchar_t*,moduleCount> labels{L"Рельеф",L"Океан",L"Атмосфера",L"Климат",L"Биомы",L"Детали поверхности",L"Ветер",L"Облака",L"Поверхностная вода",L"Эрозия",L"Формы рельефа",L"Пещеры",L"Волны и течения",L"Рост растений",L"Глобальная погода",L"Звук",L"Реки",L"Озёра и болота",L"Животные",L"Снег",L"Атмосферные явления"};
             for(unsigned i=0;i<moduleCount;++i) {
                 const auto id=moduleId+static_cast<int>(i);
-                control(dialog,L"BUTTON",labels[i],WS_TABSTOP|BS_AUTOCHECKBOX,id,12+static_cast<int>(i/10)*174,30+static_cast<int>(i%10)*17,162,17);
+                control(dialog,L"BUTTON",labels[i],WS_TABSTOP|BS_AUTOCHECKBOX,id,12+static_cast<int>(i/moduleRows)*174,30+static_cast<int>(i%moduleRows)*17,162,17);
                 CheckDlgButton(dialog,id,data->preferences.modules.requested(static_cast<Module>(i)) ? BST_CHECKED : BST_UNCHECKED);
             }
-            control(dialog,L"STATIC",L"Зависимые модули работают, когда включены их основы. Базовая планета всегда активна.",0,-1,12,204,336,28);
-            control(dialog,L"BUTTON",L"Grid — сетка ландшафта",WS_TABSTOP|BS_AUTOCHECKBOX,gridId,12,237,165,18);
+            control(dialog,L"STATIC",L"Зависимые модули работают, когда включены их основы. Базовая планета всегда активна.",0,-1,12,204+extraHeight,336,28);
+            control(dialog,L"BUTTON",L"Grid — сетка ландшафта",WS_TABSTOP|BS_AUTOCHECKBOX,gridId,12,237+extraHeight,165,18);
             CheckDlgButton(dialog,gridId,data->preferences.grid ? BST_CHECKED : BST_UNCHECKED);
-            control(dialog,L"BUTTON",L"Показывать интерфейс",WS_TABSTOP|BS_AUTOCHECKBOX,interfaceId,186,237,162,18);
+            control(dialog,L"BUTTON",L"Показывать интерфейс",WS_TABSTOP|BS_AUTOCHECKBOX,interfaceId,186,237+extraHeight,162,18);
             CheckDlgButton(dialog,interfaceId,data->preferences.interfaceVisible ? BST_CHECKED : BST_UNCHECKED);
-            control(dialog,L"BUTTON",L"Небо и звёзды",WS_TABSTOP|BS_AUTOCHECKBOX,skyId,12,259,165,18);
+            control(dialog,L"BUTTON",L"Небо и звёзды",WS_TABSTOP|BS_AUTOCHECKBOX,skyId,12,259+extraHeight,165,18);
             CheckDlgButton(dialog,skyId,data->preferences.sky ? BST_CHECKED : BST_UNCHECKED);
-            control(dialog,L"BUTTON",L"Тени объектов и рельефа",WS_TABSTOP|BS_AUTOCHECKBOX,shadowsId,186,259,162,18);
+            control(dialog,L"BUTTON",L"Тени объектов и рельефа",WS_TABSTOP|BS_AUTOCHECKBOX,shadowsId,186,259+extraHeight,162,18);
             CheckDlgButton(dialog,shadowsId,data->preferences.shadows ? BST_CHECKED : BST_UNCHECKED);
-            control(dialog,L"STATIC",L"Громкость",0,-1,12,286,65,18);
-            control(dialog,TRACKBAR_CLASSW,L"",WS_TABSTOP|TBS_HORZ|TBS_NOTICKS,volumeId,78,281,214,25);
+            control(dialog,L"STATIC",L"Громкость",0,-1,12,286+extraHeight,65,18);
+            control(dialog,TRACKBAR_CLASSW,L"",WS_TABSTOP|TBS_HORZ|TBS_NOTICKS,volumeId,78,281+extraHeight,214,25);
             SendDlgItemMessageW(dialog,volumeId,TBM_SETRANGE,TRUE,MAKELPARAM(0,100));
             SendDlgItemMessageW(dialog,volumeId,TBM_SETPOS,TRUE,data->preferences.volume);
-            control(dialog,L"STATIC",L"",0,volumeTextId,300,286,48,18);volumeLabel(dialog);
-            control(dialog,L"STATIC",L"ОК сохраняет настройки для следующего запуска.",0,-1,12,317,192,20);
-            control(dialog,L"BUTTON",L"ОК",WS_TABSTOP|BS_DEFPUSHBUTTON,IDOK,212,313,64,22);
-            control(dialog,L"BUTTON",L"Отмена",WS_TABSTOP,IDCANCEL,284,313,64,22);
+            control(dialog,L"STATIC",L"",0,volumeTextId,300,286+extraHeight,48,18);volumeLabel(dialog);
+            control(dialog,L"STATIC",L"ОК сохраняет настройки для следующего запуска.",0,-1,12,317+extraHeight,192,20);
+            control(dialog,L"BUTTON",L"ОК",WS_TABSTOP|BS_DEFPUSHBUTTON,IDOK,212,313+extraHeight,64,22);
+            control(dialog,L"BUTTON",L"Отмена",WS_TABSTOP,IDCANCEL,284,313+extraHeight,64,22);
             return TRUE;
         }
         if(!data) return FALSE;

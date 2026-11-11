@@ -37,7 +37,8 @@ struct Options {
     bool sky=true,shadows=true,lookAtSun=false;
     bool rivers=true,inlandWaters=true,fauna=true,deer=false;
     double faunaSeconds=0,snowSeconds=0;
-    bool snow=true;
+    bool snow=true,phenomenaEnabled=true;
+    std::optional<Phenomenon> phenomenon;
     std::optional<SnowExperiment> snowSite;
     std::optional<Biome> forestSite;
     std::optional<RiverKind> riverSite;
@@ -70,7 +71,7 @@ Options parseOptions() {
         options.caves=modules.requested(Module::Caves);options.waterMotion=modules.requested(Module::WaterMotion);
         options.plantGrowth=modules.requested(Module::PlantGrowth);options.globalWeather=modules.requested(Module::GlobalWeather);
         options.sound=modules.requested(Module::Sound);
-        options.rivers=modules.requested(Module::Rivers);options.inlandWaters=modules.requested(Module::InlandWaters);options.fauna=modules.requested(Module::Fauna);options.snow=modules.requested(Module::Snow);
+        options.rivers=modules.requested(Module::Rivers);options.inlandWaters=modules.requested(Module::InlandWaters);options.fauna=modules.requested(Module::Fauna);options.snow=modules.requested(Module::Snow);options.phenomenaEnabled=modules.requested(Module::Phenomena);
         for(int i=1;i<argc;++i) {
             const std::wstring arg=argv[i];
             const auto next=[&]() -> std::wstring {
@@ -171,6 +172,11 @@ Options parseOptions() {
                 const auto value=next();options.snowSite=snowExperiment(std::string(value.begin(),value.end()));
                 if(!options.snowSite) throw std::invalid_argument("Snow must be natural, fine, large, blizzard, drifting or thaw");
             }
+            else if(arg==L"--phenomenon") {
+                const auto value=next();options.phenomenon=phenomenonType(std::string(value.begin(),value.end()));
+                if(!options.phenomenon) throw std::invalid_argument("Phenomenon must be natural, rainbow, halo, pillar, aurora, lightning, fog or dust");
+            }
+            else if(arg==L"--no-phenomena") options.phenomenaEnabled=false;
             else if(arg==L"--no-snow") options.snow=false;
             else if(arg==L"--snow-seconds") {
                 const auto value=next();std::size_t used=0;options.snowSeconds=std::stod(value,&used);
@@ -228,7 +234,7 @@ World configuredWorld(const Options& options) {
     modules.set(Module::Hydrology,options.water);modules.set(Module::Erosion,options.erosion);
     modules.set(Module::Landforms,options.landforms);modules.set(Module::Caves,options.caves);
     modules.set(Module::WaterMotion,options.waterMotion);modules.set(Module::PlantGrowth,options.plantGrowth);
-    modules.set(Module::GlobalWeather,options.globalWeather);modules.set(Module::Sound,options.sound);modules.set(Module::Rivers,options.rivers);modules.set(Module::InlandWaters,options.inlandWaters);modules.set(Module::Fauna,options.fauna);modules.set(Module::Snow,options.snow);return world;
+    modules.set(Module::GlobalWeather,options.globalWeather);modules.set(Module::Sound,options.sound);modules.set(Module::Rivers,options.rivers);modules.set(Module::InlandWaters,options.inlandWaters);modules.set(Module::Fauna,options.fauna);modules.set(Module::Snow,options.snow);modules.set(Module::Phenomena,options.phenomenaEnabled);return world;
 }
 class Application {
 public:
@@ -251,6 +257,7 @@ public:
         if(options_.meadow) visitMeadow();
         if(options_.deer) visitDeer();
         if(options_.snowSite) visitSnow(*options_.snowSite);
+        if(options_.phenomenon) visitPhenomenon(*options_.phenomenon);
         if(options_.coast || (options_.diveDepth && !options_.landmark && !options_.riverSite)) visitCoast(options_.diveDepth.has_value());
         if(options_.riverSite) visitRiver(*options_.riverSite,options_.diveDepth.has_value());
         if(options_.storm && !visitStorm(*options_.storm)) throw std::runtime_error("No active storm of the requested kind on this planet");
@@ -322,8 +329,8 @@ public:
         auto last=Clock::now();
         int frames=0;
         double renderTime=0, longestRender=0;
-        constexpr std::array<const char*,16> phaseNames{"navigation","simulation","audio","render","swap","terrain_build","plants_build","shadow_build","shadows","water","rivers","weather","sky","fauna","snow","frame_work"};
-        std::array<double,16> phaseTotals{},steadyTotals{},phasePeaks{};
+        constexpr std::array<const char*,17> phaseNames{"navigation","simulation","audio","render","swap","terrain_build","plants_build","shadow_build","shadows","water","rivers","weather","sky","fauna","snow","phenomena","frame_work"};
+        std::array<double,17> phaseTotals{},steadyTotals{},phasePeaks{};
         std::vector<double> steadyFrames;
         unsigned steadyCount=0;
         const auto milliseconds=[](Clock::time_point a,Clock::time_point b) {return std::chrono::duration<double,std::milli>(b-a).count();};
@@ -380,7 +387,7 @@ public:
             if(!SwapBuffers(dc_)) throw std::runtime_error("SwapBuffers failed");
             if(!options_.report.empty()) {
                 const auto& r=renderer_->timings();
-                std::array<double,16> sample{milliseconds(navigationStart,simulationStart),milliseconds(simulationStart,audioStart),milliseconds(audioStart,renderStart),renderMs,milliseconds(swapStart,Clock::now()),r.terrain,r.plants,r.shadowBuild,r.shadows,r.water,r.rivers,r.weather,r.sky,r.fauna,r.snow,0};
+                std::array<double,17> sample{milliseconds(navigationStart,simulationStart),milliseconds(simulationStart,audioStart),milliseconds(audioStart,renderStart),renderMs,milliseconds(swapStart,Clock::now()),r.terrain,r.plants,r.shadowBuild,r.shadows,r.water,r.rivers,r.weather,r.sky,r.fauna,r.snow,r.phenomena,0};
                 for(unsigned i=0;i<5;++i) sample.back()+=sample[i];
                 for(std::size_t i=0;i<sample.size();++i) {
                     phaseTotals[i]+=sample[i];if(frames>5) {steadyTotals[i]+=sample[i];phasePeaks[i]=std::max(phasePeaks[i],sample[i]);}
@@ -482,6 +489,12 @@ public:
                 << "\nrunoff_stored_m3=" << runoff.storedWaterM3 << "\nrunoff_boundary_m3=" << runoff.boundaryM3
                 << "\nrunoff_water_error_m3=" << runoff.waterResidual() << "\nrunoff_solid_error_kg=" << runoff.solidResidual()
                 << "\neroded_kg=" << runoff.erodedKg << "\ndeposited_kg=" << runoff.depositedKg << '\n';
+            const auto& phenomenon=renderer_->phenomena();double distantFlash=0;for(const auto& f:phenomenon.flashes) distantFlash+=f.intensity;
+            out << "phenomena_enabled=" << phenomenon.enabled << "\nphenomenon=" << phenomenonName(view_.phenomenon)
+                << "\nrainbow=" << phenomenon.rainbow << "\nhalo=" << phenomenon.halo << "\npillar=" << phenomenon.pillar
+                << "\naurora=" << phenomenon.aurora << "\ndistant_lightning=" << distantFlash << "\nfog=" << phenomenon.fog << "\ndust=" << phenomenon.dust
+                << "\nphenomena_visibility_m=" << phenomenon.visibility << "\noptical_triangles=" << renderer_->opticalTriangles() << "\ndust_particles=" << renderer_->dustCount()
+                << "\nmagnetic_latitude_deg=" << degrees(phenomenon.magneticLatitude) << "\ndew_point_K=" << phenomenon.dewPointK << '\n';
             const auto frozen=simulation_.water.snow.sample(explorer_.up());const auto snowBudget=simulation_.water.snow.budget();
             const auto snowAir=simulation_.water.snow.atmosphere(world_,simulation_.weather,explorer_.up(),world_.surface(explorer_.up()));
             out << "snow_depth_m=" << frozen.depth << "\nsnow_swe_mm=" << frozen.swe*1000 << "\nsnow_particles=" << renderer_->snowCount()
@@ -577,6 +590,16 @@ private:
         }
         explorer_.look(pi/2,radians(kind==StormKind::Thunderstorm ? 12 : -3));
         view_.globe=false;noon();if(renderer_) renderer_->invalidate();return true;
+    }
+    void visitPhenomenon(Phenomenon kind) {
+        if(kind==Phenomenon::Natural) {view_.phenomenon=kind;return;}
+        const auto site=findPhenomenon(world_,kind,view_.seconds);
+        explorer_.flying=false;explorer_.teleport(world_,site.position);
+        simulation_.advance(world_,site.position,0);explorer_.teleport(world_,site.position,&simulation_.water);
+        view_.seconds=site.seconds;simulation_.setClock(site.seconds);
+        explorer_.look(std::atan2(dot(site.look,east(site.position)),dot(site.look,north(site.position))),std::asin(clamp(dot(site.look,site.position),-1.,1.)));
+        view_.phenomenon=kind;view_.phenomenonEpoch=view_.seconds;view_.globe=false;
+        if(renderer_) renderer_->invalidate();
     }
     void visitSnow(SnowExperiment experiment) {
         const auto p=findSnowfield(world_,world_.findLand(),view_.seconds);
@@ -732,6 +755,10 @@ private:
         else if(key=='L') view_.headlamp=!view_.headlamp;
         else if(key=='E') {if(view_.faunaInfo) {view_.faunaInfo=false;view_.floraInfo=true;} else if(view_.floraInfo) view_.floraInfo=false;else view_.faunaInfo=true;}
         else if(key==VK_F3) view_.weatherLayer=static_cast<WeatherLayer>((static_cast<unsigned>(view_.weatherLayer)+1)%6);
+        else if(key==VK_F6) modalAction([&] {
+            constexpr std::array tour{Phenomenon::Rainbow,Phenomenon::Halo,Phenomenon::Pillar,Phenomenon::Aurora,Phenomenon::DistantLightning,Phenomenon::Fog,Phenomenon::Dust,Phenomenon::Natural};
+            visitPhenomenon(tour[phenomenonIndex_++%tour.size()]);
+        });
         else if(key==VK_F7) {constexpr std::array<RiverKind,3> tour{RiverKind::Major,RiverKind::River,RiverKind::Stream};visitRiver(tour[riverIndex_++%tour.size()]);}
         else if(key==VK_F8) visitMeadow();
         else if(key==VK_F11) modalAction([&] {visitDeer();});
@@ -865,7 +892,7 @@ private:
     unsigned settingsOpened_=0,settingsSaved_=0,teleportRequests_=0,teleportsConfirmed_=0,seedChanges_=0;
     std::size_t landmarkIndex_=0;
     std::size_t stormIndex_=0;
-    std::size_t riverIndex_=0,snowIndex_=0,forestIndex_=0;
+    std::size_t riverIndex_=0,snowIndex_=0,forestIndex_=0,phenomenonIndex_=0;
 };
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int show) {

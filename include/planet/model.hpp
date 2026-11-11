@@ -10,9 +10,9 @@ constexpr double stefanBoltzmann = 5.670374419e-8;
 constexpr double gasConstantAir = 287.05287;
 constexpr double standardGravity = 9.80665;
 
-enum class Module : unsigned { Terrain, Ocean, Atmosphere, Climate, Biomes, SurfaceDetail, Wind, Clouds, Hydrology, Erosion, Landforms, Caves, WaterMotion, PlantGrowth, GlobalWeather, Sound, Rivers, InlandWaters, Fauna, Snow, Count };
+enum class Module : unsigned { Terrain, Ocean, Atmosphere, Climate, Biomes, SurfaceDetail, Wind, Clouds, Hydrology, Erosion, Landforms, Caves, WaterMotion, PlantGrowth, GlobalWeather, Sound, Rivers, InlandWaters, Fauna, Snow, Phenomena, Count };
 constexpr auto moduleCount = static_cast<unsigned>(Module::Count);
-constexpr std::array<std::string_view, moduleCount> moduleNames{"Terrain", "Ocean", "Atmosphere", "Climate", "Biomes", "Surface detail", "Wind", "Clouds", "Surface water", "Erosion", "Landforms", "Caves", "Water motion", "Plant growth", "Global weather", "Sound", "Rivers", "Lakes and wetlands", "Fauna", "Snow"};
+constexpr std::array<std::string_view, moduleCount> moduleNames{"Terrain", "Ocean", "Atmosphere", "Climate", "Biomes", "Surface detail", "Wind", "Clouds", "Surface water", "Erosion", "Landforms", "Caves", "Water motion", "Plant growth", "Global weather", "Sound", "Rivers", "Lakes and wetlands", "Fauna", "Snow", "Atmospheric phenomena"};
 class Modules {
 public:
     bool requested(Module module) const;

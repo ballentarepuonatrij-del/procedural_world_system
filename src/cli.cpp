@@ -2,6 +2,7 @@
 #include "planet/surface_detail.hpp"
 #include "planet/sound.hpp"
 #include "planet/rivers.hpp"
+#include "planet/phenomena.hpp"
 #include <charconv>
 #include <cstdlib>
 #include <fstream>
@@ -42,6 +43,7 @@ int main(int argc, char** argv) {
         bool deer=false,faunaEnabled=true,snowEnabled=true;std::optional<double> faunaSeconds,snowSeconds;
         std::optional<planet::SnowExperiment> snowSite;
         std::optional<planet::Biome> forestSite;
+        std::optional<planet::Phenomenon> phenomenon;bool phenomenaEnabled=true;
         for (int i=1; i<argc; ++i) {
             const std::string arg = argv[i];
             const auto next = [&]() -> std::string {
@@ -58,6 +60,8 @@ int main(int argc, char** argv) {
                 snowSite=planet::snowExperiment(next());
                 if(!snowSite) throw std::invalid_argument("Snow must be natural, fine, large, blizzard, drifting or thaw");
             }
+            else if(arg=="--phenomenon") {phenomenon=planet::phenomenonType(next());if(!phenomenon) throw std::invalid_argument("Phenomenon must be natural, rainbow, halo, pillar, aurora, lightning, fog or dust");}
+            else if(arg=="--no-phenomena") phenomenaEnabled=false;
             else if(arg=="--no-snow") snowEnabled=false;
             else if(arg=="--snow-seconds") {
                 snowSeconds=number(next());
@@ -133,6 +137,7 @@ int main(int argc, char** argv) {
                 std::cout << "Global water: [--rivers] [--river stream|river|major] [--no-rivers] [--no-inland-waters]\n";
                 std::cout << "Flowering: [--meadow] [--flora-day days_since_perihelion]\n";
                 std::cout << "Forests: [--forest jungle|temperate|taiga|mixed]; highlands: --landmark mountains|valley\n";
+                std::cout << "Atmosphere: [--phenomenon natural|rainbow|halo|pillar|aurora|lightning|fog|dust] [--no-phenomena]\n";
                 std::cout << "Snow: [--snow natural|fine|large|blizzard|drifting|thaw] [--snow-seconds 0..3600] [--no-snow]\n";
                 std::cout << "Animals: [--deer] [--fauna-seconds 0..3600] [--no-fauna]\n";
                 std::cout << "Procedural audio: [--audio output.wav] [--audio-seconds 0.1..60] [--volume 0..100] [--no-sound]\n";
@@ -147,7 +152,7 @@ int main(int argc, char** argv) {
         if(faunaSeconds && !deer) throw std::invalid_argument("--fauna-seconds requires --deer");
         if(snowSeconds && !snowSite) throw std::invalid_argument("--snow-seconds requires --snow");
         const double duration=waterSeconds.value_or(weatherSeconds.value_or(0))+snowSeconds.value_or(0);
-        planet::World world(config);world.modules().set(planet::Module::GlobalWeather,globalEnabled);
+        planet::World world(config);world.modules().set(planet::Module::Phenomena,phenomenaEnabled);world.modules().set(planet::Module::GlobalWeather,globalEnabled);
         world.modules().set(planet::Module::Sound,soundEnabled);
         world.modules().set(planet::Module::Fauna,faunaEnabled);world.modules().set(planet::Module::Snow,snowEnabled);
         world.modules().set(planet::Module::Rivers,riversEnabled);world.modules().set(planet::Module::InlandWaters,inlandEnabled);
@@ -179,6 +184,10 @@ int main(int argc, char** argv) {
             const auto p=world.waterNetwork()->find(*riverSite,world.findLand()).center;
             lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
         }
+        if(phenomenon && *phenomenon!=planet::Phenomenon::Natural) {
+            const auto site=planet::findPhenomenon(world,*phenomenon,day*86400);
+            lat=planet::degrees(planet::latitude(site.position));lon=planet::degrees(planet::longitude(site.position));day=site.seconds/86400;sample=true;
+        }
         auto location=planet::direction(planet::radians(lat),planet::radians(lon));
         if(snowSite) {
             location=planet::findSnowfield(world,sample ? location : world.findLand(),day*86400);
@@ -194,7 +203,7 @@ int main(int argc, char** argv) {
         }
         std::optional<planet::Simulation> model;
         double previewSeconds=0;
-        if(weatherSeconds || waterSeconds || waterWind || coast || globalOutput || snowSite || !audioPath.empty()) {
+        if(phenomenon || !phenomenaEnabled || weatherSeconds || waterSeconds || waterWind || coast || globalOutput || snowSite || !audioPath.empty()) {
             model.emplace(world,location,day*86400,waterWind,globalHours);previewSeconds=model->global.elapsed();
             if(storm) {
                 if(!model->global.strongest(*storm)) throw std::runtime_error("No active storm of the requested kind on this planet");
@@ -238,6 +247,20 @@ int main(int argc, char** argv) {
                       << ",\n  \"water_depth_m\": " << s.waterDepth
                       << ",\n  \"wetness\": " << s.wetness
                       << ",\n  \"biome\": \"" << planet::biomeName(s.biome) << '"';
+            if(phenomenon || !phenomenaEnabled) {
+                const double altitude=world.surface(location)+1.75;
+                const auto forcing=planet::phenomenaForcing(world,*model,location,altitude,finalTime,phenomenon.value_or(planet::Phenomenon::Natural),totalDuration);
+                const auto state=planet::atmosphericPhenomena(config,location,finalTime,forcing);
+                double flashes=0;for(const auto& flash:state.flashes) flashes+=flash.intensity;
+                std::cout << ",\n  \"phenomena\": {\"enabled\": " << (state.enabled ? "true" : "false")
+                    << ", \"experiment\": \"" << planet::phenomenonName(phenomenon.value_or(planet::Phenomenon::Natural)) << '"'
+                    << ", \"rainbow\": " << state.rainbow << ", \"halo\": " << state.halo << ", \"pillar\": " << state.pillar
+                    << ", \"aurora\": " << state.aurora << ", \"distant_lightning\": " << flashes << ", \"fog\": " << state.fog << ", \"dust\": " << state.dust
+                    << ", \"visibility_m\": " << state.visibility << ", \"dew_point_K\": " << state.dewPointK
+                    << ", \"magnetic_latitude_deg\": " << planet::degrees(state.magneticLatitude)
+                    << ", \"optical_triangles\": " << planet::atmosphericSky(config,location,altitude,finalTime,finalTime,state).size()/3
+                    << ", \"dust_particles\": " << planet::dustParticles(config,location,altitude-1.75,finalTime,forcing.velocity,state.dust).size() << '}';
+            }
             if(snowSite || !snowEnabled) {
                 const auto pack=model ? model->water.snow.sample(location) : planet::SnowSample{};
                 const auto b=model ? model->water.snow.budget() : planet::SnowBudget{};

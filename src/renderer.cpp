@@ -340,7 +340,17 @@ void Renderer::drawSky(const World& world,const Explorer& explorer,const ViewSta
         }
         glEnd();
     }
+    if(!view.globe) drawAtmosphericSky(world,explorer,view);
     glMatrixMode(GL_MODELVIEW);glPopMatrix();glMatrixMode(GL_PROJECTION);glPopMatrix();glMatrixMode(GL_MODELVIEW);glPopAttrib();
+}
+void Renderer::drawAtmosphericSky(const World& world,const Explorer& explorer,const ViewState& view) {
+    DrawTimer timer{timings_.phenomena};
+    const auto mesh=atmosphericSky(world.config(),explorer.up(),explorer.altitude(),view.seconds,phenomenaSeconds_,phenomena_);
+    opticalTriangles_=mesh.size()/3;if(mesh.empty()) return;
+    glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+    glBegin(GL_TRIANGLES);
+    for(const auto& v:mesh) {glColor4f(v.color.r,v.color.g,v.color.b,v.alpha);glVertex3d(v.direction.x*997,v.direction.y*997,v.direction.z*997);}
+    glEnd();
 }
 void Renderer::prepareFauna(const World& world,const Explorer& explorer,const Fauna& fauna,bool shadows,Vec3 sun) {
     DrawTimer timer{timings_.fauna};deerFaces_.clear();deerShadows_.clear();deerCount_=0;
@@ -450,6 +460,13 @@ void Renderer::drawShadows(Vec3 sun,bool textured) {
 }
 void Renderer::draw(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view) {
     timings_={};deerCount_=0;snowCount_=coarseSnowCount_=blowingSnowCount_=0;deerFaces_.clear();deerShadows_.clear();
+    opticalTriangles_=dustCount_=0;phenomena_={};phenomenaForcing_={};phenomenaForcing_.enabled=false;
+    phenomenaSeconds_=view.seconds;
+    if(!view.globe && !explorer.underwater() && !explorer.underground() && world.modules().enabled(Module::Phenomena)) {
+        DrawTimer timer{timings_.phenomena};
+        phenomenaForcing_=phenomenaForcing(world,simulation,explorer.up(),explorer.altitude(),view.seconds,view.phenomenon,phenomenaSeconds_-view.phenomenonEpoch);
+        phenomena_=atmosphericPhenomena(world.config(),explorer.up(),view.seconds,phenomenaForcing_);
+    }
     const double travelSpeed=dirty_ || length(previousObserver_)<.5 || view.frameSeconds<=0 ? 0 :
         length(explorer.up()-previousObserver_)*world.config().radius/view.frameSeconds;
     previousObserver_=explorer.up();
@@ -474,11 +491,20 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
         conditions.sunCloudWater=air.available ? air.cloudWater : simulation.global.sample(cloudPoint).cloud;
     }
     if(snowAir.fallingMmH>.1) {conditions.cloudWater=std::max(conditions.cloudWater,1.5);conditions.sunCloudWater=std::max(conditions.sunCloudWater,1.5);}
+    if(phenomena_.enabled && view.phenomenon!=Phenomenon::Natural) {
+        conditions.cloudWater=phenomenaForcing_.cloudWater;conditions.sunCloudWater=phenomenaForcing_.sunCloudWater;conditions.rainMmH=phenomenaForcing_.rainMmH;
+    }
     lighting_=lighting(world.config(),explorer.up(),view.seconds,conditions);shadowsUsed_=false;starCount_=0;
     const double whiteout=clamp(1-snowAir.visibility/3000,0.,.92);
     const float snowLight=static_cast<float>(.22+.55*lighting_.daylight);
     const auto snowySky=[&](Color c){return Color{static_cast<float>(mix(c.r,snowLight,whiteout)),static_cast<float>(mix(c.g,snowLight*1.02,whiteout)),static_cast<float>(mix(c.b,snowLight*1.05,whiteout))};};
     lighting_.horizonColor=snowySky(lighting_.horizonColor);lighting_.zenith=snowySky(lighting_.zenith);lighting_.starVisibility*=1-whiteout;
+    const double haze=clamp(1-phenomena_.visibility/3000,0.,.96);
+    const float hazeLight=static_cast<float>(.24+.66*lighting_.daylight);
+    const auto hazySky=[&](Color c,double amount) {return Color{static_cast<float>(mix(c.r,phenomena_.haze.r*hazeLight,amount)),static_cast<float>(mix(c.g,phenomena_.haze.g*hazeLight,amount)),static_cast<float>(mix(c.b,phenomena_.haze.b*hazeLight,amount))};};
+    lighting_.horizonColor=hazySky(lighting_.horizonColor,haze);lighting_.zenith=hazySky(lighting_.zenith,haze*.85);lighting_.starVisibility*=1-haze;
+    const float transmission=static_cast<float>(1-haze*.85);
+    lighting_.sunlight={lighting_.sunlight.r*transmission,lighting_.sunlight.g*transmission,lighting_.sunlight.b*transmission};lighting_.direct*=transmission;
     const double daylight=lighting_.daylight*(1-.55*lighting_.cloudCover);
     const bool wireframe=view.surfaceStyle==SurfaceStyle::Wireframe && !view.globe;
     const auto liquid=liquidAt(world,&water,&simulation.motion,explorer.up());
@@ -574,7 +600,8 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
             const GLfloat fog[]{color.r,color.g,color.b,1};
             glEnable(GL_FOG); glFogfv(GL_FOG_COLOR,fog); glFogi(GL_FOG_MODE,GL_EXP2);
             const double snowFog=snowAir.visibility<100000 ? 1.978/snowAir.visibility : 0;
-            glFogf(GL_FOG_DENSITY,static_cast<float>(std::max((.000025+.000018*std::sqrt(rain))*std::exp(-std::max(explorer.altitude(),0.0)/8500),snowFog)));
+            const double hazeFog=phenomena_.visibility<100000 ? 1.978/phenomena_.visibility : 0;
+            glFogf(GL_FOG_DENSITY,static_cast<float>(std::max({(.000025+.000018*std::sqrt(rain))*std::exp(-std::max(explorer.altitude(),0.0)/8500),snowFog,hazeFog})));
         } else glDisable(GL_FOG);
         const bool showGrid=view.surfaceStyle!=SurfaceStyle::Natural;
         if(showGrid) { glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(1.0f,1.0f); }
@@ -630,9 +657,10 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
             glDisable(GL_LINE_SMOOTH); glDisable(GL_BLEND);
             glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
         }
+        if(phenomena_.visibility<100000 && !wireframe) glEnable(GL_FOG);
         drawWater(world,explorer,simulation,view,daylight);
         drawRivers(world,explorer,simulation,view,daylight);
-        if(!submerged) {drawWeather(world,explorer,simulation,view,daylight);drawSnow(world,explorer,simulation,lighting_.daylight);}
+        if(!submerged) {drawWeather(world,explorer,simulation,view,daylight);drawSnow(world,explorer,simulation,lighting_.daylight);drawDust(world,explorer);}
     }
     drawHud(world,explorer,simulation,view);
 }
@@ -891,12 +919,13 @@ void Renderer::drawWeather(const World& world,const Explorer& explorer,const Sim
     std::vector<Sprite> sprites;
     if(weather.cloudsEnabled()) for(const auto& p:weather.clouds()) {
         const auto s=weather.sampleLocal(p.x,p.z);
-        if(!s.available || s.cloudWater<0.004) continue;
+        const double cloudWater=phenomena_.enabled && view.phenomenon!=Phenomenon::Natural ? phenomenaForcing_.cloudWater : s.cloudWater;
+        if(!s.available || cloudWater<0.004) continue;
         const Vec3 center=weather.position(p.x,p.z,weather.layerAltitude()+p.height);
         const double depth=dot(center-eye,explorer.forward());
         if(depth < -p.size || length(center-eye)>Weather::extent) continue;
         const double edge=1-smoothstep(Weather::extent*0.40,Weather::extent*0.50,std::max(std::abs(p.x),std::abs(p.z)));
-        const float alpha=static_cast<float>((1-std::exp(-s.cloudWater*7))*edge*0.72);
+        const float alpha=static_cast<float>((1-std::exp(-cloudWater*7))*edge*0.72);
         if(alpha<0.005f) continue;
         sprites.push_back({local(center-origin),depth,p.size,alpha,static_cast<float>(0.90+0.10*randomUnit(p.id+8))});
     }
@@ -998,6 +1027,27 @@ void Renderer::drawSnow(const World& world,const Explorer& explorer,const Simula
         emit(center-horizontal-vertical,0,0);emit(center+horizontal-vertical,1,0);
         emit(center+horizontal+vertical,1,1);emit(center-horizontal+vertical,0,1);
         ++snowCount_;if(p.coarse) ++coarseSnowCount_;if(p.blowing) ++blowingSnowCount_;
+    }
+    glEnd();glPopAttrib();
+}
+void Renderer::drawDust(const World& world,const Explorer& explorer) {
+    DrawTimer timer{timings_.phenomena};if(phenomena_.dust<.01) return;
+    const auto particles=dustParticles(world.config(),explorer.up(),explorer.altitude()-phenomenaForcing_.aboveGround,phenomenaSeconds_,phenomenaForcing_.velocity,phenomena_.dust);
+    const auto local=[&](Vec3 p) {const auto q=p-anchor_*world.config().radius;return Vec3{dot(q,east_),dot(q,anchor_),dot(q,north_)};};
+    const auto vector=[&](Vec3 p) {return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)};};
+    const auto eye=explorer.up()*(world.config().radius+explorer.altitude());
+    const auto right=vector(explorer.right()),up=vector(normalized(cross(explorer.right(),explorer.forward())));
+    const float light=static_cast<float>(.3+.7*lighting_.daylight);
+    glPushAttrib(GL_ALL_ATTRIB_BITS);glDisable(GL_LIGHTING);glDisable(GL_FOG);glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDepthMask(GL_FALSE);
+    glEnable(GL_TEXTURE_2D);glBindTexture(GL_TEXTURE_2D,cloudTexture_);glBegin(GL_QUADS);
+    for(const auto& p:particles) {
+        if(dot(p.position-eye,explorer.forward())<1 || p.opacity<.001) continue;
+        const auto center=local(p.position),horizontal=right*(p.radius*2),vertical=up*p.radius;
+        glColor4f(.65f*light,.46f*light,.24f*light,static_cast<float>(p.opacity));
+        const auto emit=[](Vec3 v,double u,double w){glTexCoord2d(u,w);glVertex3d(v.x,v.y,v.z);};
+        emit(center-horizontal-vertical,0,0);emit(center+horizontal-vertical,1,0);
+        emit(center+horizontal+vertical,1,1);emit(center-horizontal+vertical,0,1);++dustCount_;
     }
     glEnd();glPopAttrib();
 }
@@ -1130,7 +1180,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(40,h-104,"AIR     " + fixed(sample.density,3) + " kg/m3",muted);
     } else text(40,h-126,"ATMOSPHERE DISABLED",muted);
     text(40,h-82,"RAIN    " + (world.modules().enabled(Module::Climate) ? fixed(sample.precipitation,0)+" mm/y (estimate)" : "--"),muted);
-    rect(w-288,85,266,289,panel,0.90f);
+    rect(w-288,85,266,301,panel,0.90f);
     text(w-272,106,"SIMULATION MODULES",mint);
     for(unsigned i=0;i<moduleCount;++i) {
         const auto m=static_cast<Module>(i);
@@ -1139,7 +1189,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(w-272,y,std::string(moduleNames[i]),on?white:muted);
         text(w-90,y,on ? "ON" : (world.modules().requested(m) ? "WAIT" : "OFF"),on?mint:muted);
     }
-    text(w-272,370,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
+    text(w-272,382,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
     rect(22,h-51,w-44,29,panel,0.9f);
     text(35,h-31,view.globe ? "RMB drag: rotate   LMB: travel   TAB surface   ESC settings   CTRL+U interface" :
         (view.captured ? "ESC release mouse" : "CLICK look / ESC settings") + std::string("   WASD  F fly  TAB globe  CTRL+U interface"),white);
@@ -1149,7 +1199,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(w-340,h-185,"SHIFT faster   SPACE jump / up",white);
         text(w-340,h-164,"CTRL down      WHEEL flight speed",white);
         text(w-340,h-143,"+/- time  P pause  CTRL+S seed",white);
-        text(w-340,h-122,"ESC settings / HOME landing",white);
+        text(w-340,h-122,"F6 atmosphere / HOME landing",white);
         text(w-340,h-101,"F7 rivers  X forests  J mountains",muted);
         text(w-340,h-80,"F9 lakes F10 coast F11 deer F12 snow",mint);
     }
@@ -1162,13 +1212,15 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
     text(w/2-80,60,!world.modules().enabled(Module::Sound) ? "SOUND OFF" :
         (!view.audioAvailable ? "SOUND / NO DEVICE" : "SOUND "+fixed(view.volume*100,0)+"%"),muted);
     if(view.shadowsEnabled && !shadowSupport()) text(w/2-115,80,"SHADOWS: NO STENCIL BUFFER",muted);
+    if(!view.globe && view.phenomenon!=Phenomenon::Natural) text(w/2-115,100,"ATMOSPHERE DEMO / "+std::string(phenomenonName(view.phenomenon)),mint);
+    if(phenomena_.visibility<10000) text(w/2-95,120,"VISIBILITY "+fixed(phenomena_.visibility,0)+" m",muted);
     glDisable(GL_BLEND);
 }
 bool globeHudHit(const ViewState& view,int x,int y) {
     if(!view.interfaceVisible) return false;
     const auto inside=[&](int left,int top,int width,int height) {return x>=left && x<left+width && y>=top && y<top+height;};
     return inside(22,22,292,86) || inside(22,120,292,238) || inside(22,view.height-242,292,174) ||
-        inside(view.width-288,22,266,58) || inside(view.width-288,98,266,274) ||
+        inside(view.width-288,22,266,58) || inside(view.width-288,85,266,301) ||
         inside(view.width/2-90,45,180,20) ||
         inside(22,view.height-51,view.width-44,29) || (view.help && inside(view.width-358,view.height-232,336,165));
 }

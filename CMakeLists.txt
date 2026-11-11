@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(PlanetLab VERSION 0.19.0 LANGUAGES CXX)
+project(PlanetLab VERSION 0.20.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,6 +9,7 @@ option(PLANET_BUILD_DESKTOP "Build the Win32 explorer" ${WIN32})
 option(PLANET_SANITIZERS "Enable address and undefined behavior sanitizers" OFF)
 
 add_library(planet_core src/model.cpp src/landforms.cpp src/surface_detail.cpp src/flora.cpp src/navigation.cpp src/weather.cpp src/global_weather.cpp src/hydrology.cpp src/water_motion.cpp src/sound.cpp src/preferences.cpp src/globe_camera.cpp src/lighting.cpp src/shadows.cpp src/detail_mesh.cpp src/rivers.cpp src/terrain_mesh.cpp src/landscape.cpp src/fauna.cpp src/deer_mesh.cpp src/snow.cpp)
+target_sources(planet_core PRIVATE src/phenomena.cpp)
 find_package(Threads REQUIRED)
 target_link_libraries(planet_core PUBLIC Threads::Threads)
 target_include_directories(planet_core PUBLIC include)
@@ -50,9 +51,11 @@ if(BUILD_TESTING)
     if(MINGW)
         target_link_options(planet_tests PRIVATE -static -static-libgcc -static-libstdc++)
     endif()
-    foreach(suite IN ITEMS astronomy atmosphere terrain modules navigation climate detail weather hydrology landforms water_motion flora global_weather sound preferences globe_camera lighting shadows rivers landscape fauna snow biomes)
+    foreach(suite IN ITEMS astronomy atmosphere terrain modules navigation climate detail weather hydrology landforms water_motion flora global_weather sound preferences globe_camera lighting shadows rivers landscape fauna snow biomes phenomena)
         add_test(NAME ${suite} COMMAND planet_tests ${suite})
     endforeach()
+    add_test(NAME cli_phenomena COMMAND ${CMAKE_COMMAND}
+        -DCLI=$<TARGET_FILE:planet_cli> -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_phenomena.cmake)
     add_test(NAME cli_sample COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:planet_cli> -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_cli.cmake)
 endif()

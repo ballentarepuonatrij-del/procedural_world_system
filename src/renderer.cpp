@@ -662,6 +662,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
         drawRivers(world,explorer,simulation,view,daylight);
         if(!submerged) {drawWeather(world,explorer,simulation,view,daylight);drawSnow(world,explorer,simulation,lighting_.daylight);drawDust(world,explorer);}
     }
+    tone_.apply(view.width,view.height,view.gamma,view.brightness);
     drawHud(world,explorer,simulation,view);
 }
 void Renderer::drawWater(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double daylight) {
@@ -1198,10 +1199,10 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(w-340,h-208,explorer.flying ? "FLIGHT / "+fixed(explorer.flightSpeed,0)+" m/s" : (explorer.swimming() ? "SWIM / 1.6 m/s + CURRENT" : "WALK / 2.5 m/s"),mint);
         text(w-340,h-185,"SHIFT faster   SPACE jump / up",white);
         text(w-340,h-164,"CTRL down      WHEEL flight speed",white);
-        text(w-340,h-143,"+/- time  P pause  CTRL+S seed",white);
+        text(w-340,h-143,"F5 save  F9 load  CTRL+S seed",white);
         text(w-340,h-122,"F6 atmosphere / HOME landing",white);
         text(w-340,h-101,"F7 rivers  X forests  J mountains",muted);
-        text(w-340,h-80,"F9 lakes F10 coast F11 deer F12 snow",mint);
+        text(w-340,h-80,"F4 lakes F10 coast F11 deer F12 snow",mint);
     }
     if(!view.globe) {
         const float cx=w/2,cy=h/2;
@@ -1213,6 +1214,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         (!view.audioAvailable ? "SOUND / NO DEVICE" : "SOUND "+fixed(view.volume*100,0)+"%"),muted);
     if(view.shadowsEnabled && !shadowSupport()) text(w/2-115,80,"SHADOWS: NO STENCIL BUFFER",muted);
     if(!view.globe && view.phenomenon!=Phenomenon::Natural) text(w/2-115,100,"ATMOSPHERE DEMO / "+std::string(phenomenonName(view.phenomenon)),mint);
+    if(!view.notice.empty()) text(w/2-150,145,view.notice,mint);
     if(phenomena_.visibility<10000) text(w/2-95,120,"VISIBILITY "+fixed(phenomena_.visibility,0)+" m",muted);
     glDisable(GL_BLEND);
 }

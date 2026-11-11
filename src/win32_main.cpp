@@ -2,6 +2,7 @@
 #include "planet/landscape.hpp"
 #include "planet/win32_audio.hpp"
 #include "planet/win32_dialogs.hpp"
+#include "planet/state.hpp"
 #include <shellapi.h>
 #include <windowsx.h>
 #include <chrono>
@@ -17,7 +18,8 @@ using namespace planet;
 struct Options {
     Config config;
     Preferences preferences;
-    std::filesystem::path settingsPath;
+    std::filesystem::path settingsPath,saveDirectory;
+    bool resumeExplicit=false,noResume=false,noAutosave=false,worldOptions=false;
     std::string settingsWarning;
     int frames=0;
     bool globe=false, detail=true, wind=true, clouds=true, water=true, erosion=true, paused=false, windTracers=false;
@@ -74,11 +76,17 @@ Options parseOptions() {
         options.rivers=modules.requested(Module::Rivers);options.inlandWaters=modules.requested(Module::InlandWaters);options.fauna=modules.requested(Module::Fauna);options.snow=modules.requested(Module::Snow);options.phenomenaEnabled=modules.requested(Module::Phenomena);
         for(int i=1;i<argc;++i) {
             const std::wstring arg=argv[i];
+            constexpr std::array neutral{L"--settings",L"--save-dir",L"--resume",L"--no-resume",L"--no-autosave",L"--frames",L"--capture",L"--report",L"--paused",L"--audio-capture",L"--volume",L"--surface-style",L"--no-sky",L"--no-shadows",L"--no-sound"};
+            if(std::none_of(neutral.begin(),neutral.end(),[&](auto value){return arg==value;})) options.worldOptions=true;
             const auto next=[&]() -> std::wstring {
                 if(++i>=argc) throw std::invalid_argument("Missing command-line value");
                 return argv[i];
             };
             if(arg==L"--settings") { (void)next(); }
+            else if(arg==L"--save-dir") options.saveDirectory=next();
+            else if(arg==L"--resume") options.resumeExplicit=true;
+            else if(arg==L"--no-resume") options.noResume=true;
+            else if(arg==L"--no-autosave") options.noAutosave=true;
             else if(arg==L"--seed") {
                 const auto value=next();
                 if(value.find_first_not_of(L"0123456789")!=value.npos) throw std::invalid_argument("Invalid seed");
@@ -225,6 +233,8 @@ Options parseOptions() {
     LocalFree(argv);
     if(options.snowSeconds>0 && !options.snowSite) throw std::invalid_argument("--snow-seconds requires --snow");
     if(!options.capture.empty() && options.frames==0) options.frames=3;
+    if(options.saveDirectory.empty()) options.saveDirectory=options.settingsPath.parent_path()/L"saves";
+    if(options.resumeExplicit && (options.noResume || options.worldOptions)) throw std::invalid_argument("--resume cannot be combined with --no-resume or world-generation options");
     return options;
 }
 World configuredWorld(const Options& options) {
@@ -240,7 +250,7 @@ class Application {
 public:
     explicit Application(Options options) : options_(std::move(options)), world_(configuredWorld(options_)), explorer_(world_), simulation_(world_,explorer_.up(),view_.seconds,options_.waterWind,options_.globalHours) {
         view_.seconds+=simulation_.global.elapsed();view_.weatherLayer=options_.weatherLayer;view_.surfaceStyle=options_.surfaceStyle;
-        view_.volume=options_.volume;
+        view_.volume=options_.volume;view_.gamma=options_.preferences.gamma;view_.brightness=options_.preferences.brightness;
         view_.interfaceVisible=options_.preferences.interfaceVisible;
         view_.skyEnabled=options_.sky;view_.shadowsEnabled=options_.shadows;
         view_.paused=options_.paused; view_.windTracers=options_.windTracers; view_.headlamp=options_.headlamp;
@@ -288,6 +298,10 @@ public:
         if(options_.look) explorer_.look(radians((*options_.look)[0])-explorer_.heading(),radians((*options_.look)[1])-explorer_.pitch());
         view_.globeCamera.center(explorer_.up());
         simulation_.fauna.advance(world_,explorer_.up(),options_.faunaSeconds,explorer_.altitude(),!view_.globe && !explorer_.underground(),false);
+        if(!options_.noResume && (options_.resumeExplicit || (!options_.frames && !options_.worldOptions))) {
+            try {if(slotExists(autoSlot)) {loadGame(autoSlot);autoLoaded_=true;if(options_.paused)view_.paused=true;}}
+            catch(const std::exception& error) {stateWarning_=error.what();autoSaveBlocked_=true;}
+        }
     }
     ~Application() {
         audio_.reset();
@@ -302,10 +316,12 @@ public:
         wc.lpfnWndProc=procedure; wc.hInstance=instance;
         wc.hCursor=LoadCursorW(nullptr,IDC_ARROW); wc.lpszClassName=L"PlanetLabWindow";
         if(!RegisterClassW(&wc)) throw std::runtime_error("Cannot register window class");
-        RECT rect{0,0,view_.width,view_.height};
-        AdjustWindowRect(&rect,WS_OVERLAPPEDWINDOW,FALSE);
+        MONITORINFO monitor{};monitor.cbSize=sizeof(MONITORINFO);
+        if(!GetMonitorInfoW(MonitorFromPoint(POINT{0,0},MONITOR_DEFAULTTOPRIMARY),&monitor)) throw std::runtime_error("Cannot read monitor work area");
+        const auto& work=monitor.rcWork;
+        initialLayout_=defaultWindowLayout(work.left,work.top,work.right-work.left,work.bottom-work.top);
         window_=CreateWindowExW(0,wc.lpszClassName,L"PlanetLab - Procedural Planet Simulator",
-            WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,rect.right-rect.left,rect.bottom-rect.top,
+            WS_OVERLAPPEDWINDOW,initialLayout_.x,initialLayout_.y,initialLayout_.width,initialLayout_.height,
             nullptr,nullptr,instance,this);
         if(!window_) throw std::runtime_error("Cannot create window");
         dc_=GetDC(window_);
@@ -322,7 +338,8 @@ public:
         audio_->update(soundScene(world_,simulation_,explorer_,view_.volume,view_.paused,view_.globe));
         RAWINPUTDEVICE mouse{0x01,0x02,0,window_};
         if(!RegisterRawInputDevices(&mouse,1,sizeof(mouse))) throw std::runtime_error("Cannot register raw mouse input");
-        ShowWindow(window_,show); UpdateWindow(window_);
+        ShowWindow(window_,show==SW_SHOWMAXIMIZED ? SW_SHOWNORMAL : show); UpdateWindow(window_);
+        if(!stateWarning_.empty() && !options_.frames) MessageBoxW(window_,L"Не удалось загрузить автосохранение и его резервную копию. Открыт исходный мир; повреждённый слот не будет перезаписан в этом сеансе. Можно загрузить другой слот или выбрать новый Seed.",L"PlanetLab — Автосохранение",MB_OK|MB_ICONWARNING);
         if(!options_.settingsWarning.empty() && options_.frames==0)
             MessageBoxW(window_,L"Не удалось прочитать настройки. Использованы стандартные значения. Исходный файл будет заменён только при нажатии ОК в настройках.",L"PlanetLab — Настройки",MB_OK|MB_ICONWARNING);
         using Clock=std::chrono::steady_clock;
@@ -343,6 +360,7 @@ public:
             if(!running_) break;
             if(IsIconic(window_)) {SoundScene quiet;audio_->update(quiet);Sleep(50);last=Clock::now();continue;}
             const auto now=Clock::now();
+            if(now>noticeUntil_) view_.notice.clear();
             if(resetFrameClock_) {last=now;resetFrameClock_=false;}
             const double elapsed=std::chrono::duration<double>(now-last).count();
             last=now;
@@ -396,6 +414,7 @@ public:
             }
             Sleep(8);
         }
+        autosave();
         audio_->stop();if(!options_.audioCapture.empty()) audio_->saveCapture(options_.audioCapture);
         if(!options_.report.empty()) {
             std::ofstream out(options_.report);
@@ -511,6 +530,13 @@ public:
                 << "\ndeer_nearest_m=" << (deer.empty() ? -1 : nearestDeer) << '\n';
             for(unsigned i=0;i<activities.size();++i) out << "deer_activity_" << i << '=' << activities[i] << '\n';
             for(unsigned i=0;i<moduleCount;++i) out << moduleNames[i] << '=' << world_.modules().enabled(static_cast<Module>(i)) << '\n';
+            RECT windowRect{};GetWindowRect(window_,&windowRect);
+            out << "gamma=" << view_.gamma << "\nbrightness=" << view_.brightness << "\ntone_backend=" << renderer_->toneBackend()
+                << "\nsaves=" << saves_ << "\nloads=" << loads_ << "\nlast_save_slot=" << lastSaveSlot_ << "\nlast_load_slot=" << lastLoadSlot_
+                << "\nauto_loaded=" << autoLoaded_ << "\nauto_saved=" << autoSaved_ << "\nauto_save_blocked=" << autoSaveBlocked_ << "\nrecovered_save=" << recoveredSave_
+                << "\nstate_warning=" << stateWarning_ << "\nwindow_x=" << windowRect.left << "\nwindow_y=" << windowRect.top
+                << "\nwindow_width=" << windowRect.right-windowRect.left << "\nwindow_height=" << windowRect.bottom-windowRect.top
+                << "\nheading=" << explorer_.heading() << "\npitch=" << explorer_.pitch() << '\n';
             if(!out) throw std::runtime_error("Cannot write smoke report");
         }
         return 0;
@@ -519,7 +545,7 @@ private:
     Preferences currentPreferences() const {
         Preferences p;p.modules=world_.modules();p.grid=view_.surfaceStyle==SurfaceStyle::Grid;
         p.interfaceVisible=view_.interfaceVisible;p.volume=static_cast<unsigned>(std::lround(view_.volume*100));
-        p.sky=view_.skyEnabled;p.shadows=view_.shadowsEnabled;
+        p.sky=view_.skyEnabled;p.shadows=view_.shadowsEnabled;p.gamma=view_.gamma;p.brightness=view_.brightness;
         p.seed=world_.config().seed;return p;
     }
     void endGlobeDrag() {
@@ -533,18 +559,77 @@ private:
         catch(const std::exception& error) {MessageBoxA(window_,error.what(),"PlanetLab",MB_OK|MB_ICONERROR);}
         resetFrameClock_=true;
     }
+    void applyDisplay(const Preferences& next) {
+        view_.surfaceStyle=next.grid ? SurfaceStyle::Grid : SurfaceStyle::Natural;
+        view_.interfaceVisible=next.interfaceVisible;view_.volume=next.volume/100.0;
+        view_.skyEnabled=next.sky;view_.shadowsEnabled=next.shadows;view_.gamma=next.gamma;view_.brightness=next.brightness;
+    }
+    SessionState sessionState() const {
+        SessionState state;state.seconds=view_.seconds;state.timeScale=view_.timeScale;state.phenomenonEpoch=view_.phenomenonEpoch;
+        state.paused=view_.paused;state.globe=view_.globe;state.help=view_.help;state.headlamp=view_.headlamp;
+        state.windTracers=view_.windTracers;state.waterTracers=view_.waterTracers;state.floraInfo=view_.floraInfo;state.faunaInfo=view_.faunaInfo;
+        state.weatherLayer=static_cast<unsigned>(view_.weatherLayer);state.phenomenon=view_.phenomenon;
+        state.globeOutward=view_.globeCamera.outward;state.globeUp=view_.globeCamera.up;return state;
+    }
+    bool slotExists(unsigned slot) const {
+        const auto path=slotPath(options_.saveDirectory,slot);auto backup=path;backup+=L".bak";
+        return std::filesystem::is_regular_file(path) || std::filesystem::is_regular_file(backup);
+    }
+    void notice(std::string text) {view_.notice=std::move(text);noticeUntil_=std::chrono::steady_clock::now()+std::chrono::seconds(5);}
+    void saveGame(unsigned slot) {
+        saveState(slotPath(options_.saveDirectory,slot),world_,explorer_,simulation_,sessionState());
+        ++saves_;lastSaveSlot_=static_cast<int>(slot);resetFrameClock_=true;
+        notice(slot==quickSlot ? "QUICK SAVE COMPLETE" : slot==autoSlot ? "AUTO SAVE COMPLETE" : "SAVED: SLOT "+std::to_string(slot+1));
+    }
+    void loadGame(unsigned slot) {
+        auto next=loadState(slotPath(options_.saveDirectory,slot));
+        endGlobeDrag();captureMouse(false);
+        world_=std::move(next->world);explorer_=std::move(next->explorer);simulation_=std::move(next->simulation);
+        const auto& state=next->session;view_.seconds=state.seconds;view_.timeScale=state.timeScale;view_.phenomenonEpoch=state.phenomenonEpoch;
+        view_.paused=state.paused;view_.globe=state.globe;view_.help=state.help;view_.headlamp=state.headlamp;
+        view_.windTracers=state.windTracers;view_.waterTracers=state.waterTracers;view_.floraInfo=state.floraInfo;view_.faunaInfo=state.faunaInfo;
+        view_.weatherLayer=static_cast<WeatherLayer>(state.weatherLayer);view_.phenomenon=state.phenomenon;
+        view_.globeCamera.outward=state.globeOutward;view_.globeCamera.up=state.globeUp;
+        if(renderer_) renderer_->invalidate();
+        ++loads_;lastLoadSlot_=static_cast<int>(slot);resetFrameClock_=true;autoSaveBlocked_=false;recoveredSave_=next->recovered;
+        notice(next->recovered ? "LOADED PREVIOUS BACKUP" : "WORLD RESTORED");
+    }
+    void autosave(bool quiet=false) {
+        if(autoSaved_ || autoSaveBlocked_ || options_.noAutosave || (options_.frames && !options_.resumeExplicit))return;
+        try {saveGame(autoSlot);autoSaved_=true;}
+        catch(const std::exception& error) {
+            stateWarning_=error.what();
+            if(!quiet && !options_.frames) MessageBoxW(window_,L"Не удалось записать автосохранение. Предыдущие сохранения оставлены на диске.",L"PlanetLab — Автосохранение",MB_OK|MB_ICONWARNING);
+        }
+    }
+    SlotInfo slotInfo(unsigned slot) const {
+        SlotInfo info;info.available=slotExists(slot);
+        if(const auto meta=readSaveMetadata(slotPath(options_.saveDirectory,slot))) {
+            FILETIME ft{};const auto ticks=meta->savedAt*10000000ULL+116444736000000000ULL;
+            ft.dwLowDateTime=static_cast<DWORD>(ticks);ft.dwHighDateTime=static_cast<DWORD>(ticks>>32);
+            SYSTEMTIME utc{},local{};FileTimeToSystemTime(&ft,&utc);SystemTimeToTzSpecificLocalTime(nullptr,&utc,&local);
+            wchar_t date[40]{};swprintf_s(date,L"%02u.%02u.%04u %02u:%02u",local.wDay,local.wMonth,local.wYear,local.wHour,local.wMinute);
+            info.description=std::wstring(date)+L"  Seed "+std::to_wstring(meta->seed);
+        } else info.description=info.available ? L"Файл повреждён или несовместим" : L"Пусто";
+        return info;
+    }
     void openSettings() {
         modalAction([&] {
-            ++settingsOpened_;
-            settingsDialog(window_,currentPreferences(),[&](const Preferences& next) {
-                savePreferences(options_.settingsPath,next);
-                world_.modules()=next.modules;view_.surfaceStyle=next.grid ? SurfaceStyle::Grid : SurfaceStyle::Natural;
-                view_.interfaceVisible=next.interfaceVisible;view_.volume=next.volume/100.0;
-                view_.skyEnabled=next.sky;view_.shadowsEnabled=next.shadows;
+            ++settingsOpened_;const auto initial=currentPreferences();SettingsActions actions;
+            actions.preview=[&](const Preferences& next) {
+                applyDisplay(next);renderer_->draw(world_,explorer_,simulation_,view_);SwapBuffers(dc_);
+            };
+            actions.commit=[&](const Preferences& next) {
+                savePreferences(options_.settingsPath,next);world_.modules()=next.modules;applyDisplay(next);
                 simulation_.advance(world_,explorer_.up(),0);
                 explorer_.update(world_,{},.001,&simulation_.water,&simulation_.motion,&simulation_.flora);
                 renderer_->invalidate();++settingsSaved_;
-            });
+            };
+            actions.slot=[&](unsigned slot){return slotInfo(slot);};
+            actions.save=[&](unsigned slot){saveGame(slot);};
+            actions.load=[&](unsigned slot){loadGame(slot);applyDisplay(initial);};
+            const auto result=settingsDialog(window_,initial,actions);
+            if(result==SettingsResult::Cancelled) applyDisplay(initial);
         });
     }
     void openSeed() {
@@ -561,7 +646,7 @@ private:
                 savePreferences(options_.settingsPath,preferences);
                 world_=std::move(nextWorld);explorer_=std::move(nextExplorer);simulation_=std::move(nextSimulation);
                 explorer_.teleport(world_,explorer_.up(),&simulation_.water);orientLanding();noon();
-                view_.globeCamera.center(explorer_.up());renderer_->invalidate();++seedChanges_;
+                view_.globeCamera.center(explorer_.up());renderer_->invalidate();++seedChanges_;autoSaveBlocked_=false;
             });
         });
     }
@@ -749,6 +834,13 @@ private:
             endGlobeDrag();captureMouse(false);view_.globe=!view_.globe;
             if(view_.globe) view_.globeCamera.center(explorer_.up());
         }
+        else if(key==VK_F5) {
+            try {saveGame(quickSlot);} catch(const std::exception& error) {modalAction([&]{throw std::runtime_error(error.what());});}
+        }
+        else if(key==VK_F9) modalAction([&]{
+            if(!slotExists(quickSlot)) MessageBoxW(window_,L"Быстрый слот пока пуст. Нажмите F5, чтобы сохранить состояние мира.",L"PlanetLab — Быстрая загрузка",MB_OK|MB_ICONINFORMATION);
+            else loadGame(quickSlot);
+        });
         else if(key=='H') view_.help=!view_.help;
         else if(key=='V') view_.windTracers=!view_.windTracers;
         else if(key=='U') view_.waterTracers=!view_.waterTracers;
@@ -766,7 +858,7 @@ private:
             constexpr std::array<SnowExperiment,6> tour{SnowExperiment::Fine,SnowExperiment::Large,SnowExperiment::Blizzard,SnowExperiment::Drifting,SnowExperiment::Thaw,SnowExperiment::Natural};
             visitSnow(tour[snowIndex_++%tour.size()]);
         });
-        else if(key==VK_F9) {
+        else if(key==VK_F4) {
             modalAction([&] {constexpr std::array tour{Landform::Wetland,Landform::Lake,Landform::Pond};visitLandmark(tour[inlandIndex_++%tour.size()]);});
         } else if(key==VK_F10) {
             modalAction([&] {constexpr std::array tour{Landform::Bay,Landform::Spit,Landform::Cliff,Landform::Grotto};visitLandmark(tour[coastIndex_++%tour.size()]);});
@@ -810,12 +902,14 @@ private:
         if(!app) return DefWindowProcW(window,message,wParam,lParam);
         switch(message) {
             case WM_CLOSE: app->running_=false; return 0;
+            case WM_QUERYENDSESSION: return TRUE;
+            case WM_ENDSESSION: if(wParam) {app->autosave(true);app->running_=false;}return 0;
             case WM_SIZE:
                 app->view_.width=std::max(1,static_cast<int>(LOWORD(lParam)));
                 app->view_.height=std::max(1,static_cast<int>(HIWORD(lParam))); return 0;
             case WM_GETMINMAXINFO: {
                 auto* info=reinterpret_cast<MINMAXINFO*>(lParam);
-                info->ptMinTrackSize={960,640}; return 0;
+                info->ptMinTrackSize={std::min(960,app->initialLayout_.width),std::min(640,app->initialLayout_.height)}; return 0;
             }
             case WM_ACTIVATEAPP:
                 app->focused_=wParam!=0;
@@ -883,6 +977,11 @@ private:
     HGLRC context_=nullptr;
     std::unique_ptr<Renderer> renderer_;
     std::unique_ptr<WavePlayer> audio_;
+    WindowLayout initialLayout_{0,0,960,640};
+    std::chrono::steady_clock::time_point noticeUntil_{};
+    std::string stateWarning_;
+    bool autoLoaded_=false,autoSaved_=false,autoSaveBlocked_=false,recoveredSave_=false;
+    unsigned saves_=0,loads_=0;int lastSaveSlot_=-1,lastLoadSlot_=-1;
     bool running_=true;
     bool focused_=true;
     bool resetFrameClock_=false,globeDragging_=false;

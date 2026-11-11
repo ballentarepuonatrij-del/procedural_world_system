@@ -15,6 +15,7 @@ struct LiquidSample {
     Vec3 current{};
 };
 class WaterMotion {
+    friend class StateCodec;
 public:
     WaterMotion(const World& world,Vec3 observer);
     void synchronize(const World& world,const Weather& weather,Vec3 observer);

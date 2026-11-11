@@ -6,6 +6,7 @@ class Hydrology;
 class WaterMotion;
 struct Input { double forward{}, right{}, vertical{}; bool sprint{}, jump{}; };
 class Explorer {
+    friend class StateCodec;
 public:
     explicit Explorer(const World& world);
     void update(const World& world, const Input& input, double dt,const Hydrology* water=nullptr,const WaterMotion* motion=nullptr,const Flora* flora=nullptr);

@@ -1,16 +1,9 @@
 #include "planet/preferences.hpp"
-#include <atomic>
+#include "planet/file_io.hpp"
 #include <charconv>
-#include <chrono>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
 
 namespace planet {
 namespace {
@@ -43,6 +36,10 @@ Preferences parsePreferences(std::string_view text) {
         } else if(key=="volume") {
             const auto volume=parseSeed(value);if(!volume || *volume>100) throw std::invalid_argument("Invalid saved volume");
             preferences.volume=static_cast<unsigned>(*volume);
+        } else if(key=="gamma" || key=="brightness") {
+            const auto number=parseSeed(value);
+            if(!number || *number<50 || *number>(key=="gamma" ? 250 : 150)) throw std::invalid_argument("Invalid display correction");
+            (key=="gamma" ? preferences.gamma : preferences.brightness)=static_cast<unsigned>(*number);
         } else {
             const auto module=std::find(keys.begin(),keys.end(),key);
             if(key!="grid" && key!="interface" && key!="sky" && key!="shadows" && module==keys.end()) continue;
@@ -60,7 +57,9 @@ Preferences parsePreferences(std::string_view text) {
 }
 std::string serializePreferences(const Preferences& p) {
     if(p.volume>100) throw std::invalid_argument("Volume must be 0..100");
+    (void)displayIntensity(.5,p.gamma,p.brightness);
     std::ostringstream out;out << "version=1\nseed=" << p.seed << "\ngrid=" << p.grid
+        << "\ngamma=" << p.gamma << "\nbrightness=" << p.brightness
         << "\ninterface=" << p.interfaceVisible << "\nvolume=" << p.volume << "\nsky=" << p.sky << "\nshadows=" << p.shadows << '\n';
     for(unsigned i=0;i<moduleCount;++i) out << keys[i] << '=' << p.modules.requested(static_cast<Module>(i)) << '\n';
     return out.str();
@@ -78,20 +77,15 @@ PreferencesRead loadPreferences(const std::filesystem::path& path) {
 }
 void savePreferences(const std::filesystem::path& path,const Preferences& preferences) {
     const auto text=serializePreferences(preferences);
-    if(!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path());
-    static std::atomic<unsigned long long> sequence=0;
-    auto temporary=path;temporary+=std::filesystem::path(".tmp-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+"-"+std::to_string(sequence++));
-    try {
-        std::ofstream out(temporary,std::ios::binary|std::ios::trunc);
-        if(!out) throw std::runtime_error("Cannot create temporary settings file");
-        out.write(text.data(),static_cast<std::streamsize>(text.size()));out.flush();out.close();
-        if(!out) throw std::runtime_error("Cannot write settings file");
-#ifdef _WIN32
-        if(!MoveFileExW(temporary.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
-            throw std::runtime_error("Cannot replace settings file (Windows error "+std::to_string(GetLastError())+")");
-#else
-        std::filesystem::rename(temporary,path);
-#endif
-    } catch(...) {std::error_code ignored;std::filesystem::remove(temporary,ignored);throw;}
+    atomicWriteFile(path,std::as_bytes(std::span(text.data(),text.size())));
+}
+WindowLayout defaultWindowLayout(int left,int top,int width,int height) {
+    if(width<1 || height<1 || width>100000 || height>100000 || std::abs(static_cast<long long>(left))>1000000 || std::abs(static_cast<long long>(top))>1000000) throw std::invalid_argument("Invalid monitor work area");
+    const int w=std::max(1,width*4/5),h=std::max(1,height*4/5);
+    return {left+(width-w)/2,top+(height-h)/2,w,h};
+}
+double displayIntensity(double value,unsigned gamma,unsigned brightness) {
+    if(!std::isfinite(value) || gamma<50 || gamma>250 || brightness<50 || brightness>150) throw std::invalid_argument("Invalid display correction");
+    return std::pow(clamp(value*brightness/100.,0.,1.),100./gamma);
 }
 } // namespace planet

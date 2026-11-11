@@ -9,8 +9,12 @@ struct Preferences {
     bool grid=false,interfaceVisible=true;
     bool sky=true,shadows=true;
     unsigned volume=55;
+    unsigned gamma=100,brightness=100;
     std::uint64_t seed=42;
 };
+struct WindowLayout {int x,y,width,height;};
+WindowLayout defaultWindowLayout(int left,int top,int width,int height);
+double displayIntensity(double value,unsigned gamma,unsigned brightness);
 std::optional<std::uint64_t> parseSeed(std::string_view text);
 Preferences parsePreferences(std::string_view text);
 std::string serializePreferences(const Preferences& preferences);

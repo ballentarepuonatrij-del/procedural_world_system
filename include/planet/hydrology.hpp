@@ -59,6 +59,7 @@ struct GroundSample {
     Wind2 velocity{};
 };
 class Hydrology {
+    friend class StateCodec;
 public:
     static constexpr int resolution=64;
     static constexpr double spacing=4, extent=resolution*spacing, maximumTimeScale=120;
@@ -101,6 +102,7 @@ private:
 // Shared fixed clock: weather rain over each 2 s interval feeds the ground once.
 // This avoids frame-rate-dependent rain when the renderer runs at different FPS.
 class Simulation {
+    friend class StateCodec;
 public:
     Simulation(const World& world,Vec3 observer,double seconds,std::optional<double> waterWind={},double globalHours=0);
     void advance(const World& world,Vec3 observer,double modelSeconds);

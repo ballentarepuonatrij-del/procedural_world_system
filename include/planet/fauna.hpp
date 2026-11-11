@@ -37,6 +37,7 @@ struct DeerPose {
 // Fixed resource sites, bounded active population. Unobserved herds are dormant;
 // this is local animal behaviour, not a global population/ecosystem model.
 class Fauna {
+    friend class StateCodec;
 public:
     static constexpr double fixedStep=.1,activeRadius=650,drawRadius=400;
     static constexpr std::size_t maximumHerds=3,cacheLimit=32;

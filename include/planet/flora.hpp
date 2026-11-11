@@ -50,6 +50,7 @@ double growingDegreeDays(double elapsedDays,double yearDays,double meanC,double 
 FlowerCycle flowerCycle(Species species,std::uint64_t siteId,const Config& config,Vec3 up,const Sample& annual);
 FlowerState flowerState(Species species,const PlantState& plant,const FlowerCycle& cycle,double calendarDays);
 class Flora {
+    friend class StateCodec;
 public:
     void advance(const World& world,double modelSeconds);
     void advanceDays(const World& world,double days);

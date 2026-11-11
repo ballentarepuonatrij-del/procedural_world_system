@@ -40,6 +40,7 @@ struct SnowSample {bool available=false;double bed=0,depth=0,swe=0,airborne=0,me
 struct SnowAtmosphere {SnowForcing forcing;double fraction=0,large=0,fallingMmH=0,blowing=0,visibility=100000;};
 struct SnowParticle {Vec3 up;double altitude=0,radius=0,opacity=0;bool coarse=false,blowing=false;};
 class Snow {
+    friend class StateCodec;
 public:
     static constexpr int resolution=32;
     static constexpr double spacing=8,extent=resolution*spacing;

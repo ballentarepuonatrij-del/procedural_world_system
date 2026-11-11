@@ -7,6 +7,7 @@
 #include "planet/rivers.hpp"
 #include "planet/terrain_mesh.hpp"
 #include "planet/phenomena.hpp"
+#include "planet/win32_tone.hpp"
 #include <windows.h>
 #include <GL/gl.h>
 #include <filesystem>
@@ -40,6 +41,8 @@ struct ViewState {
     bool audioAvailable=false;
     bool interfaceVisible=true;
     bool skyEnabled=true,shadowsEnabled=true;
+    unsigned gamma=100,brightness=100;
+    std::string notice;
     Phenomenon phenomenon=Phenomenon::Natural;
     double phenomenonEpoch=0;
     GlobeCamera globeCamera;
@@ -93,11 +96,13 @@ public:
     std::size_t snowCount() const {return snowCount_;}
     std::size_t coarseSnowCount() const {return coarseSnowCount_;}
     std::size_t blowingSnowCount() const {return blowingSnowCount_;}
+    const char* toneBackend() const {return tone_.backend();}
     const PhenomenaState& phenomena() const {return phenomena_;}
     std::size_t opticalTriangles() const {return opticalTriangles_;}
     std::size_t dustCount() const {return dustCount_;}
 private:
     RenderTimings timings_;
+    ToneMapper tone_;
     void buildTerrain(const World& world,const Explorer& explorer,const Hydrology& water,double seconds);
     void uploadTerrain(TerrainMesh mesh);
     void adoptTerrain(TerrainMesh mesh);

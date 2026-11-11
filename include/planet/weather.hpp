@@ -42,6 +42,7 @@ struct WaterBudget {
     double residualKg() const { return storedKg+precipitatedKg-initialKg-evaporatedKg-domainExchangeKg-synopticExchangeKg; }
 };
 class Weather {
+    friend class StateCodec;
 public:
     static constexpr int resolution=32;
     static constexpr double spacing=750, extent=resolution*spacing, layerDepth=800;

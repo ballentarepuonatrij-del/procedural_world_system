@@ -6,6 +6,7 @@
 #include "planet/globe_camera.hpp"
 #include "planet/lighting.hpp"
 #include "planet/phenomena.hpp"
+#include "planet/state.hpp"
 #include "planet/shadows.hpp"
 #include "planet/rivers.hpp"
 #include "planet/terrain_mesh.hpp"
@@ -50,12 +51,14 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
 #include "snow_tests.hpp"
 #include "biome_tests.hpp"
 #include "phenomena_tests.hpp"
+#include "state_tests.hpp"
 void registerTests() {
     registerLandscapeTests();
     registerFaunaTests();
     registerSnowTests();
     registerBiomeTests();
     registerPhenomenaTests();
+    registerStateTests();
     test("detail","CPU terrain snapshots preserve coordinates and bound flight detail",[] {
         World w;const auto p=w.findLand();Hydrology water(w,p);const double height=w.surface(p)+1.75;
         const auto fine=makeTerrainMesh(w,water,p,height,79*86400),fast=makeTerrainMesh(w,water,p,height,79*86400,64);

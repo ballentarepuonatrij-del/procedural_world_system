@@ -36,6 +36,7 @@ struct LightningStrike {
     double time=0,strength=0;
 };
 class GlobalWeather {
+    friend class StateCodec;
 public:
     static constexpr int columns=72,rows=36;
     static constexpr double fixedStep=300;

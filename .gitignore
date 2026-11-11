@@ -5,3 +5,8 @@
 *.user
 *.log
 *.ppm
+
+# Local world snapshots
+/saves/
+*.pls
+*.pls.bak

@@ -121,11 +121,10 @@ TerrainMesh makeTerrainMesh(const World& world,const Hydrology& water,Vec3 obser
     }
     const int columns=static_cast<int>(xs.size()),rows=static_cast<int>(ys.size());
     const double aboveGround=std::max(0.0,altitude-world.surface(mesh.anchor));
-    struct Vertex { Vec3 position; Color color; double u,v; float gridAlpha; Vec3 normal{}; bool ocean{}; Vec3 unit{}; double height{}; CaveColumn cavity{}; Color rockColor{}; double snow=0; };
+    struct Vertex { Vec3 position; Color color; double u,v; float gridAlpha; Vec3 normal{}; bool ocean{}; Vec3 unit{}; double height{}; CaveColumn cavity{}; Sample sample{}; GroundSample ground{}; double snow=0; SurfaceMaterial material{}; bool sheltered=false; };
     std::vector<Vertex> vertices(xs.size()*ys.size());
     mesh.waterVertices.clear(); mesh.waterTriangles.clear();
     mesh.waterVertices.reserve(vertices.size());
-    const Noise material(world.config().seed^0x695c17ULL);
     for(int y=0;y<rows;++y) for(int x=0;x<columns;++x) {
         const Vec3 p=normalized(face*radius+right*xs[static_cast<std::size_t>(x)]+down*ys[static_cast<std::size_t>(y)]);
         const auto sample=world.sample(p,seconds);
@@ -135,16 +134,6 @@ TerrainMesh makeTerrainMesh(const World& world,const Hydrology& water,Vec3 obser
         const double h=ground.available ? river.channel ? original+ground.bedChange*ground.weight : mix(original,ground.bed,ground.weight) : original;
         const double snow=cave && cave->protectedGround(p) ? 0 : water.snow.depth(p,sample);
         const Vec3 relative=p*(radius+h+snow)-mesh.anchor*radius;
-        auto color=world.color(sample);
-        if(sample.ocean) {
-            const float shallow=static_cast<float>(1-clamp((world.config().seaLevel-sample.elevation)/150,0.0,1.0));
-            color={0.13f+0.30f*shallow,0.19f+0.20f*shallow,0.20f+0.10f*shallow};
-        } else {
-            const float variation=static_cast<float>(0.87+0.22*material.fbm(p*(radius/45),2));
-            const float moisture=static_cast<float>(ground.available ? 1-0.28*ground.saturation*ground.weight : 1);
-            color.r*=variation*moisture; color.g*=variation*moisture; color.b*=variation*moisture;
-        }
-        if(river.wet) color={.34f,.30f,.22f};
         // World-anchored coordinates keep the material stationary when the local mesh recentres.
         const Vec3 global=p*(radius+h);
         const Vec3 position{dot(relative,mesh.east),dot(relative,mesh.anchor),dot(relative,mesh.north)};
@@ -154,28 +143,20 @@ TerrainMesh makeTerrainMesh(const World& world,const Hydrology& water,Vec3 obser
         if(cave && cave->coastal) {const auto c=cave->column(p);if(c.valid()) waterBed=std::min(waterBed,c.floor);}
         mesh.waterVertices.push_back({p,position,waterBed,world.modules().enabled(Module::Ocean) || world.modules().enabled(Module::InlandWaters) || (ground.available && ground.weight>0),river.wet && river.level>world.config().seaLevel+.02,localSpacing,sample.inland,sample.landform==Landform::Wetland,sample.waterLevel});
         const float alpha=static_cast<float>(1-smoothstep(1500+aboveGround*4,10000+aboveGround*12,std::hypot(position.x,position.z)));
-        const double band=0.5+0.5*std::sin(h/7.5+0.35*std::sin(h/27));
-        Color rock{0.44f,0.42f,0.36f};
-        if(sample.landform==Landform::Canyon || sample.landform==Landform::Plateau)
-            rock={static_cast<float>(0.52+0.14*band),static_cast<float>(0.30+0.12*band),static_cast<float>(0.18+0.10*band)};
-        else if(sample.landform==Landform::Karst) rock={static_cast<float>(0.48+0.12*band),static_cast<float>(0.46+0.12*band),static_cast<float>(0.39+0.12*band)};
-        else if(sample.landform==Landform::Mountains || sample.landform==Landform::Gorge) rock={0.39f,0.41f,0.42f};
-        if(cave && cave->protectedGround(p)) color=rock;
-        vertices[static_cast<std::size_t>(y*columns+x)]={position,color,
-            (global.x+global.z)*0.25,(global.y+global.z*0.37)*0.25,alpha,{},sample.ocean,p,h+snow,cave ? cave->column(p) : CaveColumn{},rock,snow};
+        const bool sheltered=cave && cave->protectedGround(p);
+        vertices[static_cast<std::size_t>(y*columns+x)]={position,{},
+            (global.x+global.z)*0.25,(global.y+global.z*0.37)*0.25,alpha,{},sample.ocean,p,h+snow,
+            cave ? cave->column(p) : CaveColumn{},sample,ground,snow,{},sheltered};
     }
     const auto at=[&](int x,int y)->Vertex& { return vertices[static_cast<std::size_t>(y*columns+x)]; };
     for(int y=0;y<rows;++y) for(int x=0;x<columns;++x) {
         auto& v=at(x,y);
         v.normal=normalized(cross(at(std::min(x+1,columns-1),y).position-at(std::max(x-1,0),y).position,
                                   at(x,std::max(y-1,0)).position-at(x,std::min(y+1,rows-1)).position));
-        if(!v.ocean) {
-            const float rock=static_cast<float>(smoothstep(0.12,0.42,1-v.normal.y));
-            v.color={static_cast<float>(mix(v.color.r,v.rockColor.r,rock)),static_cast<float>(mix(v.color.g,v.rockColor.g,rock)),
-                    static_cast<float>(mix(v.color.b,v.rockColor.b,rock))};
-            const double cover=smoothstep(0.,.06,v.snow)*smoothstep(.25,.8,v.normal.y);
-            v.color={static_cast<float>(mix(v.color.r,.87,cover)),static_cast<float>(mix(v.color.g,.92,cover)),static_cast<float>(mix(v.color.b,.96,cover))};
-        }
+        const Vec3 worldNormal=mesh.east*v.normal.x+mesh.anchor*v.normal.y+mesh.north*v.normal.z;
+        const auto material=surfaceMaterial(v.sample,v.unit*(radius+v.height-v.snow),dot(worldNormal,v.unit),
+            v.snow,v.ground,world.config().seed,world.modules().enabled(Module::Biomes),v.sheltered);
+        v.color=material.albedo;v.material=material.surface;
         // Grazing lines cover subpixel cells near the horizon. Fade them instead
         // of accumulating a bright, flickering band of overlapping edges.
         const double incidence=dot(v.normal,normalized(Vec3{0,mesh.eyeHeight,0}-v.position));
@@ -193,6 +174,9 @@ TerrainMesh makeTerrainMesh(const World& world,const Hydrology& water,Vec3 obser
         v.position={dot(relative,mesh.east),dot(relative,mesh.anchor),dot(relative,mesh.north)};
         v.normal=normalized(a.normal*(1-t)+b.normal*t);
         v.color={static_cast<float>(mix(a.color.r,b.color.r,t)),static_cast<float>(mix(a.color.g,b.color.g,t)),static_cast<float>(mix(a.color.b,b.color.b,t))};
+        for(std::size_t i=0;i<4;++i) v.material.weights[i]=static_cast<float>(mix(a.material.weights[i],b.material.weights[i],t));
+        v.material.wetness=static_cast<float>(mix(a.material.wetness,b.material.wetness,t));
+        v.material.backgroundWetness=static_cast<float>(mix(a.material.backgroundWetness,b.material.backgroundWetness,t));
         v.u=mix(a.u,b.u,t); v.v=mix(a.v,b.v,t); v.gridAlpha=static_cast<float>(mix(a.gridAlpha,b.gridAlpha,t));
         v.cavity=cave ? cave->column(v.unit) : CaveColumn{}; return v;
     };
@@ -221,7 +205,7 @@ TerrainMesh makeTerrainMesh(const World& world,const Hydrology& water,Vec3 obser
         return output;
     };
     const auto terrainVertex=[&](const Vertex& v) {
-        mesh.terrain.push_back({v.position,v.normal,v.color,v.u,v.v});
+        mesh.terrain.push_back({v.position,v.normal,v.color,v.u,v.v,v.material});
     };
 
     for(int y=0;y<rows-1;++y) for(int x=0;x<columns-1;++x) {
@@ -257,7 +241,7 @@ TerrainMesh makeTerrainMesh(const World& world,const Hydrology& water,Vec3 obser
                         const auto& v=polygon[index]; const auto p=point(v);
                         const double height=side==2 ? v.cavity.floor : v.cavity.ceiling;
                         const float shade=static_cast<float>(0.83+0.12*std::sin(height*1.5)+0.05*std::sin(height*5));
-                        mesh.caves.push_back({p,normal,{0.51f*shade,0.47f*shade,0.38f*shade},v.u,v.v});
+                        mesh.caves.push_back({p,normal,{0.51f*shade,0.47f*shade,0.38f*shade},v.u,v.v,SurfaceMaterial{{1,0,0,0},.08f,.08f}});
                     }
 
                 }

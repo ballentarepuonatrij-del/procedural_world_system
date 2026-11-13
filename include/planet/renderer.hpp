@@ -8,6 +8,7 @@
 #include "planet/terrain_mesh.hpp"
 #include "planet/phenomena.hpp"
 #include "planet/win32_tone.hpp"
+#include "planet/win32_materials.hpp"
 #include <windows.h>
 #include <GL/gl.h>
 #include <filesystem>
@@ -53,11 +54,11 @@ struct RenderTimings {
 };
 class Renderer {
 public:
-    explicit Renderer(HDC dc);
+    explicit Renderer(HDC dc,bool proceduralMaterials=true);
     ~Renderer();
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
-    void invalidate() { dirty_=true;globeDirty_=true;weatherDirty_=true;waterMapDirty_=true;++terrainEpoch_; }
+    void invalidate() { dirty_=true;globeDirty_=true;weatherDirty_=true;waterMapDirty_=true;materials_.invalidate();++terrainEpoch_; }
     void draw(const World& world, const Explorer& explorer, const Simulation& simulation,const ViewState& view);
     void capture(const std::filesystem::path& path, int width, int height) const;
     std::string device() const;
@@ -97,12 +98,14 @@ public:
     std::size_t coarseSnowCount() const {return coarseSnowCount_;}
     std::size_t blowingSnowCount() const {return blowingSnowCount_;}
     const char* toneBackend() const {return tone_.backend();}
+    const char* materialBackend() const {return materials_.backend();}
     const PhenomenaState& phenomena() const {return phenomena_;}
     std::size_t opticalTriangles() const {return opticalTriangles_;}
     std::size_t dustCount() const {return dustCount_;}
 private:
     RenderTimings timings_;
     ToneMapper tone_;
+    TerrainMaterials materials_;
     void buildTerrain(const World& world,const Explorer& explorer,const Hydrology& water,double seconds);
     void uploadTerrain(TerrainMesh mesh);
     void adoptTerrain(TerrainMesh mesh);

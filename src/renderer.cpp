@@ -53,7 +53,8 @@ GLuint makeFont(HDC dc,int size,int weight) {
 // triangles are reused for the solid and wireframe passes.
 
 }
-Renderer::Renderer(HDC dc) {
+Renderer::Renderer(HDC dc,bool proceduralMaterials) {
+    materials_.initialize(proceduralMaterials);
     font_=makeFont(dc,15,FW_NORMAL); headingFont_=makeFont(dc,28,FW_BOLD);
     terrain_=glGenLists(1); terrainGrid_=glGenLists(1); globe_=glGenLists(1); objects_=glGenLists(1); caves_=glGenLists(1);weatherMap_=glGenLists(1);shadows_=glGenLists(1);
     waterMap_=glGenLists(1);
@@ -154,11 +155,10 @@ void Renderer::buildTerrain(const World& world,const Explorer& explorer,const Hy
 }
 void Renderer::uploadTerrain(TerrainMesh mesh) {
     discardUpload();
-    const auto compile=[](GLuint list,const std::vector<TerrainVertex>& vertices) {
+    const auto compile=[&](GLuint list,const std::vector<TerrainVertex>& vertices) {
         glNewList(list,GL_COMPILE);glBegin(GL_TRIANGLES);
         for(const auto& v:vertices) {
-            glNormal3d(v.normal.x,v.normal.y,v.normal.z);glColor3f(v.color.r,v.color.g,v.color.b);
-            glTexCoord2d(v.u,v.v);glVertex3d(v.position.x,v.position.y,v.position.z);
+            materials_.vertex(v);
         }
         glEnd();glEndList();
     };
@@ -211,8 +211,8 @@ void Renderer::advanceUpload(const Flora& flora) {
         if(section<2 || section==4) {
             const auto& vertices=section==0 ? mesh.terrain : section==1 ? mesh.caves : scene.plants.vertices;
             for(std::size_t i=first;i<std::min(first+chunk,vertices.size());++i) {const auto& v=vertices[i];
-                glNormal3d(v.normal.x,v.normal.y,v.normal.z);glColor3f(v.color.r,v.color.g,v.color.b);
-                glTexCoord2d(v.u,v.v);glVertex3d(v.position.x,v.position.y,v.position.z);
+                if(section<2) materials_.vertex(v);
+                else {glNormal3d(v.normal.x,v.normal.y,v.normal.z);glColor3f(v.color.r,v.color.g,v.color.b);glVertex3d(v.position.x,v.position.y,v.position.z);}
             }
         } else if(section==2) {
             for(std::size_t i=first;i<std::min(first+chunk,mesh.grid.size());++i) {const auto& v=mesh.grid[i];
@@ -454,7 +454,7 @@ void Renderer::drawShadows(Vec3 sun,bool textured) {
     glEnable(GL_STENCIL_TEST);glStencilMask(0);glStencilFunc(GL_NOTEQUAL,0,255);glStencilOp(GL_KEEP,GL_KEEP,GL_KEEP);
     glDepthMask(GL_FALSE);glDepthFunc(GL_LEQUAL);glDisable(GL_BLEND);glEnable(GL_LIGHTING);glDisable(GL_LIGHT0);
     if(textured) {glEnable(GL_TEXTURE_2D);glBindTexture(GL_TEXTURE_2D,detailTexture_);}
-    glCallList(terrain_);glDisable(GL_TEXTURE_2D);
+    materials_.begin(textured);glCallList(terrain_);materials_.end();glDisable(GL_TEXTURE_2D);
     glLightModeli(GL_LIGHT_MODEL_TWO_SIDE,GL_TRUE);glCallList(objects_);emitFauna();
     glPopAttrib();
 }
@@ -603,6 +603,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
             const double hazeFog=phenomena_.visibility<100000 ? 1.978/phenomena_.visibility : 0;
             glFogf(GL_FOG_DENSITY,static_cast<float>(std::max({(.000025+.000018*std::sqrt(rain))*std::exp(-std::max(explorer.altitude(),0.0)/8500),snowFog,hazeFog})));
         } else glDisable(GL_FOG);
+        materials_.prepare(world,water,anchor_,east_,north_,1-smoothstep(400,1800,travelSpeed));
         const bool showGrid=view.surfaceStyle!=SurfaceStyle::Natural;
         if(showGrid) { glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(1.0f,1.0f); }
         if(wireframe) {
@@ -610,7 +611,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
             const GLfloat material[]{0.018f,0.030f,0.065f,1};
             glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT_AND_DIFFUSE,material);
         } else { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D,detailTexture_); }
-        glCallList(terrain_);
+        materials_.begin(!wireframe);glCallList(terrain_);materials_.end();
         glDisable(GL_TEXTURE_2D);
         // Leaves and marine blades are thin sheets, lit from either side.
         glLightModeli(GL_LIGHT_MODEL_TWO_SIDE,GL_TRUE);
@@ -630,7 +631,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
                 glLightf(GL_LIGHT1,GL_CONSTANT_ATTENUATION,1); glLightf(GL_LIGHT1,GL_LINEAR_ATTENUATION,0.015f);
                 glLightf(GL_LIGHT1,GL_QUADRATIC_ATTENUATION,0.0018f);
             }
-            glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D,detailTexture_); glCallList(caves_); glDisable(GL_TEXTURE_2D);
+            glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D,detailTexture_); materials_.begin(!wireframe);glCallList(caves_);materials_.end(); glDisable(GL_TEXTURE_2D);
             glPopAttrib(); // Restore the outdoor fog and light before the shadow receiver pass.
         }
         if(view.shadowsEnabled && shadowSupport() && !submerged && lighting_.direct>.002 && dot(sun.sunDirection,explorer.up())>0)

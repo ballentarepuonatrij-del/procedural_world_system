@@ -22,6 +22,7 @@ struct Options {
     bool resumeExplicit=false,noResume=false,noAutosave=false,worldOptions=false;
     std::string settingsWarning;
     int frames=0;
+    bool proceduralMaterials=true;
     bool globe=false, detail=true, wind=true, clouds=true, water=true, erosion=true, paused=false, windTracers=false;
     double weatherSeconds=0, rainMmH=0,walkSeconds=0;
     bool landforms=true,caves=true,headlamp=true;
@@ -76,7 +77,7 @@ Options parseOptions() {
         options.rivers=modules.requested(Module::Rivers);options.inlandWaters=modules.requested(Module::InlandWaters);options.fauna=modules.requested(Module::Fauna);options.snow=modules.requested(Module::Snow);options.phenomenaEnabled=modules.requested(Module::Phenomena);
         for(int i=1;i<argc;++i) {
             const std::wstring arg=argv[i];
-            constexpr std::array neutral{L"--settings",L"--save-dir",L"--resume",L"--no-resume",L"--no-autosave",L"--frames",L"--capture",L"--report",L"--paused",L"--audio-capture",L"--volume",L"--surface-style",L"--no-sky",L"--no-shadows",L"--no-sound"};
+            constexpr std::array neutral{L"--settings",L"--save-dir",L"--resume",L"--no-resume",L"--no-autosave",L"--frames",L"--capture",L"--report",L"--paused",L"--audio-capture",L"--volume",L"--surface-style",L"--basic-materials",L"--no-sky",L"--no-shadows",L"--no-sound"};
             if(std::none_of(neutral.begin(),neutral.end(),[&](auto value){return arg==value;})) options.worldOptions=true;
             const auto next=[&]() -> std::wstring {
                 if(++i>=argc) throw std::invalid_argument("Missing command-line value");
@@ -220,6 +221,7 @@ Options parseOptions() {
                 if(used!=value.size() || !std::isfinite(options.weatherSeconds) || options.weatherSeconds<0 || options.weatherSeconds>3600)
                     throw std::invalid_argument("Weather advance must be in [0,3600] seconds");
             }
+            else if(arg==L"--basic-materials") options.proceduralMaterials=false;
             else if(arg==L"--surface-style") {
                 const auto value=next();
                 if(value==L"natural") options.surfaceStyle=SurfaceStyle::Natural;
@@ -333,7 +335,7 @@ public:
         if(!chosen || !SetPixelFormat(dc_,chosen,&format)) throw std::runtime_error("Cannot select OpenGL pixel format");
         context_=wglCreateContext(dc_);
         if(!context_ || !wglMakeCurrent(dc_,context_)) throw std::runtime_error("Cannot create OpenGL context");
-        renderer_=std::make_unique<Renderer>(dc_);
+        renderer_=std::make_unique<Renderer>(dc_,options_.proceduralMaterials);
         audio_=std::make_unique<WavePlayer>(!options_.audioCapture.empty());
         audio_->update(soundScene(world_,simulation_,explorer_,view_.volume,view_.paused,view_.globe));
         RAWINPUTDEVICE mouse{0x01,0x02,0,window_};
@@ -441,6 +443,7 @@ public:
                 << "\nteleport_requests=" << teleportRequests_ << "\nteleports_confirmed=" << teleportsConfirmed_ << "\nseed_changes=" << seedChanges_
                 << "\nunderground=" << explorer_.underground() << "\nheadlamp=" << view_.headlamp
                 << "\ncave_triangles=" << renderer_->caveCount() << "\nlandform=" << landformName(world_.relief(explorer_.up()).type)
+                << "\nmaterial_backend=" << renderer_->materialBackend()
                 << "\nsurface_style=" << surfaceStyleName(view_.surfaceStyle)
                 << "\ndetail_objects=" << renderer_->detailCount()
                 << "\ncloud_sprites=" << renderer_->cloudCount() << "\nweather_steps=" << simulation_.weather.steps()

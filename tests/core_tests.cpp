@@ -10,6 +10,7 @@
 #include "planet/shadows.hpp"
 #include "planet/rivers.hpp"
 #include "planet/terrain_mesh.hpp"
+#include "planet/water_view.hpp"
 #include "planet/landscape.hpp"
 #include <future>
 #include <chrono>
@@ -54,7 +55,9 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
 #include "state_tests.hpp"
 #include "material_tests.hpp"
 #include "grass_tests.hpp"
+#include "water_view_tests.hpp"
 void registerTests() {
+    registerWaterViewTests();
     registerGrassTests();
     registerMaterialTests();
     registerLandscapeTests();

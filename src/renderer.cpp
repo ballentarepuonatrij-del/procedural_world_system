@@ -8,6 +8,7 @@
 #include <vector>
 #include <cstring>
 #include <cstdlib>
+#include <cstddef>
 
 namespace planet {
 namespace {
@@ -175,6 +176,7 @@ void Renderer::adoptTerrain(TerrainMesh mesh) {
     anchor_=mesh.anchor;east_=mesh.east;north_=mesh.north;terrainStep_=mesh.spacing;terrainEyeHeight_=mesh.eyeHeight;
     waterRevision_=mesh.waterRevision;waterSteps_=mesh.waterSteps;snowRevision_=mesh.snowRevision;lastTerrainTime_=mesh.seconds;
     terrainCasters_=std::move(mesh.casters);waterVertices_=std::move(mesh.waterVertices);waterTriangles_=std::move(mesh.waterTriangles);
+    waterSurface_.invalidate();
     objectSites_=std::move(mesh.plants);riverSegments_=std::move(mesh.rivers);caveCount_=mesh.caves.size()/3;
     grassRoots_=std::move(mesh.grass);grassGroundDirty_=true;
     lastFloraDay_=-1e30;shadowDirty_=true;dirty_=false;
@@ -520,7 +522,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
     const auto pack=water.snow.sample(explorer.up());
     const auto snowAir=water.snow.active() && pack.available && explorer.altitude()-pack.bed<100 && !view.globe && !explorer.underground() ?
         water.snow.atmosphere(world,simulation.weather,explorer.up(),pack.bed) : SnowAtmosphere{};
-    cloudCount_=0;waterCount_=0;rainCount_=0;lightningCount_=0;stormMarkerCount_=0;riverTriangles_=0;
+    cloudCount_=0;waterCount_=0;rainCount_=0;lightningCount_=0;stormMarkerCount_=0;riverTriangles_=0;waterShadedVertices_=0;riverShadedVertices_=0;
     glViewport(0,0,view.width,view.height);
     const auto sun=orbit(world.config(),view.seconds);
     const double rain=simulation.weather.sample(explorer.up()).rainRate*3600+simulation.rainExperiment();
@@ -724,26 +726,30 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
     const Vec3 origin=anchor_*radius,eye=explorer.up()*(radius+explorer.altitude());
     const Vec3 sun=orbit(world.config(),view.seconds).sunDirection;
     auto& vertices=waterFrame_;auto& triangles=waterDraw_;
-    vertices.assign(waterVertices_.size(),{});triangles.clear();
-    waterGround_.resize(waterVertices_.size());waterVisible_.assign(waterVertices_.size(),0);
+    vertices.resize(waterVertices_.size());triangles.clear();waterActiveTriangles_.clear();
+    waterSurface_.update(world,water,waterVertices_,waterTriangles_,anchor_,east_,north_);
+    const auto& surface=waterSurface_.points();
+    waterVisible_.assign(waterVertices_.size(),0);waterOutside_.resize(waterVertices_.size());
+    const ViewFrustum frustum(local(eye-origin),local(explorer.forward()),local(explorer.up()),radians(72),
+        static_cast<double>(view.width)/view.height,explorer.underwater() || explorer.underground() ? .08 : .25,400000);
+    // Cauchy-Schwarz: sum of 24 amplitudes <= sqrt(3) * Hs. The
+    // slightly larger bound also covers depth limiting and wave filtering.
+    const double waveBound=2*motion.significantHeight();
     const bool wire=view.surfaceStyle==SurfaceStyle::Wireframe;
     if(!wire && world.modules().enabled(Module::Atmosphere)) glEnable(GL_FOG);
-    for(std::size_t i=0;i<waterVertices_.size();++i) {
-        const auto& v=waterVertices_[i]; if(!v.available) continue;
-        const auto ground=waterGround_[i]=water.sample(v.up);
-        const bool riverWet=v.river;
-        const bool ocean=!riverWet && !v.inland && oceanEnabled && (v.altitude<sea || !ground.available || ground.depth<0.0005);
-        const double depth=riverWet ? -.01 : v.inland ? v.level-v.altitude : ocean ? sea-v.altitude : (ground.available ? ground.depth*ground.weight : 0);
-        vertices[i].depth=depth;
-    }
-    // Dry triangles cannot contribute pixels. Their shoreline neighbours still
-    // need the original positions/colours for exactly the same wet-edge clipping.
-    for(const auto& t:waterTriangles_) if(vertices[t[0]].depth>.0005 || vertices[t[1]].depth>.0005 || vertices[t[2]].depth>.0005)
+    for(const auto i:waterSurface_.wetVertices()) waterOutside_[i]=frustum.outside(surface[i].base,waveBound);
+    for(const auto index:waterSurface_.wetTriangles()) {
+        const auto& t=waterTriangles_[index];
+        if(waterOutside_[t[0]] & waterOutside_[t[1]] & waterOutside_[t[2]]) continue;
+        waterActiveTriangles_.push_back(index);
         for(const auto i:t) waterVisible_[i]=1;
-    for(std::size_t i=0;i<waterVertices_.size();++i) {
+    }
+    // Retain dry neighbours of visible wet triangles for unchanged shoreline
+    // clipping. Never reuse an unshaded vertex from a rejected triangle.
+    for(const auto i:waterSurface_.wetVertices()) {
         const auto& v=waterVertices_[i];if(!v.available || !waterVisible_[i]) continue;
-        const auto& ground=waterGround_[i];const double depth=vertices[i].depth;
-        const bool ocean=!v.river && !v.inland && oceanEnabled && (v.altitude<sea || !ground.available || ground.depth<0.0005);
+        const auto& ground=surface[i].ground;const double depth=surface[i].depth;
+        const bool ocean=surface[i].ocean;
         double level=ocean ? sea : v.altitude+depth;
         const auto wave=motion.waves(v.up,std::max(0.0,depth),ocean,v.spacing*2);
         level+=wave.height;
@@ -764,9 +770,10 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
             static_cast<float>(mix(mix(clear.b,silt.b,mud)*light,sky.b,fresnel)+shine*lighting_.sunlight.b*.75)};
         const double alpha=(0.20+0.75*(1-std::exp(-std::max(0.0,depth)*0.2))+0.45*fresnel)*smoothstep(0,0.035,depth);
         vertices[i]={local(position-origin),color,static_cast<float>(clamp(alpha,0.0,0.98)),depth};
+        ++waterShadedVertices_;
     }
-    for(const auto& t:waterTriangles_) {
-        if(!waterVisible_[t[0]] && !waterVisible_[t[1]] && !waterVisible_[t[2]]) continue;
+    for(const auto index:waterActiveTriangles_) {
+        const auto& t=waterTriangles_[index];
         std::array<WaterDrawVertex,4> clipped{}; std::size_t count=0;
         for(int j=0;j<3;++j) {
             const auto& a=vertices[t[static_cast<std::size_t>(j)]]; const auto& b=vertices[t[static_cast<std::size_t>((j+1)%3)]];
@@ -783,9 +790,23 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
     glDisable(GL_LIGHTING); glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE); glDepthFunc(GL_LEQUAL);
     glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(-1,-1);
-    glBegin(GL_TRIANGLES);
-    for(const auto& v:triangles) { glColor4f(v.color.r,v.color.g,v.color.b,v.alpha); glVertex3d(v.position.x,v.position.y,v.position.z); }
-    glEnd(); glDisable(GL_POLYGON_OFFSET_FILL);
+    if(!triangles.empty()) {
+        static_assert(sizeof(Color)==3*sizeof(float));
+        static_assert(offsetof(WaterDrawVertex,alpha)==offsetof(WaterDrawVertex,color)+sizeof(Color));
+        // OpenGL 1.1 client arrays retain double positions and the original
+        // triangle order, without a call per colour/position or extra GPU storage.
+        glPushClientAttrib(GL_CLIENT_VERTEX_ARRAY_BIT);
+        glEnableClientState(GL_VERTEX_ARRAY);glEnableClientState(GL_COLOR_ARRAY);
+        glDisableClientState(GL_NORMAL_ARRAY);glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+        glVertexPointer(3,GL_DOUBLE,sizeof(WaterDrawVertex),&triangles.front().position.x);
+        glColorPointer(4,GL_FLOAT,sizeof(WaterDrawVertex),&triangles.front().color.r);
+        glDrawArrays(GL_TRIANGLES,0,static_cast<GLsizei>(triangles.size()));
+        glPopClientAttrib();
+        // Array drawing leaves current colour unspecified; preserve the value
+        // that the former immediate-mode loop left for subsequent passes.
+        const auto& last=triangles.back();glColor4f(last.color.r,last.color.g,last.color.b,last.alpha);
+    }
+    glDisable(GL_POLYGON_OFFSET_FILL);
     if(view.surfaceStyle!=SurfaceStyle::Natural) {
         glPolygonMode(GL_FRONT_AND_BACK,GL_LINE); glBegin(GL_TRIANGLES);
         for(const auto& v:triangles) {
@@ -831,20 +852,38 @@ void Renderer::drawRivers(const World& world,const Explorer& explorer,const Simu
     const Vec3 eye=explorer.up()*(radius+explorer.altitude());
     const double clock=simulation.motion.seconds(),light=.22+.78*daylight;
     const bool moving=world.modules().enabled(Module::WaterMotion);
+    const auto vector=[&](Vec3 p){return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)};};
+    const ViewFrustum frustum(local(eye),vector(explorer.forward()),vector(explorer.up()),radians(72),
+        static_cast<double>(view.width)/view.height,explorer.underwater() || explorer.underground() ? .08 : .25,400000);
     glPushAttrib(GL_ALL_ATTRIB_BITS);glDisable(GL_LIGHTING);glEnable(GL_TEXTURE_2D);glBindTexture(GL_TEXTURE_2D,riverTexture_);
     glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDepthMask(GL_FALSE);glDepthFunc(GL_LEQUAL);
     glEnable(GL_POLYGON_OFFSET_FILL);glPolygonOffset(-1,-1);
-    const auto emit=[&](const RiverPoint& p,double lateral) {
-        const auto up=normalized(p.up+p.left*(lateral*p.width/radius));
-        const auto pos=up*(radius+p.level+.008),toward=normalized(eye-pos);
-        const double fresnel=.02+.98*std::pow(1-std::abs(dot(toward,up)),5);
-        const auto sky=skyColor(lighting_,up*(2*dot(up,toward))-toward);
+    struct RiverVertex {Vec3 up,world,position;double u=0,v=0,depth=0;Color color{};float alpha=0;};
+    struct RiverRow {std::array<RiverVertex,4> vertices;unsigned char outside=63;bool shaded=false;};
+    const auto row=[&](const RiverPoint& p) {
+        RiverRow result;constexpr std::array lateral{-.5,-.3,.3,.5};
         const double speed=p.discharge/(.8*p.width*p.depth);
-        const Color water{static_cast<float>(mix(.055*light,sky.r,fresnel)),static_cast<float>(mix(.28*light,sky.g,fresnel)),static_cast<float>(mix(.30*light,sky.b,fresnel))};
-        const double depth=p.depth*(1-smoothstep(.3,.5,std::abs(lateral)));
-        glColor4f(water.r,water.g,water.b,static_cast<float>(clamp((.32+.55*(1-std::exp(-depth*.6))+.3*fresnel)*smoothstep(0,.025,depth),0.,.96)));
-        glTexCoord2d((p.along-(moving ? clock*speed : 0))/8,lateral*p.width/8);
-        const auto v=local(pos);glVertex3d(v.x,v.y,v.z);
+        for(std::size_t j=0;j<lateral.size();++j) {
+            auto& v=result.vertices[j];v.up=normalized(p.up+p.left*(lateral[j]*p.width/radius));
+            v.world=v.up*(radius+p.level+.008);v.position=local(v.world);
+            v.u=(p.along-(moving ? clock*speed : 0))/8;v.v=lateral[j]*p.width/8;
+            v.depth=p.depth*(1-smoothstep(.3,.5,std::abs(lateral[j])));
+            result.outside&=frustum.outside(v.position);
+        }
+        return result;
+    };
+    const auto shade=[&](RiverRow& line) {
+        if(line.shaded) return;
+        for(auto& v:line.vertices) {
+            const auto toward=normalized(eye-v.world);const double fresnel=.02+.98*std::pow(1-std::abs(dot(toward,v.up)),5);
+            const auto sky=skyColor(lighting_,v.up*(2*dot(v.up,toward))-toward);
+            v.color={static_cast<float>(mix(.055*light,sky.r,fresnel)),static_cast<float>(mix(.28*light,sky.g,fresnel)),static_cast<float>(mix(.30*light,sky.b,fresnel))};
+            v.alpha=static_cast<float>(clamp((.32+.55*(1-std::exp(-v.depth*.6))+.3*fresnel)*smoothstep(0,.025,v.depth),0.,.96));
+        }
+        line.shaded=true;riverShadedVertices_+=line.vertices.size();
+    };
+    const auto emit=[](const RiverVertex& v) {
+        glColor4f(v.color.r,v.color.g,v.color.b,v.alpha);glTexCoord2d(v.u,v.v);glVertex3d(v.position.x,v.position.y,v.position.z);
     };
     glBegin(GL_TRIANGLES);
     for(const auto& [r,s]:riverSegments_) {
@@ -854,13 +893,15 @@ void Renderer::drawRivers(const World& world,const Explorer& explorer,const Simu
         const double start=std::max(0.,t-2200/std::max(1.,span)),end=std::min(1.,t+2200/std::max(1.,span));
         const double spacing=clamp(std::min(a.width,b.width)*.7,1.,24.);
         const int steps=std::max(1,static_cast<int>(std::ceil((end-start)*span/spacing)));
-        auto previous=atlas->point(r,s,start);
+        auto previous=row(atlas->point(r,s,start));
         for(int i=1;i<=steps;++i) {
-            const auto next=atlas->point(r,s,mix(start,end,static_cast<double>(i)/steps));
-            if(next.level<=world.config().seaLevel+.02) {previous=next;continue;}
-            for(const auto band:std::array<std::array<double,2>,3>{{{-.5,-.3},{-.3,.3},{.3,.5}}}) {
-                emit(previous,band[0]);emit(previous,band[1]);emit(next,band[1]);
-                emit(previous,band[0]);emit(next,band[1]);emit(next,band[0]);riverTriangles_+=2;
+            const auto point=atlas->point(r,s,mix(start,end,static_cast<double>(i)/steps));auto next=row(point);
+            if(point.level>world.config().seaLevel+.02 && !(previous.outside & next.outside)) {
+                shade(previous);shade(next);
+                for(std::size_t band=0;band<3;++band) {
+                    emit(previous.vertices[band]);emit(previous.vertices[band+1]);emit(next.vertices[band+1]);
+                    emit(previous.vertices[band]);emit(next.vertices[band+1]);emit(next.vertices[band]);riverTriangles_+=2;
+                }
             }
             previous=next;
         }

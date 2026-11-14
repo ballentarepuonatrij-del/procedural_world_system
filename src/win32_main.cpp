@@ -467,7 +467,8 @@ public:
             const auto river=world_.modules().enabled(Module::Rivers) ? world_.waterNetwork()->sample(explorer_.up()) : RiverSample{};
             out << "river_wet=" << river.wet << "\nriver_width_m=" << river.width << "\nriver_depth_m=" << river.depth
                 << "\nriver_level_m=" << river.level << "\nriver_discharge_m3_s=" << river.discharge << "\nriver_speed_m_s=" << river.speed
-                << "\nriver_triangles=" << renderer_->riverTriangles() << '\n';
+                << "\nriver_triangles=" << renderer_->riverTriangles() << "\nriver_shaded_vertices=" << renderer_->riverShadedVertices()
+                << "\nwater_shaded_vertices=" << renderer_->waterShadedVertices() << "\nwater_surface_rebuilds=" << renderer_->waterSurfaceRebuilds() << '\n';
             out << "sky_enabled=" << view_.skyEnabled << "\nshadows_enabled=" << view_.shadowsEnabled
                 << "\nshadow_support=" << renderer_->shadowSupport() << "\nshadows_used=" << renderer_->shadowsUsed()
                 << "\nshadow_volume_triangles=" << renderer_->shadowCount() << "\nstars=" << renderer_->starCount()

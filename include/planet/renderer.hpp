@@ -10,6 +10,7 @@
 #include "planet/win32_tone.hpp"
 #include "planet/win32_materials.hpp"
 #include "planet/win32_grass.hpp"
+#include "planet/water_view.hpp"
 #include <windows.h>
 #include <GL/gl.h>
 #include <filesystem>
@@ -60,7 +61,7 @@ public:
     ~Renderer();
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
-    void invalidate() { dirty_=true;globeDirty_=true;weatherDirty_=true;waterMapDirty_=true;materials_.invalidate();grassField_.clear();grassActors_.clear();grassPlayer_.reset();grassWindShort_={};grassWindTall_={};++terrainEpoch_; }
+    void invalidate() { dirty_=true;globeDirty_=true;weatherDirty_=true;waterMapDirty_=true;materials_.invalidate();waterSurface_.invalidate();grassField_.clear();grassActors_.clear();grassPlayer_.reset();grassWindShort_={};grassWindTall_={};++terrainEpoch_; }
     void draw(const World& world, const Explorer& explorer, const Simulation& simulation,const ViewState& view);
     void capture(const std::filesystem::path& path, int width, int height) const;
     std::string device() const;
@@ -88,6 +89,9 @@ public:
     bool shadowsUsed() const { return shadowsUsed_; }
     const Lighting& illumination() const { return lighting_; }
     std::size_t riverTriangles() const { return riverTriangles_; }
+    std::uint64_t waterSurfaceRebuilds() const {return waterSurface_.rebuilds();}
+    std::size_t waterShadedVertices() const {return waterShadedVertices_;}
+    std::size_t riverShadedVertices() const {return riverShadedVertices_;}
     const RenderTimings& timings() const { return timings_; }
     std::uint64_t terrainJobs() const {return terrainJobs_;}
     std::uint64_t terrainUploads() const {return terrainUploads_;}
@@ -164,9 +168,10 @@ private:
     std::vector<std::array<std::size_t,3>> waterTriangles_;
     struct WaterDrawVertex { Vec3 position; Color color; float alpha; double depth; };
     std::vector<WaterDrawVertex> waterFrame_,waterDraw_;
-    std::vector<GroundSample> waterGround_;
-    std::vector<unsigned char> waterVisible_;
-    std::size_t waterCount_=0;
+    WaterSurfaceCache waterSurface_;
+    std::vector<std::size_t> waterActiveTriangles_;
+    std::vector<unsigned char> waterVisible_,waterOutside_;
+    std::size_t waterCount_=0,waterShadedVertices_=0,riverShadedVertices_=0;
     std::uint64_t waterRevision_=0,waterSteps_=0,snowRevision_=0;
     Vec3 anchor_{1,0,0}, east_{0,0,1}, north_{0,1,0};
     double lastTerrainTime_=-1e30, lastGlobeTime_=-1e30;

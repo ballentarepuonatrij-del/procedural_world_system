@@ -53,12 +53,13 @@ GLuint makeFont(HDC dc,int size,int weight) {
 // triangles are reused for the solid and wireframe passes.
 
 }
-Renderer::Renderer(HDC dc,bool proceduralMaterials) {
+Renderer::Renderer(HDC dc,bool proceduralMaterials,bool grassShaders) {
     materials_.initialize(proceduralMaterials);
+    grassPainter_.initialize(grassShaders);
     font_=makeFont(dc,15,FW_NORMAL); headingFont_=makeFont(dc,28,FW_BOLD);
     terrain_=glGenLists(1); terrainGrid_=glGenLists(1); globe_=glGenLists(1); objects_=glGenLists(1); caves_=glGenLists(1);weatherMap_=glGenLists(1);shadows_=glGenLists(1);
-    waterMap_=glGenLists(1);
-    if (!terrain_ || !terrainGrid_ || !globe_ || !objects_ || !caves_ || !weatherMap_ || !shadows_ || !waterMap_) throw std::runtime_error("Cannot allocate terrain display lists");
+    waterMap_=glGenLists(1);grass_=glGenLists(1);
+    if (!terrain_ || !terrainGrid_ || !globe_ || !objects_ || !caves_ || !weatherMap_ || !shadows_ || !waterMap_ || !grass_) throw std::runtime_error("Cannot allocate terrain display lists");
     glGetIntegerv(GL_STENCIL_BITS,&stencilBits_);
     glPixelStorei(GL_UNPACK_ALIGNMENT,1);
     glGenTextures(1,&riverTexture_);glBindTexture(GL_TEXTURE_2D,riverTexture_);
@@ -135,7 +136,7 @@ Renderer::~Renderer() {
     discardUpload();if(terrainChunks_) glDeleteLists(terrainChunks_,terrainChunksCount_);
     glDeleteLists(terrain_,1); glDeleteLists(globe_,1);
     glDeleteLists(terrainGrid_,1);
-    glDeleteLists(objects_,1); glDeleteLists(caves_,1);
+    glDeleteLists(objects_,1); glDeleteLists(caves_,1);glDeleteLists(grass_,1);
     glDeleteLists(weatherMap_,1);
     glDeleteLists(shadows_,1);
     glDeleteLists(waterMap_,1);
@@ -175,6 +176,7 @@ void Renderer::adoptTerrain(TerrainMesh mesh) {
     waterRevision_=mesh.waterRevision;waterSteps_=mesh.waterSteps;snowRevision_=mesh.snowRevision;lastTerrainTime_=mesh.seconds;
     terrainCasters_=std::move(mesh.casters);waterVertices_=std::move(mesh.waterVertices);waterTriangles_=std::move(mesh.waterTriangles);
     objectSites_=std::move(mesh.plants);riverSegments_=std::move(mesh.rivers);caveCount_=mesh.caves.size()/3;
+    grassRoots_=std::move(mesh.grass);grassGroundDirty_=true;
     lastFloraDay_=-1e30;shadowDirty_=true;dirty_=false;
 }
 void Renderer::discardUpload() {
@@ -187,7 +189,7 @@ void Renderer::beginUpload(SceneMesh scene) {
     discardUpload();MeshUpload upload;upload.scene=std::move(scene);upload.epoch=terrainEpoch_;
     constexpr std::size_t chunk=3072;
     const auto& mesh=upload.scene.terrain;
-    const std::array sizes{mesh.terrain.size(),mesh.caves.size(),mesh.grid.size(),upload.scene.shadows.size()*3,upload.scene.plants.vertices.size()};
+    const std::array sizes{mesh.terrain.size(),mesh.caves.size(),mesh.grid.size(),upload.scene.shadows.size()*3,upload.scene.plants.vertices.size(),upload.scene.grass.vertices.size()};
     std::size_t count=0;
     for(std::size_t i=0;i<sizes.size();++i) {upload.chunks[i]=(sizes[i]+chunk-1)/chunk;count+=upload.chunks[i];}
     upload.lists=glGenLists(static_cast<GLsizei>(count));
@@ -205,7 +207,7 @@ void Renderer::advanceUpload(const Flora& flora) {
     // uploaded mesh, and budget driver work independently of CPU generation.
     do {
         std::size_t section=0,part=upload.next;
-        while(section<4 && part>=upload.chunks[section]) part-=upload.chunks[section++];
+        while(section<5 && part>=upload.chunks[section]) part-=upload.chunks[section++];
         const auto first=part*chunk;
         glNewList(upload.lists+static_cast<GLuint>(upload.next),GL_COMPILE);glBegin(section==2 ? GL_LINES : GL_TRIANGLES);
         if(section<2 || section==4) {
@@ -218,13 +220,15 @@ void Renderer::advanceUpload(const Flora& flora) {
             for(std::size_t i=first;i<std::min(first+chunk,mesh.grid.size());++i) {const auto& v=mesh.grid[i];
                 glColor4f(.20f,.82f,1.f,v.alpha);glVertex3d(v.position.x,v.position.y,v.position.z);
             }
+        } else if(section==5) {
+            for(std::size_t i=first;i<std::min(first+chunk,scene.grass.vertices.size());++i) grassPainter_.vertex(scene.grass.vertices[i]);
         } else for(std::size_t i=first;i<std::min(first+chunk,scene.shadows.size()*3);++i) {
             const auto& t=scene.shadows[i/3];const auto p=i%3==0 ? t.a : i%3==1 ? t.b : t.c;glVertex3d(p.x,p.y,p.z);
         }
         glEnd();glEndList();++upload.next;
     } while(upload.next<count && std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()<3);
     if(upload.next<count) return;
-    const std::array<GLuint,5> parents{terrain_,caves_,terrainGrid_,shadows_,objects_};std::size_t offset=0;
+    const std::array<GLuint,6> parents{terrain_,caves_,terrainGrid_,shadows_,objects_,grass_};std::size_t offset=0;
     for(std::size_t section=0;section<parents.size();++section) {
         glNewList(parents[section],GL_COMPILE);
         for(std::size_t i=0;i<upload.chunks[section];++i) glCallList(upload.lists+static_cast<GLuint>(offset+i));
@@ -239,6 +243,7 @@ void Renderer::advanceUpload(const Flora& flora) {
     // geometrically matching shadows. Never stall adoption for the solar clock.
     const bool validShadow=sameFlora && scene.hasShadows;
     adoptTerrain(std::move(mesh));adoptObjects(std::move(scene.plants),scene.flora);shadowDirty_=!validShadow;
+    grassPainter_.adopt(std::move(scene.grass));
     meshUpload_.reset();++terrainUploads_;
 }
 void Renderer::buildObjects(const World& world,const Flora& flora) {
@@ -250,6 +255,10 @@ void Renderer::buildObjects(const World& world,const Flora& flora) {
         glVertex3d(v.position.x,v.position.y,v.position.z);
     }
     glEnd();glEndList();adoptObjects(std::move(mesh),flora);
+    auto grass=makeGrassMesh(grassRoots_,anchor_,world.config().radius,flora);
+    glNewList(grass_,GL_COMPILE);glBegin(GL_TRIANGLES);
+    for(const auto& v:grass.vertices) grassPainter_.vertex(v);
+    glEnd();glEndList();grassPainter_.adopt(std::move(grass));
 }
 void Renderer::adoptObjects(PlantMesh mesh,const Flora& flora) {
     ++shadowRevision_;discardSunUpload();
@@ -380,6 +389,40 @@ void Renderer::emitFauna() {
     }
     glEnd();
 }
+void Renderer::prepareGrass(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double speed,Vec3 eye) {
+    DrawTimer timer{timings_.grass};
+    const auto local=[&](Vec3 p){return Vec3{dot(p,east_),dot(p,anchor_),dot(p,north_)};};
+    const auto radius=world.config().radius;
+    const auto foot=explorer.up()*(radius+explorer.altitude()-Explorer::eyeHeight);
+    const double height=explorer.altitude()-simulation.water.ground(world,explorer.up());
+    grassDraw_={anchor_*radius,east_,anchor_,north_,eye,{},{},std::remainder(view.seconds*.8,tau),
+        (1-smoothstep(12,40,height))*(1-smoothstep(25,100,speed)),view.surfaceStyle==SurfaceStyle::Wireframe};
+    if(explorer.underwater() || explorer.underground() || grassRoots_.empty() || !world.modules().enabled(Module::SurfaceDetail)) grassDraw_.visibility=0;
+    if(grassDraw_.visibility<=0) {grassPlayer_=foot;grassActors_.clear();return;}
+    grassField_.synchronize(world.config(),explorer.up(),grassRoots_,grassGroundDirty_);grassGroundDirty_=false;
+    const auto velocity=simulation.weather.windEnabled() ? simulation.weather.sample(explorer.up()).velocity : Vec3{};
+    const Vec3 wind{dot(velocity,grassField_.eastAxis()),0,dot(velocity,grassField_.northAxis())};
+    // At extreme time acceleration the damped spring is already at equilibrium.
+    const double modelDt=view.paused ? 0 : std::min(120.,view.frameSeconds*view.timeScale);
+    advanceGrassSpring(grassWindShort_,grassWindTarget(wind,false),modelDt,2.2);
+    advanceGrassSpring(grassWindTall_,grassWindTarget(wind,true),modelDt,1.1);
+    const auto toMesh=[&](Vec3 bend){return local(grassField_.eastAxis()*bend.x+grassField_.northAxis()*bend.z);};
+    grassDraw_.windShort=toMesh(grassWindShort_.bend);grassDraw_.windTall=toMesh(grassWindTall_.bend);
+    std::vector<GrassCollider> contacts;contacts.reserve(32);
+    contacts.push_back({grassPlayer_.value_or(foot),foot,.45,1.8});
+    bool moving=grassPlayer_ && length(foot-*grassPlayer_)>1e-5;grassPlayer_=foot;
+    std::unordered_map<std::uint64_t,Vec3> actors;
+    if(world.modules().enabled(Module::Fauna)) for(const auto& deer:simulation.fauna.visible(explorer.up(),grassRadius)) {
+        const auto position=deer.up*(radius+deer.elevation);
+        const auto found=grassActors_.find(deer.id);const auto before=found==grassActors_.end() ? position : found->second;
+        moving=moving || length(position-before)>1e-5;
+        if(contacts.size()<32) contacts.push_back({before,position,.5*deer.size,1.5*deer.size});
+        actors.emplace(deer.id,position);
+    }
+    grassActors_=std::move(actors);
+    // Navigation remains available on pause; wind and stationary contacts freeze.
+    grassField_.advance(view.paused ? (moving ? view.frameSeconds : 0) : modelDt,contacts);
+}
 void Renderer::discardSunUpload() {
     if(sunUpload_ && sunUpload_->lists) glDeleteLists(sunUpload_->lists,static_cast<GLsizei>(sunUpload_->chunks));
     sunUpload_.reset();
@@ -456,6 +499,7 @@ void Renderer::drawShadows(Vec3 sun,bool textured) {
     if(textured) {glEnable(GL_TEXTURE_2D);glBindTexture(GL_TEXTURE_2D,detailTexture_);}
     materials_.begin(textured);glCallList(terrain_);materials_.end();glDisable(GL_TEXTURE_2D);
     glLightModeli(GL_LIGHT_MODEL_TWO_SIDE,GL_TRUE);glCallList(objects_);emitFauna();
+    grassPainter_.draw(grass_,grassField_,grassDraw_);
     glPopAttrib();
 }
 void Renderer::draw(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view) {
@@ -523,6 +567,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
         view.globe ? .95f : lighting_.sunlight.b*static_cast<float>(submerged ? waterLight : 1),1};
     glLightfv(GL_LIGHT0,GL_DIFFUSE,sunColor);
     if(view.globe) {
+        grassDraw_.visibility=0;grassPainter_.draw(grass_,grassField_,grassDraw_);grassPlayer_.reset();grassActors_.clear();
         if(globeDirty_ || std::abs(view.seconds-lastGlobeTime_)>3600) buildGlobe(world,view.seconds);
         perspective(GlobeCamera::fov,static_cast<double>(view.width)/view.height,0.1,20);
         camera(view.globeCamera.outward*GlobeCamera::distance,-view.globeCamera.outward,view.globeCamera.up);
@@ -565,6 +610,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
                 const auto& mesh=scene.terrain;const auto local=[&](Vec3 p){return Vec3{dot(p,mesh.east),dot(p,mesh.anchor),dot(p,mesh.north)};};
                 scene.sun=local(sunlight);scene.hasShadows=shadows;
                 scene.plants=makePlantMesh(mesh.plants,mesh.anchor,mesh.east,mesh.north,worldCopy.config().radius,flora);
+                scene.grass=makeGrassMesh(mesh.grass,observer,worldCopy.config().radius,flora);
                 if(shadows) {
                     auto casters=mesh.casters;
                     casters.insert(casters.end(),scene.plants.casters.begin(),scene.plants.casters.end());
@@ -618,6 +664,8 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
         glCallList(objects_);
         prepareFauna(world,explorer,simulation.fauna,view.shadowsEnabled && shadowSupport() && !submerged && lighting_.direct>.002,sun.sunDirection);
         emitFauna();
+        prepareGrass(world,explorer,simulation,view,travelSpeed,eye);
+        {DrawTimer timer{timings_.grass};grassPainter_.draw(grass_,grassField_,grassDraw_);}
         glLightModeli(GL_LIGHT_MODEL_TWO_SIDE,GL_FALSE);
         if(caveCount_>0) {
             glPushAttrib(GL_ENABLE_BIT|GL_LIGHTING_BIT);

@@ -22,7 +22,7 @@ struct Options {
     bool resumeExplicit=false,noResume=false,noAutosave=false,worldOptions=false;
     std::string settingsWarning;
     int frames=0;
-    bool proceduralMaterials=true;
+    bool proceduralMaterials=true,grassShaders=true;
     bool globe=false, detail=true, wind=true, clouds=true, water=true, erosion=true, paused=false, windTracers=false;
     double weatherSeconds=0, rainMmH=0,walkSeconds=0;
     bool landforms=true,caves=true,headlamp=true;
@@ -77,7 +77,7 @@ Options parseOptions() {
         options.rivers=modules.requested(Module::Rivers);options.inlandWaters=modules.requested(Module::InlandWaters);options.fauna=modules.requested(Module::Fauna);options.snow=modules.requested(Module::Snow);options.phenomenaEnabled=modules.requested(Module::Phenomena);
         for(int i=1;i<argc;++i) {
             const std::wstring arg=argv[i];
-            constexpr std::array neutral{L"--settings",L"--save-dir",L"--resume",L"--no-resume",L"--no-autosave",L"--frames",L"--capture",L"--report",L"--paused",L"--audio-capture",L"--volume",L"--surface-style",L"--basic-materials",L"--no-sky",L"--no-shadows",L"--no-sound"};
+            constexpr std::array neutral{L"--settings",L"--save-dir",L"--resume",L"--no-resume",L"--no-autosave",L"--frames",L"--capture",L"--report",L"--paused",L"--audio-capture",L"--volume",L"--surface-style",L"--basic-materials",L"--basic-grass",L"--no-sky",L"--no-shadows",L"--no-sound"};
             if(std::none_of(neutral.begin(),neutral.end(),[&](auto value){return arg==value;})) options.worldOptions=true;
             const auto next=[&]() -> std::wstring {
                 if(++i>=argc) throw std::invalid_argument("Missing command-line value");
@@ -222,6 +222,7 @@ Options parseOptions() {
                     throw std::invalid_argument("Weather advance must be in [0,3600] seconds");
             }
             else if(arg==L"--basic-materials") options.proceduralMaterials=false;
+            else if(arg==L"--basic-grass") options.grassShaders=false;
             else if(arg==L"--surface-style") {
                 const auto value=next();
                 if(value==L"natural") options.surfaceStyle=SurfaceStyle::Natural;
@@ -335,7 +336,7 @@ public:
         if(!chosen || !SetPixelFormat(dc_,chosen,&format)) throw std::runtime_error("Cannot select OpenGL pixel format");
         context_=wglCreateContext(dc_);
         if(!context_ || !wglMakeCurrent(dc_,context_)) throw std::runtime_error("Cannot create OpenGL context");
-        renderer_=std::make_unique<Renderer>(dc_,options_.proceduralMaterials);
+        renderer_=std::make_unique<Renderer>(dc_,options_.proceduralMaterials,options_.grassShaders);
         audio_=std::make_unique<WavePlayer>(!options_.audioCapture.empty());
         audio_->update(soundScene(world_,simulation_,explorer_,view_.volume,view_.paused,view_.globe));
         RAWINPUTDEVICE mouse{0x01,0x02,0,window_};
@@ -348,8 +349,8 @@ public:
         auto last=Clock::now();
         int frames=0;
         double renderTime=0, longestRender=0;
-        constexpr std::array<const char*,17> phaseNames{"navigation","simulation","audio","render","swap","terrain_build","plants_build","shadow_build","shadows","water","rivers","weather","sky","fauna","snow","phenomena","frame_work"};
-        std::array<double,17> phaseTotals{},steadyTotals{},phasePeaks{};
+        constexpr std::array<const char*,18> phaseNames{"navigation","simulation","audio","render","swap","terrain_build","plants_build","shadow_build","shadows","water","rivers","weather","sky","fauna","snow","phenomena","grass","frame_work"};
+        std::array<double,18> phaseTotals{},steadyTotals{},phasePeaks{};
         std::vector<double> steadyFrames;
         unsigned steadyCount=0;
         const auto milliseconds=[](Clock::time_point a,Clock::time_point b) {return std::chrono::duration<double,std::milli>(b-a).count();};
@@ -407,7 +408,7 @@ public:
             if(!SwapBuffers(dc_)) throw std::runtime_error("SwapBuffers failed");
             if(!options_.report.empty()) {
                 const auto& r=renderer_->timings();
-                std::array<double,17> sample{milliseconds(navigationStart,simulationStart),milliseconds(simulationStart,audioStart),milliseconds(audioStart,renderStart),renderMs,milliseconds(swapStart,Clock::now()),r.terrain,r.plants,r.shadowBuild,r.shadows,r.water,r.rivers,r.weather,r.sky,r.fauna,r.snow,r.phenomena,0};
+                std::array<double,18> sample{milliseconds(navigationStart,simulationStart),milliseconds(simulationStart,audioStart),milliseconds(audioStart,renderStart),renderMs,milliseconds(swapStart,Clock::now()),r.terrain,r.plants,r.shadowBuild,r.shadows,r.water,r.rivers,r.weather,r.sky,r.fauna,r.snow,r.phenomena,r.grass,0};
                 for(unsigned i=0;i<5;++i) sample.back()+=sample[i];
                 for(std::size_t i=0;i<sample.size();++i) {
                     phaseTotals[i]+=sample[i];if(frames>5) {steadyTotals[i]+=sample[i];phasePeaks[i]=std::max(phasePeaks[i],sample[i]);}
@@ -456,6 +457,10 @@ public:
                 << "\nflora_maximum_height_m=" << renderer_->maximumPlantHeight() << "\nflora_trees=" << renderer_->treeCount() << "\nflora_liana_hosts=" << renderer_->lianaHosts()
                 << "\nflora_calendar_day=" << simulation_.flora.calendarDay() << "\nflowering_plants=" << renderer_->floweringCount()
                 << "\nbudding_plants=" << renderer_->buddingCount() << "\nseed_head_plants=" << renderer_->seedHeadCount() << '\n';
+            out << "grass_backend=" << renderer_->grassRenderer().backend()
+                << "\ngrass_short_clumps=" << renderer_->grassRenderer().shortCount() << "\ngrass_tall_clumps=" << renderer_->grassRenderer().tallCount()
+                << "\ngrass_vertices=" << renderer_->grassRenderer().vertices() << "\ngrass_contact_cells=" << renderer_->grassField().activeCells()
+                << "\ngrass_contact_bend=" << renderer_->grassField().maximumBend() << "\ngrass_wind_bend=" << renderer_->grassWindBend() << '\n';
             const auto habitat=world_.climatology(explorer_.up());
             out << "inland_water=" << habitat.inland << "\nreference_water_level_m=" << habitat.waterLevel << "\nreference_water_depth_m=" << habitat.waterDepth << "\nwetness=" << habitat.wetness << "\nsand=" << habitat.sand << '\n';
             const auto& light=renderer_->illumination();

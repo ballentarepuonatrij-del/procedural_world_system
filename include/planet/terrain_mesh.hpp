@@ -2,6 +2,7 @@
 #include "planet/hydrology.hpp"
 #include "planet/shadows.hpp"
 #include "planet/materials.hpp"
+#include "planet/grass.hpp"
 
 namespace planet {
 // CPU-only scene data. A worker owns copies of World/Hydrology; OpenGL upload
@@ -28,6 +29,7 @@ struct TerrainMesh {
     std::vector<SurfaceWaterVertex> waterVertices;
     std::vector<std::array<std::size_t,3>> waterTriangles;
     std::vector<PlantSite> plants;
+    std::vector<GrassRoot> grass;
     std::vector<std::pair<std::size_t,std::size_t>> rivers;
 };
 double terrainSpacing(const World& world,Vec3 observer,double altitude,double minimumStep=2);

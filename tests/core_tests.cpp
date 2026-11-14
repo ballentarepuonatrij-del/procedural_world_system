@@ -53,7 +53,9 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
 #include "phenomena_tests.hpp"
 #include "state_tests.hpp"
 #include "material_tests.hpp"
+#include "grass_tests.hpp"
 void registerTests() {
+    registerGrassTests();
     registerMaterialTests();
     registerLandscapeTests();
     registerFaunaTests();

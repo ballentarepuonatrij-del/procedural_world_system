@@ -9,11 +9,13 @@
 #include "planet/phenomena.hpp"
 #include "planet/win32_tone.hpp"
 #include "planet/win32_materials.hpp"
+#include "planet/win32_grass.hpp"
 #include <windows.h>
 #include <GL/gl.h>
 #include <filesystem>
 #include <string>
 #include <future>
+#include <unordered_map>
 
 namespace planet {
 enum class SurfaceStyle { Natural, Grid, Wireframe };
@@ -50,15 +52,15 @@ struct ViewState {
 };
 bool globeHudHit(const ViewState& view,int x,int y);
 struct RenderTimings {
-    double terrain=0,plants=0,shadowBuild=0,shadows=0,water=0,rivers=0,weather=0,sky=0,fauna=0,snow=0,phenomena=0;
+    double terrain=0,plants=0,shadowBuild=0,shadows=0,water=0,rivers=0,weather=0,sky=0,fauna=0,snow=0,phenomena=0,grass=0;
 };
 class Renderer {
 public:
-    explicit Renderer(HDC dc,bool proceduralMaterials=true);
+    explicit Renderer(HDC dc,bool proceduralMaterials=true,bool grassShaders=true);
     ~Renderer();
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
-    void invalidate() { dirty_=true;globeDirty_=true;weatherDirty_=true;waterMapDirty_=true;materials_.invalidate();++terrainEpoch_; }
+    void invalidate() { dirty_=true;globeDirty_=true;weatherDirty_=true;waterMapDirty_=true;materials_.invalidate();grassField_.clear();grassActors_.clear();grassPlayer_.reset();grassWindShort_={};grassWindTall_={};++terrainEpoch_; }
     void draw(const World& world, const Explorer& explorer, const Simulation& simulation,const ViewState& view);
     void capture(const std::filesystem::path& path, int width, int height) const;
     std::string device() const;
@@ -99,6 +101,9 @@ public:
     std::size_t blowingSnowCount() const {return blowingSnowCount_;}
     const char* toneBackend() const {return tone_.backend();}
     const char* materialBackend() const {return materials_.backend();}
+    const GrassRenderer& grassRenderer() const {return grassPainter_;}
+    const GrassField& grassField() const {return grassField_;}
+    double grassWindBend() const {return length(grassWindTall_.bend);}
     const PhenomenaState& phenomena() const {return phenomena_;}
     std::size_t opticalTriangles() const {return opticalTriangles_;}
     std::size_t dustCount() const {return dustCount_;}
@@ -106,11 +111,20 @@ private:
     RenderTimings timings_;
     ToneMapper tone_;
     TerrainMaterials materials_;
+    GrassRenderer grassPainter_;
+    GrassField grassField_;
+    GrassSpring grassWindShort_,grassWindTall_;
+    GrassDraw grassDraw_;
+    std::vector<GrassRoot> grassRoots_;
+    std::optional<Vec3> grassPlayer_;
+    std::unordered_map<std::uint64_t,Vec3> grassActors_;
+    bool grassGroundDirty_=true;
+    void prepareGrass(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view,double speed,Vec3 eye);
     void buildTerrain(const World& world,const Explorer& explorer,const Hydrology& water,double seconds);
     void uploadTerrain(TerrainMesh mesh);
     void adoptTerrain(TerrainMesh mesh);
-    struct SceneMesh {TerrainMesh terrain;PlantMesh plants;Flora flora;Vec3 sun;std::vector<Triangle> shadows;bool hasShadows=false;};
-    struct MeshUpload {SceneMesh scene;GLuint lists=0;std::array<std::size_t,5> chunks{};std::size_t next=0;std::uint64_t epoch=0;};
+    struct SceneMesh {TerrainMesh terrain;PlantMesh plants;GrassMesh grass;Flora flora;Vec3 sun;std::vector<Triangle> shadows;bool hasShadows=false;};
+    struct MeshUpload {SceneMesh scene;GLuint lists=0;std::array<std::size_t,6> chunks{};std::size_t next=0;std::uint64_t epoch=0;};
     void beginUpload(SceneMesh scene);
     void advanceUpload(const Flora& flora);
     void discardUpload();
@@ -133,7 +147,7 @@ private:
     void drawHud(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view);
     void text(float x,float y,const std::string& value,Color color,bool large=false);
     GLuint terrain_=0, terrainGrid_=0, globe_=0, font_=0, headingFont_=0, detailTexture_=0;
-    GLuint objects_=0,caves_=0;
+    GLuint objects_=0,caves_=0,grass_=0;
     std::size_t caveCount_=0;
     std::size_t detailCount_=0;
     std::vector<PlantSite> objectSites_;

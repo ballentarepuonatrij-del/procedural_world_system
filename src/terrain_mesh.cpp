@@ -298,6 +298,35 @@ TerrainMesh makeTerrainMesh(const World& world,const Hydrology& water,Vec3 obser
             mesh.plants.push_back({object,base,snow});
         }
     }
+    if(aboveGround<80 && minimumStep<=8) {
+        std::vector<std::pair<Vec3,double>> obstacles;
+        for(const auto& site:mesh.plants) if(site.object.collisionRadius()>0 && length(site.object.up-mesh.anchor)*radius<grassRadius+5)
+            obstacles.emplace_back(site.base,site.object.collisionRadius()+.08);
+        mesh.grass=makeGrassRoots(world,observer,[&](Vec3 up) {
+            const double scale=radius/dot(up,face),x=dot(up,right)*scale,y=dot(up,down)*scale;
+            const int ix=clamp(static_cast<int>(std::upper_bound(xs.begin(),xs.end(),x)-xs.begin())-1,0,columns-2);
+            const int iy=clamp(static_cast<int>(std::upper_bound(ys.begin(),ys.end(),y)-ys.begin())-1,0,rows-2);
+            const double tx=clamp((x-xs[static_cast<std::size_t>(ix)])/(xs[static_cast<std::size_t>(ix+1)]-xs[static_cast<std::size_t>(ix)]),0.,1.);
+            const double ty=clamp((y-ys[static_cast<std::size_t>(iy)])/(ys[static_cast<std::size_t>(iy+1)]-ys[static_cast<std::size_t>(iy)]),0.,1.);
+            const auto& a=at(ix,iy);const auto& b=tx>=ty ? at(ix+1,iy) : at(ix,iy+1);const auto& c=at(ix+1,iy+1);
+            const double wa=1-std::max(tx,ty),wb=std::abs(tx-ty),wc=std::min(tx,ty);
+            GrassGround ground;ground.base=a.position*wa+b.position*wb+c.position*wc;
+            ground.normal=normalized(cross(b.position-a.position,c.position-a.position));
+            if(ground.normal.y<0) ground.normal=-ground.normal;
+            ground.sample=a.sample;ground.sample.elevation=(a.height-a.snow)*wa+(b.height-b.snow)*wb+(c.height-c.snow)*wc;
+            ground.sample.temperature=a.sample.temperature*wa+b.sample.temperature*wb+c.sample.temperature*wc;
+            ground.sample.precipitation=a.sample.precipitation*wa+b.sample.precipitation*wb+c.sample.precipitation*wc;
+            ground.sample.sand=a.sample.sand*wa+b.sample.sand*wb+c.sample.sand*wc;
+            ground.sample.waterDepth=a.sample.waterDepth*wa+b.sample.waterDepth*wb+c.sample.waterDepth*wc;
+            ground.sample.waterDepth=std::max(ground.sample.waterDepth,a.ground.depth*a.ground.weight*wa+b.ground.depth*b.ground.weight*wb+c.ground.depth*c.ground.weight*wc);
+            const auto normal=normalized(a.normal*wa+b.normal*wb+c.normal*wc);
+            ground.slope=std::hypot(normal.x,normal.z)/std::max(.01,normal.y);
+            ground.snow=a.snow*wa+b.snow*wb+c.snow*wc;
+            ground.supported=!(cave && cave->protectedGround(up));
+            for(const auto& [base,r]:obstacles) if(std::hypot(base.x-ground.base.x,base.z-ground.base.z)<r+.32) {ground.supported=false;break;}
+            return ground;
+        });
+    }
     mesh.seconds=seconds;mesh.snowRevision=water.snow.revision();return mesh;
 }
 } // namespace planet

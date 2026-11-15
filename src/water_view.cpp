@@ -30,9 +30,11 @@ bool WaterSurfaceCache::update(const World& world,const Hydrology& water,std::sp
     for(std::size_t i=0;i<vertices.size();++i) {
         const auto& v=vertices[i];if(!v.available) continue;
         auto& p=points_[i];p.ground=water.sample(v.up);const auto& g=p.ground;
-        p.ocean=!v.river && !v.inland && ocean && (v.altitude<c.seaLevel || !g.available || g.depth<.0005);
-        p.depth=v.river ? -.01 : v.inland ? v.level-v.altitude : p.ocean ? c.seaLevel-v.altitude : (g.available ? g.depth*g.weight : 0);
-        const auto position=v.up*(c.radius+(p.ocean ? c.seaLevel : v.altitude+p.depth))-origin;
+        p.ocean=!v.river && !v.inland && ocean && (v.altitude<c.seaLevel || !g.available || g.depth+g.frozenDepth<.0005);
+        p.depth=v.river ? -.01 : v.inland ? v.level-v.altitude : p.ocean ? c.seaLevel-v.altitude : (g.available ? (g.depth+g.frozenDepth)*g.weight : 0);
+        const double level=p.ocean ? c.seaLevel : v.altitude+p.depth;
+        p.ice=water.iceAt(v.up,p.depth,level,p.ocean);
+        const auto position=v.up*(c.radius+level+p.ice.freeboard)-origin;
         p.base={dot(position,east),dot(position,anchor),dot(position,north)};
     }
     std::vector<unsigned char> used(vertices.size(),0);

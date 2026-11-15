@@ -22,7 +22,8 @@ struct Options {
     bool resumeExplicit=false,noResume=false,noAutosave=false,worldOptions=false;
     std::string settingsWarning;
     int frames=0;
-    bool proceduralMaterials=true,grassShaders=true;
+    bool proceduralMaterials=true,grassShaders=true,caustics=true;
+    bool ice=true;double iceHours=0;std::optional<IceExperiment> iceMode;
     bool globe=false, detail=true, wind=true, clouds=true, water=true, erosion=true, paused=false, windTracers=false;
     double weatherSeconds=0, rainMmH=0,walkSeconds=0;
     bool landforms=true,caves=true,headlamp=true;
@@ -74,10 +75,10 @@ Options parseOptions() {
         options.caves=modules.requested(Module::Caves);options.waterMotion=modules.requested(Module::WaterMotion);
         options.plantGrowth=modules.requested(Module::PlantGrowth);options.globalWeather=modules.requested(Module::GlobalWeather);
         options.sound=modules.requested(Module::Sound);
-        options.rivers=modules.requested(Module::Rivers);options.inlandWaters=modules.requested(Module::InlandWaters);options.fauna=modules.requested(Module::Fauna);options.snow=modules.requested(Module::Snow);options.phenomenaEnabled=modules.requested(Module::Phenomena);
+        options.ice=modules.requested(Module::Ice);options.rivers=modules.requested(Module::Rivers);options.inlandWaters=modules.requested(Module::InlandWaters);options.fauna=modules.requested(Module::Fauna);options.snow=modules.requested(Module::Snow);options.phenomenaEnabled=modules.requested(Module::Phenomena);
         for(int i=1;i<argc;++i) {
             const std::wstring arg=argv[i];
-            constexpr std::array neutral{L"--settings",L"--save-dir",L"--resume",L"--no-resume",L"--no-autosave",L"--frames",L"--capture",L"--report",L"--paused",L"--audio-capture",L"--volume",L"--surface-style",L"--basic-materials",L"--basic-grass",L"--no-sky",L"--no-shadows",L"--no-sound"};
+            constexpr std::array neutral{L"--settings",L"--save-dir",L"--resume",L"--no-resume",L"--no-autosave",L"--frames",L"--capture",L"--report",L"--paused",L"--audio-capture",L"--volume",L"--surface-style",L"--basic-materials",L"--basic-grass",L"--no-caustics",L"--no-sky",L"--no-shadows",L"--no-sound"};
             if(std::none_of(neutral.begin(),neutral.end(),[&](auto value){return arg==value;})) options.worldOptions=true;
             const auto next=[&]() -> std::wstring {
                 if(++i>=argc) throw std::invalid_argument("Missing command-line value");
@@ -186,6 +187,10 @@ Options parseOptions() {
                 if(!options.phenomenon) throw std::invalid_argument("Phenomenon must be natural, rainbow, halo, pillar, aurora, lightning, fog or dust");
             }
             else if(arg==L"--no-phenomena") options.phenomenaEnabled=false;
+            else if(arg==L"--no-ice") options.ice=false;
+            else if(arg==L"--no-caustics") options.caustics=false;
+            else if(arg==L"--ice") {const auto value=next();options.iceMode=iceExperiment(std::string(value.begin(),value.end()));if(!options.iceMode) throw std::invalid_argument("Ice must be natural, freeze or thaw");}
+            else if(arg==L"--ice-hours") {const auto value=next();std::size_t used=0;options.iceHours=std::stod(value,&used);if(used!=value.size() || !std::isfinite(options.iceHours) || options.iceHours<0 || options.iceHours>168) throw std::invalid_argument("Ice preview must be 0..168 hours");}
             else if(arg==L"--no-snow") options.snow=false;
             else if(arg==L"--snow-seconds") {
                 const auto value=next();std::size_t used=0;options.snowSeconds=std::stod(value,&used);
@@ -234,6 +239,8 @@ Options parseOptions() {
         }
     } catch(...) { LocalFree(argv); throw; }
     LocalFree(argv);
+    if(options.iceHours>0 && !options.iceMode) throw std::invalid_argument("--ice-hours requires --ice");
+    if(options.iceMode && !options.ice) throw std::invalid_argument("--ice requires Ice enabled");
     if(options.snowSeconds>0 && !options.snowSite) throw std::invalid_argument("--snow-seconds requires --snow");
     if(!options.capture.empty() && options.frames==0) options.frames=3;
     if(options.saveDirectory.empty()) options.saveDirectory=options.settingsPath.parent_path()/L"saves";
@@ -247,7 +254,7 @@ World configuredWorld(const Options& options) {
     modules.set(Module::Hydrology,options.water);modules.set(Module::Erosion,options.erosion);
     modules.set(Module::Landforms,options.landforms);modules.set(Module::Caves,options.caves);
     modules.set(Module::WaterMotion,options.waterMotion);modules.set(Module::PlantGrowth,options.plantGrowth);
-    modules.set(Module::GlobalWeather,options.globalWeather);modules.set(Module::Sound,options.sound);modules.set(Module::Rivers,options.rivers);modules.set(Module::InlandWaters,options.inlandWaters);modules.set(Module::Fauna,options.fauna);modules.set(Module::Snow,options.snow);modules.set(Module::Phenomena,options.phenomenaEnabled);return world;
+    modules.set(Module::GlobalWeather,options.globalWeather);modules.set(Module::Sound,options.sound);modules.set(Module::Rivers,options.rivers);modules.set(Module::InlandWaters,options.inlandWaters);modules.set(Module::Fauna,options.fauna);modules.set(Module::Snow,options.snow);modules.set(Module::Phenomena,options.phenomenaEnabled);modules.set(Module::Ice,options.ice);return world;
 }
 class Application {
 public:
@@ -255,7 +262,7 @@ public:
         view_.seconds+=simulation_.global.elapsed();view_.weatherLayer=options_.weatherLayer;view_.surfaceStyle=options_.surfaceStyle;
         view_.volume=options_.volume;view_.gamma=options_.preferences.gamma;view_.brightness=options_.preferences.brightness;
         view_.interfaceVisible=options_.preferences.interfaceVisible;
-        view_.skyEnabled=options_.sky;view_.shadowsEnabled=options_.shadows;
+        view_.causticsEnabled=options_.caustics;view_.skyEnabled=options_.sky;view_.shadowsEnabled=options_.shadows;
         view_.paused=options_.paused; view_.windTracers=options_.windTracers; view_.headlamp=options_.headlamp;
         simulation_.flora.setYoung(options_.youngFlora);simulation_.flora.setRate(options_.growthRate);
         if(options_.floraDay) simulation_.flora.setCalendarDay(*options_.floraDay);
@@ -273,12 +280,15 @@ public:
         if(options_.phenomenon) visitPhenomenon(*options_.phenomenon);
         if(options_.coast || (options_.diveDepth && !options_.landmark && !options_.riverSite)) visitCoast(options_.diveDepth.has_value());
         if(options_.riverSite) visitRiver(*options_.riverSite,options_.diveDepth.has_value());
+        if(options_.iceMode && !options_.landmark && !options_.riverSite && !options_.coast && !options_.diveDepth) visitLandmark(Landform::Pond);
+        if(options_.iceMode) simulation_.water.setIceExperiment(*options_.iceMode);
         if(options_.storm && !visitStorm(*options_.storm)) throw std::runtime_error("No active storm of the requested kind on this planet");
         simulation_.advance(world_,explorer_.up(),0);
         for(double remaining=options_.weatherSeconds+options_.snowSeconds;remaining>1e-9;) {
             const double step=std::min(60.0,remaining);
             simulation_.advance(world_,explorer_.up(),step); view_.seconds+=step; remaining-=step;
         }
+        if(options_.iceHours>0) simulation_.water.previewIce(world_,simulation_.weather,options_.iceHours*3600);
         if(options_.diveDepth) {
             const double heading=explorer_.heading();
             explorer_.dive(world_,explorer_.up(),*options_.diveDepth,&simulation_.water,&simulation_.motion);
@@ -349,8 +359,8 @@ public:
         auto last=Clock::now();
         int frames=0;
         double renderTime=0, longestRender=0;
-        constexpr std::array<const char*,18> phaseNames{"navigation","simulation","audio","render","swap","terrain_build","plants_build","shadow_build","shadows","water","rivers","weather","sky","fauna","snow","phenomena","grass","frame_work"};
-        std::array<double,18> phaseTotals{},steadyTotals{},phasePeaks{};
+        constexpr std::array<const char*,19> phaseNames{"navigation","simulation","audio","render","swap","terrain_build","plants_build","shadow_build","shadows","water","rivers","weather","sky","fauna","snow","phenomena","grass","optics","frame_work"};
+        std::array<double,19> phaseTotals{},steadyTotals{},phasePeaks{};
         std::vector<double> steadyFrames;
         unsigned steadyCount=0;
         const auto milliseconds=[](Clock::time_point a,Clock::time_point b) {return std::chrono::duration<double,std::milli>(b-a).count();};
@@ -408,7 +418,7 @@ public:
             if(!SwapBuffers(dc_)) throw std::runtime_error("SwapBuffers failed");
             if(!options_.report.empty()) {
                 const auto& r=renderer_->timings();
-                std::array<double,18> sample{milliseconds(navigationStart,simulationStart),milliseconds(simulationStart,audioStart),milliseconds(audioStart,renderStart),renderMs,milliseconds(swapStart,Clock::now()),r.terrain,r.plants,r.shadowBuild,r.shadows,r.water,r.rivers,r.weather,r.sky,r.fauna,r.snow,r.phenomena,r.grass,0};
+                std::array<double,19> sample{milliseconds(navigationStart,simulationStart),milliseconds(simulationStart,audioStart),milliseconds(audioStart,renderStart),renderMs,milliseconds(swapStart,Clock::now()),r.terrain,r.plants,r.shadowBuild,r.shadows,r.water,r.rivers,r.weather,r.sky,r.fauna,r.snow,r.phenomena,r.grass,r.optics,0};
                 for(unsigned i=0;i<5;++i) sample.back()+=sample[i];
                 for(std::size_t i=0;i<sample.size();++i) {
                     phaseTotals[i]+=sample[i];if(frames>5) {steadyTotals[i]+=sample[i];phasePeaks[i]=std::max(phasePeaks[i],sample[i]);}
@@ -461,6 +471,12 @@ public:
                 << "\ngrass_short_clumps=" << renderer_->grassRenderer().shortCount() << "\ngrass_tall_clumps=" << renderer_->grassRenderer().tallCount()
                 << "\ngrass_vertices=" << renderer_->grassRenderer().vertices() << "\ngrass_contact_cells=" << renderer_->grassField().activeCells()
                 << "\ngrass_contact_bend=" << renderer_->grassField().maximumBend() << "\ngrass_wind_bend=" << renderer_->grassWindBend() << '\n';
+            const auto iceHere=liquidAt(world_,&simulation_.water,&simulation_.motion,explorer_.up()).ice;
+            const auto iceBudget=simulation_.water.iceBudget();
+            out << "ice_backend=" << renderer_->iceBackend() << "\nice_experiment=" << iceExperimentName(simulation_.water.iceExperiment())
+                << "\nice_thickness_m=" << iceHere.thickness << "\nice_cover=" << iceHere.cover << "\nice_supports=" << iceHere.supports
+                << "\nice_stored_m3=" << iceBudget.storedM3 << "\nice_frozen_m3=" << iceBudget.frozenM3 << "\nice_melted_m3=" << iceBudget.meltedM3
+                << "\nice_residual_m3=" << iceBudget.residual() << "\ncaustics_active=" << renderer_->causticsActive() << "\ncaustic_updates=" << renderer_->causticUpdates() << '\n';
             const auto habitat=world_.climatology(explorer_.up());
             out << "inland_water=" << habitat.inland << "\nreference_water_level_m=" << habitat.waterLevel << "\nreference_water_depth_m=" << habitat.waterDepth << "\nwetness=" << habitat.wetness << "\nsand=" << habitat.sand << '\n';
             const auto& light=renderer_->illumination();
@@ -763,7 +779,7 @@ private:
     double maximumTimeScale() const {
         if(explorer_.swimming()) return 1;
         if(world_.modules().enabled(Module::Fauna) || world_.modules().enabled(Module::Snow)) return 120;
-        if(world_.modules().enabled(Module::WaterMotion)) return 120;
+        if(world_.modules().enabled(Module::WaterMotion) || world_.modules().enabled(Module::Ice)) return 120;
         if(world_.modules().enabled(Module::Hydrology)) return Hydrology::maximumTimeScale;
         return world_.modules().enabled(Module::Wind) ? Weather::maximumTimeScale : 86400.0;
     }
@@ -876,6 +892,23 @@ private:
             constexpr std::array<StormKind,3> tour{StormKind::Hurricane,StormKind::Cyclone,StormKind::Thunderstorm};
             for(unsigned i=0;i<tour.size();++i) if(visitStorm(tour[stormIndex_++%tour.size()])) break;
         }
+        else if(key=='I') modalAction([&] {
+            if(!world_.modules().enabled(Module::Ice)) throw std::runtime_error("Enable Ice and Climate in Settings to run an ice experiment");
+            if((GetKeyState(VK_SHIFT)&0x8000)!=0) {
+                simulation_.water.previewIce(world_,simulation_.weather,86400);
+                view_.notice="ICE: 24 h thermal preview (weather and flow held fixed)";
+            } else {
+                const auto previous=simulation_.water.iceExperiment();
+                if(previous==IceExperiment::Natural) {
+                    const auto& cells=simulation_.water.grid().cells;
+                    if(std::none_of(cells.begin(),cells.end(),[](const auto& c){return c.sea || c.reservoir || c.water>.01;})) visitLandmark(Landform::Pond);
+                }
+                const auto next=static_cast<IceExperiment>((static_cast<unsigned>(previous)+1)%3);
+                simulation_.water.setIceExperiment(next);
+                view_.notice=std::string("ICE: ")+std::string(iceExperimentName(next))+" / Shift+I: 24 h thermal preview";
+            }
+            renderer_->invalidate();
+        });
         else if(key=='Y') simulation_.flora.setRate(simulation_.flora.rate()<86400 ? 86400 : (simulation_.flora.rate()<2592000 ? 2592000 : 1));
         else if(key=='Z') {
             const double rate=simulation_.flora.rate(),calendar=simulation_.flora.calendarDay();simulation_.flora=Flora{};

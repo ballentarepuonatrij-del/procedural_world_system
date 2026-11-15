@@ -1,4 +1,5 @@
 #include "planet/win32_materials.hpp"
+#include "planet/caustics.hpp"
 #include <windows.h>
 #include <GL/gl.h>
 #include <cstring>
@@ -12,13 +13,14 @@ template<class T> T entry(const char* name) {
 }
 constexpr const char* vertexShader=R"GLSL(#version 120
 uniform mat3 worldBasis,waterBasis;
-uniform vec3 origin,waterOrigin;
+uniform vec3 origin,waterOrigin,opticalOrigin;
 uniform vec4 waterGrid;
 uniform float radius,sunEnabled,lampEnabled;
 varying vec3 texPosition,worldNormal,eyePosition,eyeNormal,illumination;
 varying vec4 weights;
 varying vec2 waterUV;
 varying float backgroundWetness;
+varying vec3 opticalPosition;
 void main() {
     // Match fixed-function shadow volumes exactly, including depth rounding.
     gl_Position=ftransform();
@@ -35,6 +37,7 @@ void main() {
     worldNormal=worldBasis*gl_Normal;
     texPosition=(worldBasis*gl_Vertex.xyz+origin)/8.0;
     vec3 hyd=waterBasis*gl_Vertex.xyz+waterOrigin;
+    opticalPosition=waterBasis*gl_Vertex.xyz+opticalOrigin;
     waterUV=((hyd.xy/max(hyd.z,1.0)*radius-waterGrid.xy)*waterGrid.z+0.5)/waterGrid.w;
     weights=gl_MultiTexCoord1;
     backgroundWetness=gl_MultiTexCoord2.x;
@@ -42,12 +45,16 @@ void main() {
 }
 )GLSL";
 constexpr const char* fragmentShader=R"GLSL(#version 120
-uniform sampler2D patterns,moisture;
+uniform sampler2D patterns,moisture,waterOptics,causticMap;
+uniform vec4 opticalRange;
+uniform vec3 opticalSun;
+uniform float radius,causticStrength;
 uniform float sunEnabled,lampEnabled,fogMode,waterEnabled,detailStrength;
 varying vec3 texPosition,worldNormal,eyePosition,eyeNormal,illumination;
 varying vec4 weights;
 varying vec2 waterUV;
 varying float backgroundWetness;
+varying vec3 opticalPosition;
 void main() {
     vec4 w=max(weights,vec4(0.0));w/=max(dot(w,vec4(1.0)),0.001);
     float distanceToEye=length(eyePosition);
@@ -73,6 +80,22 @@ void main() {
     float dark=1.0-wetness*dot(w,vec4(0.28,0.42,0.34,0.08));
     vec3 albedo=gl_Color.rgb*dark*(1.0+detail*1.5);
     vec3 color=albedo*illumination;
+    if(causticStrength>0.001 && sunEnabled>0.5 && distanceToEye<180.0 &&
+       waterUV.x>0.0 && waterUV.y>0.0 && waterUV.x<1.0 && waterUV.y<1.0) {
+        vec4 water=texture2D(waterOptics,waterUV);
+        float height=opticalPosition.z+dot(opticalPosition.xy,opticalPosition.xy)/(2.0*radius);
+        float depth=opticalRange.x+water.r*opticalRange.y-height;
+        if(water.a>0.8 && depth>0.0 && depth<24.0) {
+            vec2 border=min(waterUV*64.0-0.5,63.5-waterUV*64.0);
+            float fade=smoothstep(0.0,4.0,min(border.x,border.y))*(1.0-smoothstep(100.0,180.0,distanceToEye));
+            vec2 coord=(opticalPosition.xy-opticalSun.xy*depth)/8.0;
+            vec4 flux=texture2D(causticMap,coord);
+            float contrast=mix(flux.r,flux.a,water.g)*8.0-1.0;
+            float transmission=smoothstep(0.0,0.12,depth)*(1.0-smoothstep(12.0,24.0,depth))*exp(-depth*0.10)*water.b;
+            float light=max(dot(normalize(eyeNormal),normalize(gl_LightSource[0].position.xyz)),0.0);
+            color+=albedo*gl_LightSource[0].diffuse.rgb*light*contrast*0.9*transmission*fade*smoothstep(0.8,1.0,water.a)*causticStrength;
+        }
+    }
     if(wetness>0.001 && sunEnabled>0.5) {
         vec3 n=normalize(eyeNormal),l=normalize(gl_LightSource[0].position.xyz);
         float ndl=max(dot(n,l),0.0);
@@ -109,8 +132,12 @@ struct TerrainMaterials::Impl {
     bool waterDirty=true;
     std::uint64_t wetSteps=0,wetRevision=0,wetSeed=0;
     Vec3 wetAnchor{};double wetX=0,wetZ=0;
-    std::array<GLint,11> uniforms{};
-    ~Impl() {if(program) deleteProgram(program);if(texture) glDeleteTextures(1,&texture);if(wetTexture) glDeleteTextures(1,&wetTexture);}
+    std::array<GLint,15> uniforms{};
+    GLuint opticsTexture=0,causticTexture=0;GLint previousOptics=0,previousCaustic=0;
+    CausticMap waterRays,iceRays;WaterOpticsMap optics;
+    Vec3 lastSun{},iceSun{};double lastTime=-1e30,lastRoughness=-1;
+    std::uint64_t opticalUpdates=0;bool opticsActive=false,iceMapReady=false;
+    ~Impl() {if(program) deleteProgram(program);for(auto id:{texture,wetTexture,opticsTexture,causticTexture}) if(id) glDeleteTextures(1,&id);}
     void setup() {
         if(!createShader || !shaderSource || !compile || !deleteShader || !link || !use || !deleteProgram || !shaderStatus || !programStatus || !createProgram || !attach || !location || !integer || !real || !vector3 || !vector4 || !matrix || !active || !coord) return;
         const auto shader=[&](GLenum kind,const char* source) {
@@ -124,7 +151,8 @@ struct TerrainMaterials::Impl {
         if(!program) return;
         GLint previous=0;glGetIntegerv(0x8B8D,&previous);use(program);
         integer(location(program,"patterns"),0);integer(location(program,"moisture"),1);
-        constexpr std::array names{"worldBasis","waterBasis","origin","waterOrigin","waterGrid","radius","sunEnabled","lampEnabled","fogMode","waterEnabled","detailStrength"};
+        integer(location(program,"waterOptics"),2);integer(location(program,"causticMap"),3);
+        constexpr std::array names{"worldBasis","waterBasis","origin","waterOrigin","waterGrid","radius","sunEnabled","lampEnabled","fogMode","waterEnabled","detailStrength","opticalOrigin","opticalRange","opticalSun","causticStrength"};
         for(std::size_t i=0;i<names.size();++i) uniforms[i]=location(program,names[i]);
         use(static_cast<GLuint>(previous));
         glGenTextures(1,&texture);glBindTexture(GL_TEXTURE_2D,texture);
@@ -135,13 +163,23 @@ struct TerrainMaterials::Impl {
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,0x812F);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,0x812F);
         glTexImage2D(GL_TEXTURE_2D,0,GL_LUMINANCE_ALPHA,64,64,0,GL_LUMINANCE_ALPHA,GL_UNSIGNED_BYTE,nullptr);
+        glGenTextures(1,&opticsTexture);glBindTexture(GL_TEXTURE_2D,opticsTexture);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,0x812F);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,0x812F);
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA16,64,64,0,GL_RGBA,GL_UNSIGNED_SHORT,nullptr);
+        glGenTextures(1,&causticTexture);glBindTexture(GL_TEXTURE_2D,causticTexture);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
+        glTexImage2D(GL_TEXTURE_2D,0,GL_LUMINANCE_ALPHA,64,64,0,GL_LUMINANCE_ALPHA,GL_UNSIGNED_BYTE,nullptr);
     }
 };
 TerrainMaterials::TerrainMaterials()=default;
 TerrainMaterials::~TerrainMaterials()=default;
 void TerrainMaterials::initialize(bool enabled) {if(enabled) {impl_=std::make_unique<Impl>();impl_->setup();}}
-void TerrainMaterials::invalidate() {if(impl_) impl_->waterDirty=true;}
+void TerrainMaterials::invalidate() {if(impl_) {impl_->waterDirty=true;impl_->lastTime=-1e30;impl_->iceMapReady=false;}}
 const char* TerrainMaterials::backend() const {return impl_ && impl_->program ? "triplanar-glsl" : "fixed-function";}
+std::uint64_t TerrainMaterials::causticUpdates() const {return impl_ ? impl_->opticalUpdates : 0;}
+bool TerrainMaterials::causticsActive() const {return impl_ && impl_->opticsActive;}
 void TerrainMaterials::vertex(const TerrainVertex& v) const {
     const bool shader=impl_ && impl_->program;
     const auto color=shader ? v.color : wetMaterialColor(v.color,v.material);
@@ -150,7 +188,8 @@ void TerrainMaterials::vertex(const TerrainVertex& v) const {
     if(shader) {const auto& w=v.material.weights;impl_->coord(0x84C1,w[0],w[1],w[2],w[3]);impl_->coord(0x84C2,v.material.backgroundWetness,0,0,0);}
     glVertex3d(v.position.x,v.position.y,v.position.z);
 }
-void TerrainMaterials::prepare(const World& world,const Hydrology& water,Vec3 anchor,Vec3 eastAxis,Vec3 northAxis,double detailStrength) {
+void TerrainMaterials::prepare(const World& world,const Hydrology& water,Vec3 anchor,Vec3 eastAxis,Vec3 northAxis,double detailStrength,
+                               const WaterMotion& motion,Vec3 sun,double altitude,bool caustics) {
     if(!impl_ || !impl_->program) return;
     auto& p=*impl_;GLint previous=0;glGetIntegerv(0x8B8D,&previous);p.use(p.program);
     p.real(p.uniforms[10],static_cast<float>(detailStrength));
@@ -164,11 +203,12 @@ void TerrainMaterials::prepare(const World& world,const Hydrology& water,Vec3 an
     const auto project=[&](Vec3 v){return Vec3{dot(v,he),dot(v,hn),dot(v,hyd)};};
     setMatrix(p.uniforms[1],project(eastAxis),project(anchor),project(northAxis));
     setVector(p.uniforms[3],project(anchor*world.config().radius));
+    setVector(p.uniforms[11],project((anchor-hyd)*world.config().radius));
     p.vector4(p.uniforms[4],static_cast<float>(water.cellX(0)),static_cast<float>(water.cellZ(0)),1.f/4,64);
     p.real(p.uniforms[5],static_cast<float>(world.config().radius));
     p.waterDirty=p.waterDirty || p.waterEnabled!=water.enabled();p.waterEnabled=water.enabled();
-    if(p.waterEnabled && (p.waterDirty || p.wetSteps!=water.steps() || p.wetRevision!=water.revision() ||
-       p.wetSeed!=world.config().seed || length(p.wetAnchor-hyd)>1e-12 || p.wetX!=water.cellX(0) || p.wetZ!=water.cellZ(0))) {
+    if(p.waterDirty || p.wetSteps!=water.steps() || p.wetRevision!=water.revision() ||
+       p.wetSeed!=world.config().seed || length(p.wetAnchor-hyd)>1e-12 || p.wetX!=water.cellX(0) || p.wetZ!=water.cellZ(0)) {
         std::array<unsigned char,64*64*2> pixels{};const auto& cells=water.grid().cells;
         for(std::size_t i=0;i<cells.size();++i) {
             const auto& cell=cells[i];const double saturation=cell.soil>0 ? cell.soilWater/(RunoffGrid::porosity*cell.soil) : 0;
@@ -176,9 +216,28 @@ void TerrainMaterials::prepare(const World& world,const Hydrology& water,Vec3 an
             pixels[i*2+1]=cell.masked ? 0 : 255;
         }
         GLint binding=0;glGetIntegerv(GL_TEXTURE_BINDING_2D,&binding);glBindTexture(GL_TEXTURE_2D,p.wetTexture);
-        glTexSubImage2D(GL_TEXTURE_2D,0,0,0,64,64,GL_LUMINANCE_ALPHA,GL_UNSIGNED_BYTE,pixels.data());glBindTexture(GL_TEXTURE_2D,static_cast<GLuint>(binding));
+        glTexSubImage2D(GL_TEXTURE_2D,0,0,0,64,64,GL_LUMINANCE_ALPHA,GL_UNSIGNED_BYTE,pixels.data());
+        p.optics=waterOpticsMap(world,water);glBindTexture(GL_TEXTURE_2D,p.opticsTexture);
+        glTexSubImage2D(GL_TEXTURE_2D,0,0,0,64,64,GL_RGBA,GL_UNSIGNED_SHORT,p.optics.pixels.data());glBindTexture(GL_TEXTURE_2D,static_cast<GLuint>(binding));
         p.waterDirty=false;p.wetSteps=water.steps();p.wetRevision=water.revision();p.wetSeed=world.config().seed;
         p.wetAnchor=hyd;p.wetX=water.cellX(0);p.wetZ=water.cellZ(0);
+    }
+    const auto localSun=project(sun);
+    const double strength=caustics && p.optics.wet && altitude<p.optics.levelBase+p.optics.levelRange+220 ? detailStrength*smoothstep(.05,.3,localSun.z) : 0;
+    p.opticsActive=strength>.001;p.real(p.uniforms[14],static_cast<float>(strength));
+    p.vector4(p.uniforms[12],static_cast<float>(p.optics.levelBase),static_cast<float>(p.optics.levelRange),0,0);
+    const auto ray=refractLight(-localSun,{0,0,1},1,1.333);
+    setVector(p.uniforms[13],ray.z<-.001 ? Vec3{ray.x/-ray.z,ray.y/-ray.z,0} : Vec3{});
+    const double roughness=motion.enabled() ? clamp(.55+length(motion.forcingWind())*.06,.55,1.4) : 0;
+    const bool lightChanged=length(localSun-p.lastSun)>.001;
+    if(p.opticsActive && (std::abs(motion.seconds()-p.lastTime)>=.05 || lightChanged || roughness!=p.lastRoughness || (p.optics.hasIce && !p.iceMapReady))) {
+        p.waterRays.update(localSun,motion.seconds(),roughness,false,world.config().seed);
+        if(p.optics.hasIce && (!p.iceMapReady || length(localSun-p.iceSun)>.001)) {p.iceRays.update(localSun,0,1,true,world.config().seed);p.iceMapReady=true;p.iceSun=localSun;}
+        std::array<unsigned char,64*64*2> pixels{};
+        for(std::size_t i=0;i<64*64;++i) {pixels[2*i]=static_cast<unsigned char>(std::lround(clamp(p.waterRays.intensity()[i]/8.,0.,1.)*255));pixels[2*i+1]=static_cast<unsigned char>(std::lround(clamp(p.iceRays.intensity()[i]/8.,0.,1.)*255));}
+        GLint binding=0;glGetIntegerv(GL_TEXTURE_BINDING_2D,&binding);glBindTexture(GL_TEXTURE_2D,p.causticTexture);
+        glTexSubImage2D(GL_TEXTURE_2D,0,0,0,64,64,GL_LUMINANCE_ALPHA,GL_UNSIGNED_BYTE,pixels.data());glBindTexture(GL_TEXTURE_2D,static_cast<GLuint>(binding));
+        p.lastTime=motion.seconds();p.lastSun=localSun;p.lastRoughness=roughness;++p.opticalUpdates;
     }
     p.use(static_cast<GLuint>(previous));
 }
@@ -187,6 +246,8 @@ void TerrainMaterials::begin(bool enabled) {
     auto& p=*impl_;glGetIntegerv(0x8B8D,&p.previousProgram);glGetIntegerv(0x84E0,&p.previousActive);
     p.active(0x84C0);glGetIntegerv(GL_TEXTURE_BINDING_2D,&p.previousTexture);glBindTexture(GL_TEXTURE_2D,p.texture);
     p.active(0x84C1);glGetIntegerv(GL_TEXTURE_BINDING_2D,&p.previousWetTexture);glBindTexture(GL_TEXTURE_2D,p.wetTexture);p.active(0x84C0);
+    p.active(0x84C2);glGetIntegerv(GL_TEXTURE_BINDING_2D,&p.previousOptics);glBindTexture(GL_TEXTURE_2D,p.opticsTexture);
+    p.active(0x84C3);glGetIntegerv(GL_TEXTURE_BINDING_2D,&p.previousCaustic);glBindTexture(GL_TEXTURE_2D,p.causticTexture);p.active(0x84C0);
     p.use(p.program);p.real(p.uniforms[6],glIsEnabled(GL_LIGHT0) ? 1.f : 0.f);p.real(p.uniforms[7],glIsEnabled(GL_LIGHT1) ? 1.f : 0.f);
     GLint fog=0;glGetIntegerv(GL_FOG_MODE,&fog);p.real(p.uniforms[8],!glIsEnabled(GL_FOG) ? 0.f : fog==GL_EXP ? 1.f : 2.f);
     p.real(p.uniforms[9],p.waterEnabled ? 1.f : 0.f);p.bound=true;
@@ -194,6 +255,7 @@ void TerrainMaterials::begin(bool enabled) {
 void TerrainMaterials::end() {
     if(!impl_ || !impl_->bound) return;
     auto& p=*impl_;p.use(static_cast<GLuint>(p.previousProgram));p.active(0x84C1);glBindTexture(GL_TEXTURE_2D,static_cast<GLuint>(p.previousWetTexture));
+    p.active(0x84C2);glBindTexture(GL_TEXTURE_2D,static_cast<GLuint>(p.previousOptics));p.active(0x84C3);glBindTexture(GL_TEXTURE_2D,static_cast<GLuint>(p.previousCaustic));
     p.active(0x84C0);glBindTexture(GL_TEXTURE_2D,static_cast<GLuint>(p.previousTexture));p.active(static_cast<GLenum>(p.previousActive));p.bound=false;
 }
 } // namespace planet

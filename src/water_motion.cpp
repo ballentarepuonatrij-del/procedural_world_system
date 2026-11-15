@@ -165,12 +165,19 @@ LiquidSample liquidAt(const World& world,const Hydrology* water,const WaterMotio
         if(motion) liquid.current=motion->current(p);
     } else if(water) {
         const auto ground=water->sample(p);
-        if(ground.available && ground.depth*ground.weight>0.0005) {
-            liquid.present=true; liquid.level=liquid.bed+ground.depth*ground.weight;
+        if(ground.available && (ground.depth+ground.frozenDepth)*ground.weight>0.0005) {
+            liquid.present=true; liquid.level=liquid.bed+(ground.depth+ground.frozenDepth)*ground.weight;
             liquid.current=water->flowVector(ground.velocity); liquid.sediment=ground.sedimentKgM3;
         }
     }
-    if(liquid.present && motion && !liquid.river) liquid.level+=motion->waves(p,liquid.level-liquid.bed,liquid.ocean).height;
+    if(liquid.present) {
+        const double depth=std::max(0.,liquid.level-liquid.bed);
+        if(water) liquid.ice=water->iceAt(p,depth,liquid.level,liquid.ocean,liquid.river ? river.speed : 0);
+        const double displacement=motion && !liquid.river ? motion->waves(p,depth,liquid.ocean).height*liquid.ice.waveFactor() : 0;
+        liquid.surfaceLevel=liquid.level+displacement+liquid.ice.freeboard;
+        liquid.level+=displacement-liquid.ice.submerged*liquid.ice.cover;
+        liquid.current=liquid.current*(1-.85*liquid.ice.cover);
+    }
     liquid.depth=std::max(0.0,liquid.level-liquid.bed);
     return liquid;
 }

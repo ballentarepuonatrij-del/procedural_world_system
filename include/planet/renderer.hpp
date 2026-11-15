@@ -10,6 +10,7 @@
 #include "planet/win32_tone.hpp"
 #include "planet/win32_materials.hpp"
 #include "planet/win32_grass.hpp"
+#include "planet/win32_water.hpp"
 #include "planet/water_view.hpp"
 #include <windows.h>
 #include <GL/gl.h>
@@ -44,7 +45,7 @@ struct ViewState {
     double volume=.55;
     bool audioAvailable=false;
     bool interfaceVisible=true;
-    bool skyEnabled=true,shadowsEnabled=true;
+    bool skyEnabled=true,shadowsEnabled=true,causticsEnabled=true;
     unsigned gamma=100,brightness=100;
     std::string notice;
     Phenomenon phenomenon=Phenomenon::Natural;
@@ -53,7 +54,7 @@ struct ViewState {
 };
 bool globeHudHit(const ViewState& view,int x,int y);
 struct RenderTimings {
-    double terrain=0,plants=0,shadowBuild=0,shadows=0,water=0,rivers=0,weather=0,sky=0,fauna=0,snow=0,phenomena=0,grass=0;
+    double terrain=0,plants=0,shadowBuild=0,shadows=0,water=0,rivers=0,weather=0,sky=0,fauna=0,snow=0,phenomena=0,grass=0,optics=0;
 };
 class Renderer {
 public:
@@ -105,6 +106,9 @@ public:
     std::size_t blowingSnowCount() const {return blowingSnowCount_;}
     const char* toneBackend() const {return tone_.backend();}
     const char* materialBackend() const {return materials_.backend();}
+    const char* iceBackend() const {return waterEffects_.backend();}
+    std::uint64_t causticUpdates() const {return materials_.causticUpdates();}
+    bool causticsActive() const {return materials_.causticsActive();}
     const GrassRenderer& grassRenderer() const {return grassPainter_;}
     const GrassField& grassField() const {return grassField_;}
     double grassWindBend() const {return length(grassWindTall_.bend);}
@@ -166,9 +170,10 @@ private:
     std::size_t cloudCount_=0;
     std::vector<SurfaceWaterVertex> waterVertices_;
     std::vector<std::array<std::size_t,3>> waterTriangles_;
-    struct WaterDrawVertex { Vec3 position; Color color; float alpha; double depth; };
+    struct WaterDrawVertex { Vec3 position; Color color; float alpha; double depth; std::array<float,4> optics{}; };
     std::vector<WaterDrawVertex> waterFrame_,waterDraw_;
     WaterSurfaceCache waterSurface_;
+    WaterEffects waterEffects_;
     std::vector<std::size_t> waterActiveTriangles_;
     std::vector<unsigned char> waterVisible_,waterOutside_;
     std::size_t waterCount_=0,waterShadedVertices_=0,riverShadedVertices_=0;

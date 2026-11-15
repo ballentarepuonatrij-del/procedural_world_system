@@ -4,6 +4,7 @@
 #include "planet/flora.hpp"
 #include "planet/fauna.hpp"
 #include "planet/snow.hpp"
+#include "planet/ice.hpp"
 #include "planet/global_weather.hpp"
 #include <map>
 #include <deque>
@@ -18,6 +19,8 @@ struct GroundCell {
     bool reservoir=false;               // prescribed river/lake stage; exchange counted at local boundary
     double reservoirLevel=0;
     bool masked=false;                  // unresolved multilevel cave region: impermeable solver boundary
+    IceColumn ice;
+    double flowSpeed=0;                 // prescribed river speed, m/s; zero in standing water
     double bed() const { return rock+soil; }
 };
 struct RunoffExchange {
@@ -36,6 +39,7 @@ public:
                            double evaporationRate,bool erosion,bool openBoundary,
                            bool ocean,double seaLevel,std::span<const Wind2> stress={});
     double waterVolume() const;
+    double frozenVolume() const;
     double solidMass() const;
     Wind2 velocity(int x,int z) const;
     int size() const { return size_; }
@@ -57,6 +61,7 @@ struct GroundSample {
     bool available=false;
     double bed{}, depth{}, saturation{}, sedimentKgM3{}, bedChange{}, weight{};
     Wind2 velocity{};
+    double frozenDepth=0;               // water equivalent; included in stored water, not liquid flow
 };
 class Hydrology {
     friend class StateCodec;
@@ -81,10 +86,20 @@ public:
     std::uint64_t revision() const { return revision_; }
     std::uint64_t steps() const { return steps_; }
     RunoffBudget budget() const;
+    IceBudget iceBudget() const;
+    IceSample iceAt(Vec3 unit,double totalDepth,double level,bool ocean,double flow=0) const;
+    bool iceEnabled() const {return iceEnabled_;}
+    IceExperiment iceExperiment() const {return iceExperiment_;}
+    void setIceExperiment(IceExperiment value) {iceExperiment_=value;++revision_;}
+    // Isolated thermal preview: holds weather/flow fixed, advances only phase change.
+    void previewIce(const World& world,const Weather& weather,double seconds);
     Snow snow;
 private:
     GroundCell makeCell(const World& world,int x,int z) const;
     void move(const World& world,Vec3 observer,int x,int z,bool resetChart);
+    IceForcing iceForcing(const World& world,const Weather& weather,int x,int z,const Orbit& sun) const;
+    void advanceIceField(const World& world,double seconds,std::span<const IceForcing> forcing);
+    void restoreLegacyIce(const World& world);
     Config config_;
     Vec3 anchor_,east_,north_;
     int originX_=-resolution/2,originZ_=-resolution/2;
@@ -97,6 +112,10 @@ private:
     double climateWetness_=0.5,vegetation_=0.5;
     std::uint64_t revision_=0,steps_=0;
     bool enabled_=false,erosion_=false;
+    bool iceEnabled_=false;
+    IceExperiment iceExperiment_=IceExperiment::Natural;
+    IceBudget iceTotals_;
+    double iceReferenceAir_=273.15,iceReferenceLevel_=0;
     unsigned geometryMask_=0;
 };
 // Shared fixed clock: weather rain over each 2 s interval feeds the ground once.

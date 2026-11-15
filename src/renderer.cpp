@@ -56,6 +56,7 @@ GLuint makeFont(HDC dc,int size,int weight) {
 }
 Renderer::Renderer(HDC dc,bool proceduralMaterials,bool grassShaders) {
     materials_.initialize(proceduralMaterials);
+    waterEffects_.initialize(proceduralMaterials);
     grassPainter_.initialize(grassShaders);
     font_=makeFont(dc,15,FW_NORMAL); headingFont_=makeFont(dc,28,FW_BOLD);
     terrain_=glGenLists(1); terrainGrid_=glGenLists(1); globe_=glGenLists(1); objects_=glGenLists(1); caves_=glGenLists(1);weatherMap_=glGenLists(1);shadows_=glGenLists(1);
@@ -651,7 +652,11 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
             const double hazeFog=phenomena_.visibility<100000 ? 1.978/phenomena_.visibility : 0;
             glFogf(GL_FOG_DENSITY,static_cast<float>(std::max({(.000025+.000018*std::sqrt(rain))*std::exp(-std::max(explorer.altitude(),0.0)/8500),snowFog,hazeFog})));
         } else glDisable(GL_FOG);
-        materials_.prepare(world,water,anchor_,east_,north_,1-smoothstep(400,1800,travelSpeed));
+        {
+            DrawTimer timer{timings_.optics};
+            materials_.prepare(world,water,anchor_,east_,north_,1-smoothstep(400,1800,travelSpeed),simulation.motion,sun.sunDirection,explorer.altitude(),view.causticsEnabled && !wireframe);
+            waterEffects_.prepare(anchor_,east_,north_,water.directionAt(0,0),world.config().radius,.16+.84*lighting_.daylight);
+        }
         const bool showGrid=view.surfaceStyle!=SurfaceStyle::Natural;
         if(showGrid) { glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(1.0f,1.0f); }
         if(wireframe) {
@@ -746,15 +751,17 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
     }
     // Retain dry neighbours of visible wet triangles for unchanged shoreline
     // clipping. Never reuse an unshaded vertex from a rejected triangle.
+    bool hasIce=false;
     for(const auto i:waterSurface_.wetVertices()) {
         const auto& v=waterVertices_[i];if(!v.available || !waterVisible_[i]) continue;
         const auto& ground=surface[i].ground;const double depth=surface[i].depth;
         const bool ocean=surface[i].ocean;
         double level=ocean ? sea : v.altitude+depth;
         const auto wave=motion.waves(v.up,std::max(0.0,depth),ocean,v.spacing*2);
-        level+=wave.height;
+        const auto& ice=surface[i].ice;hasIce=hasIce || ice.cover>.001;
+        level+=wave.height*ice.waveFactor()+ice.freeboard;
         const Vec3 position=v.up*(radius+level);
-        const Vec3 normal=normalized(v.up-wave.gradient),towardEye=normalized(eye-position);
+        const Vec3 normal=normalized(v.up-wave.gradient*ice.waveFactor()),towardEye=normalized(eye-position);
         const double incidence=std::abs(dot(normal,towardEye));
         const double fresnel=0.02+0.98*std::pow(1-incidence,5);
         const Vec3 reflected=normal*(2*dot(normal,sun))-sun;
@@ -768,8 +775,14 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
             static_cast<float>(mix(mix(clear.r,silt.r,mud)*light,sky.r,fresnel)+shine*lighting_.sunlight.r*.75),
             static_cast<float>(mix(mix(clear.g,silt.g,mud)*light,sky.g,fresnel)+shine*lighting_.sunlight.g*.75),
             static_cast<float>(mix(mix(clear.b,silt.b,mud)*light,sky.b,fresnel)+shine*lighting_.sunlight.b*.75)};
-        const double alpha=(0.20+0.75*(1-std::exp(-std::max(0.0,depth)*0.2))+0.45*fresnel)*smoothstep(0,0.035,depth);
+        double alpha=(0.20+0.75*(1-std::exp(-std::max(0.0,depth)*0.2))+0.45*fresnel)*smoothstep(0,0.035,depth);
+        if(!wire && ice.cover>0) {
+            const double opaque=1-ice.transmission;
+            color={static_cast<float>(mix(color.r,mix(.16,.70,opaque)*light+shine*.28,ice.cover)),static_cast<float>(mix(color.g,mix(.35,.82,opaque)*light+shine*.28,ice.cover)),static_cast<float>(mix(color.b,mix(.43,.88,opaque)*light+shine*.28,ice.cover))};
+            alpha=mix(alpha,(.18+.78*opaque+.25*fresnel)*smoothstep(0,.035,depth),ice.cover);
+        }
         vertices[i]={local(position-origin),color,static_cast<float>(clamp(alpha,0.0,0.98)),depth};
+        vertices[i].optics={0,0,static_cast<float>(ice.cover),static_cast<float>(ice.thickness)};
         ++waterShadedVertices_;
     }
     for(const auto index:waterActiveTriangles_) {
@@ -783,6 +796,7 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
                 const double fraction=(a.depth-0.0005)/(a.depth-b.depth);
                 clipped[count++]={a.position+(b.position-a.position)*fraction,
                     {static_cast<float>(mix(a.color.r,b.color.r,fraction)),static_cast<float>(mix(a.color.g,b.color.g,fraction)),static_cast<float>(mix(a.color.b,b.color.b,fraction))},0,0};
+                for(std::size_t k=0;k<4;++k) clipped[count-1].optics[k]=static_cast<float>(mix(a.optics[k],b.optics[k],fraction));
             }
         }
         for(std::size_t j=1;j+1<count;++j) { triangles.push_back(clipped[0]); triangles.push_back(clipped[j]); triangles.push_back(clipped[j+1]); ++waterCount_; }
@@ -791,17 +805,20 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
     glDepthMask(GL_FALSE); glDepthFunc(GL_LEQUAL);
     glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(-1,-1);
     if(!triangles.empty()) {
+        if(hasIce && !wire) waterEffects_.begin(false);
         static_assert(sizeof(Color)==3*sizeof(float));
         static_assert(offsetof(WaterDrawVertex,alpha)==offsetof(WaterDrawVertex,color)+sizeof(Color));
         // OpenGL 1.1 client arrays retain double positions and the original
         // triangle order, without a call per colour/position or extra GPU storage.
         glPushClientAttrib(GL_CLIENT_VERTEX_ARRAY_BIT);
         glEnableClientState(GL_VERTEX_ARRAY);glEnableClientState(GL_COLOR_ARRAY);
-        glDisableClientState(GL_NORMAL_ARRAY);glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+        glDisableClientState(GL_NORMAL_ARRAY);glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+        glTexCoordPointer(4,GL_FLOAT,sizeof(WaterDrawVertex),triangles.front().optics.data());
         glVertexPointer(3,GL_DOUBLE,sizeof(WaterDrawVertex),&triangles.front().position.x);
         glColorPointer(4,GL_FLOAT,sizeof(WaterDrawVertex),&triangles.front().color.r);
         glDrawArrays(GL_TRIANGLES,0,static_cast<GLsizei>(triangles.size()));
         glPopClientAttrib();
+        waterEffects_.end();
         // Array drawing leaves current colour unspecified; preserve the value
         // that the former immediate-mode loop left for subsequent passes.
         const auto& last=triangles.back();glColor4f(last.color.r,last.color.g,last.color.b,last.alpha);
@@ -821,7 +838,7 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
         for(const auto& p:water.tracers()) {
             const auto s=water.sampleLocal(p.x,p.z);
             const double speed=std::hypot(s.velocity.east,s.velocity.north);
-            if(!s.available || s.depth<0.001 || s.weight<0.99 || speed<0.005) continue;
+            if(!s.available || s.depth<0.001 || s.frozenDepth>.001 || s.weight<0.99 || speed<0.005) continue;
             const auto up=water.directionAt(p.x,p.z);
             const Vec3 head=local(water.position(p.x,p.z,s.bed+s.depth+motion.waves(up,s.depth,false).height+0.025)-origin);
             const double duration=std::min(4.0,1.8/speed);
@@ -834,6 +851,7 @@ void Renderer::drawWater(const World& world,const Explorer& explorer,const Simul
         if(oceanEnabled && motion.enabled()) for(const auto p:motion.probes()) {
             const auto flow=motion.current(p); const double speed=length(flow);if(speed<0.002) continue;
             const double depth=sea-world.elevation(p);if(depth<0.1) continue;
+            if(water.iceAt(p,depth,sea,true).cover>.1) continue;
             const auto behind=normalized(p-flow*(std::min(20.0,2.0/speed)/radius));
             const Vec3 head=local(p*(radius+sea+motion.waves(p,depth).height+0.04)-origin);
             const Vec3 tail=local(behind*(radius+sea+motion.waves(behind,depth).height+0.04)-origin);
@@ -858,16 +876,17 @@ void Renderer::drawRivers(const World& world,const Explorer& explorer,const Simu
     glPushAttrib(GL_ALL_ATTRIB_BITS);glDisable(GL_LIGHTING);glEnable(GL_TEXTURE_2D);glBindTexture(GL_TEXTURE_2D,riverTexture_);
     glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDepthMask(GL_FALSE);glDepthFunc(GL_LEQUAL);
     glEnable(GL_POLYGON_OFFSET_FILL);glPolygonOffset(-1,-1);
-    struct RiverVertex {Vec3 up,world,position;double u=0,v=0,depth=0;Color color{};float alpha=0;};
+    struct RiverVertex {Vec3 up,world,position;double u=0,v=0,depth=0;Color color{};float alpha=0;IceSample ice;};
     struct RiverRow {std::array<RiverVertex,4> vertices;unsigned char outside=63;bool shaded=false;};
     const auto row=[&](const RiverPoint& p) {
         RiverRow result;constexpr std::array lateral{-.5,-.3,.3,.5};
         const double speed=p.discharge/(.8*p.width*p.depth);
         for(std::size_t j=0;j<lateral.size();++j) {
             auto& v=result.vertices[j];v.up=normalized(p.up+p.left*(lateral[j]*p.width/radius));
-            v.world=v.up*(radius+p.level+.008);v.position=local(v.world);
-            v.u=(p.along-(moving ? clock*speed : 0))/8;v.v=lateral[j]*p.width/8;
             v.depth=p.depth*(1-smoothstep(.3,.5,std::abs(lateral[j])));
+            v.ice=simulation.water.iceAt(v.up,v.depth,p.level,false,speed);
+            v.world=v.up*(radius+p.level+.008+v.ice.freeboard);v.position=local(v.world);
+            v.u=(p.along-(moving ? clock*speed*v.ice.waveFactor() : 0))/8;v.v=lateral[j]*p.width/8;
             result.outside&=frustum.outside(v.position);
         }
         return result;
@@ -879,11 +898,20 @@ void Renderer::drawRivers(const World& world,const Explorer& explorer,const Simu
             const auto sky=skyColor(lighting_,v.up*(2*dot(v.up,toward))-toward);
             v.color={static_cast<float>(mix(.055*light,sky.r,fresnel)),static_cast<float>(mix(.28*light,sky.g,fresnel)),static_cast<float>(mix(.30*light,sky.b,fresnel))};
             v.alpha=static_cast<float>(clamp((.32+.55*(1-std::exp(-v.depth*.6))+.3*fresnel)*smoothstep(0,.025,v.depth),0.,.96));
+            if(v.ice.cover>0) {
+                const double opaque=1-v.ice.transmission;
+                v.color={static_cast<float>(mix(v.color.r,mix(.16,.70,opaque)*light,v.ice.cover)),static_cast<float>(mix(v.color.g,mix(.35,.82,opaque)*light,v.ice.cover)),static_cast<float>(mix(v.color.b,mix(.43,.88,opaque)*light,v.ice.cover))};
+                v.alpha=static_cast<float>(mix(v.alpha,(.18+.78*opaque+.25*fresnel)*smoothstep(0,.025,v.depth),v.ice.cover));
+            }
         }
         line.shaded=true;riverShadedVertices_+=line.vertices.size();
     };
-    const auto emit=[](const RiverVertex& v) {
-        glColor4f(v.color.r,v.color.g,v.color.b,v.alpha);glTexCoord2d(v.u,v.v);glVertex3d(v.position.x,v.position.y,v.position.z);
+    const bool iceShader=waterEffects_.begin(true);
+    const auto emit=[iceShader](const RiverVertex& v) {
+        glColor4f(v.color.r,v.color.g,v.color.b,v.alpha);
+        if(iceShader) glTexCoord4d(v.u,v.v,v.ice.cover,v.ice.thickness);
+        else glTexCoord2d(v.u,v.v); // Fixed-function texture projection needs q=1.
+        glVertex3d(v.position.x,v.position.y,v.position.z);
     };
     glBegin(GL_TRIANGLES);
     for(const auto& [r,s]:riverSegments_) {
@@ -906,7 +934,7 @@ void Renderer::drawRivers(const World& world,const Explorer& explorer,const Simu
             previous=next;
         }
     }
-    glEnd();glDisable(GL_POLYGON_OFFSET_FILL);glDisable(GL_TEXTURE_2D);
+    glEnd();waterEffects_.end();glDisable(GL_POLYGON_OFFSET_FILL);glDisable(GL_TEXTURE_2D);
     if(view.waterTracers && moving) {
         glLineWidth(1.3f);glBegin(GL_LINES);
         for(const auto& [r,s]:riverSegments_) {
@@ -917,6 +945,7 @@ void Renderer::drawRivers(const World& world,const Explorer& explorer,const Simu
                 const double t=std::fmod(randomUnit(seed)+clock*speed/std::max(1.,span),1.);
                 const auto p=atlas->point(r,s,t),behind=atlas->point(r,s,std::max(0.,t-std::min(2.,speed*1.5)/std::max(1.,span)));
                 if(length(p.up-explorer.up())*radius>220 || p.level<=world.config().seaLevel+.02) continue;
+                if(simulation.water.iceAt(p.up,p.depth,p.level,false,speed).cover>.1) continue;
                 const double lateral=(randomUnit(seed+1)-.5)*.65;
                 const auto head=local(normalized(p.up+p.left*(lateral*p.width/radius))*(radius+p.level+.025));
                 const auto tail=local(normalized(behind.up+behind.left*(lateral*behind.width/radius))*(radius+behind.level+.025));
@@ -1162,6 +1191,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
     text(40,57,"PLANETLAB",white,true);
     text(41,80,"PROCEDURAL FIELD OBSERVATORY",muted);
     text(41,98,"SEED " + std::to_string(world.config().seed) + "  /  " + (view.globe ? "ORBIT" : "SURFACE"),mint);
+    const auto localIce=liquidAt(world,&water,&simulation.motion,explorer.up()).ice;
     if(explorer.underground()) {
         rect(22,120,292,111,panel,0.88f);
         text(40,143,"UNDERGROUND / KARST",mint);
@@ -1180,6 +1210,12 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(40,165,"DEPTH "+fixed(depth,1)+" m   "+fixed(pressure/100000,2)+" bar",white);
         text(40,187,"BOTTOM "+fixed(explorer.altitude()-liquid.bed,1)+" m below eye",white);
         text(40,215,"SPACE up / CTRL dive / WASD swim",muted);
+    } else if(water.iceEnabled() && (localIce.cover>.001 || water.iceExperiment()!=IceExperiment::Natural)) {
+        rect(22,120,292,111,panel,.88f);
+        text(40,143,"ICE / "+std::string(iceExperimentName(water.iceExperiment())),mint);
+        text(40,165,"LOCAL "+fixed(localIce.thickness*100,1)+" cm / "+(localIce.supports ? "SOLID" : "THIN / OPEN"),white);
+        text(40,187,"I freeze / thaw / local climate",white);
+        text(40,215,"SHIFT+I preview 24 h of heat exchange",muted);
     } else if(water.snow.enabled() && (water.snow.sample(explorer.up()).depth>.01 || water.snow.experiment()!=SnowExperiment::Natural)) {
         const auto pack=water.snow.sample(explorer.up());const auto a=water.snow.atmosphere(world,weather,explorer.up(),pack.bed);
         rect(22,120,292,111,panel,.88f);
@@ -1271,7 +1307,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(40,h-104,"AIR     " + fixed(sample.density,3) + " kg/m3",muted);
     } else text(40,h-126,"ATMOSPHERE DISABLED",muted);
     text(40,h-82,"RAIN    " + (world.modules().enabled(Module::Climate) ? fixed(sample.precipitation,0)+" mm/y (estimate)" : "--"),muted);
-    rect(w-288,85,266,301,panel,0.90f);
+    rect(w-288,85,266,318,panel,0.90f);
     text(w-272,106,"SIMULATION MODULES",mint);
     for(unsigned i=0;i<moduleCount;++i) {
         const auto m=static_cast<Module>(i);
@@ -1280,7 +1316,7 @@ void Renderer::drawHud(const World& world,const Explorer& explorer,const Simulat
         text(w-272,y,std::string(moduleNames[i]),on?white:muted);
         text(w-90,y,on ? "ON" : (world.modules().requested(m) ? "WAIT" : "OFF"),on?mint:muted);
     }
-    text(w-272,382,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
+    text(w-272,398,"BASE SPHERE  /  ALWAYS ACTIVE",muted);
     rect(22,h-51,w-44,29,panel,0.9f);
     text(35,h-31,view.globe ? "RMB drag: rotate   LMB: travel   TAB surface   ESC settings   CTRL+U interface" :
         (view.captured ? "ESC release mouse" : "CLICK look / ESC settings") + std::string("   WASD  F fly  TAB globe  CTRL+U interface"),white);

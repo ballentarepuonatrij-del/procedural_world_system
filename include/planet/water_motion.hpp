@@ -1,5 +1,6 @@
 #pragma once
 #include "planet/weather.hpp"
+#include "planet/ice.hpp"
 
 namespace planet {
 class Hydrology;
@@ -13,6 +14,8 @@ struct LiquidSample {
     bool present=false,ocean=false,river=false;
     double bed{},level{},depth{},sediment{};
     Vec3 current{};
+    IceSample ice;
+    double surfaceLevel=0; // visible water/ice top; liquid level is below a closed lid
 };
 class WaterMotion {
     friend class StateCodec;

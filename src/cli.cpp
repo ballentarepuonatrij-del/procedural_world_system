@@ -2,6 +2,7 @@
 #include "planet/surface_detail.hpp"
 #include "planet/sound.hpp"
 #include "planet/rivers.hpp"
+#include "planet/landscape.hpp"
 #include "planet/phenomena.hpp"
 #include <charconv>
 #include <cstdlib>
@@ -27,6 +28,7 @@ int main(int argc, char** argv) {
         std::optional<double> weatherSeconds,waterSeconds;
         std::optional<double> waterWind;
         double rainMmH=0;
+        std::optional<planet::IceExperiment> iceMode;double iceHours=0;bool iceEnabled=true;
         bool floraOutput=false,youngFlora=false,grove=false,meadow=false;
         std::optional<double> floraDay;
         double growDays=0;
@@ -63,6 +65,9 @@ int main(int argc, char** argv) {
             else if(arg=="--phenomenon") {phenomenon=planet::phenomenonType(next());if(!phenomenon) throw std::invalid_argument("Phenomenon must be natural, rainbow, halo, pillar, aurora, lightning, fog or dust");}
             else if(arg=="--no-phenomena") phenomenaEnabled=false;
             else if(arg=="--no-snow") snowEnabled=false;
+            else if(arg=="--no-ice") iceEnabled=false;
+            else if(arg=="--ice") {iceMode=planet::iceExperiment(next());if(!iceMode) throw std::invalid_argument("Ice must be natural, freeze or thaw");}
+            else if(arg=="--ice-hours") {iceHours=number(next());if(iceHours<0 || iceHours>168) throw std::invalid_argument("Ice preview must be 0..168 hours");}
             else if(arg=="--snow-seconds") {
                 snowSeconds=number(next());
                 if(*snowSeconds<0 || *snowSeconds>3600) throw std::invalid_argument("Snow preview must be 0..3600 seconds");
@@ -138,6 +143,7 @@ int main(int argc, char** argv) {
                 std::cout << "Flowering: [--meadow] [--flora-day days_since_perihelion]\n";
                 std::cout << "Forests: [--forest jungle|temperate|taiga|mixed]; highlands: --landmark mountains|valley\n";
                 std::cout << "Atmosphere: [--phenomenon natural|rainbow|halo|pillar|aurora|lightning|fog|dust] [--no-phenomena]\n";
+                std::cout << "Ice: [--ice natural|freeze|thaw] [--ice-hours 0..168] [--no-ice]\n";
                 std::cout << "Snow: [--snow natural|fine|large|blizzard|drifting|thaw] [--snow-seconds 0..3600] [--no-snow]\n";
                 std::cout << "Animals: [--deer] [--fauna-seconds 0..3600] [--no-fauna]\n";
                 std::cout << "Procedural audio: [--audio output.wav] [--audio-seconds 0.1..60] [--volume 0..100] [--no-sound]\n";
@@ -150,10 +156,12 @@ int main(int argc, char** argv) {
         if(rainMmH>0 && !waterSeconds) throw std::invalid_argument("--rain-mm-h requires --water duration");
         if(audioDurationSet && audioPath.empty()) throw std::invalid_argument("--audio-seconds requires --audio output.wav");
         if(faunaSeconds && !deer) throw std::invalid_argument("--fauna-seconds requires --deer");
+        if(iceHours>0 && !iceMode) throw std::invalid_argument("--ice-hours requires --ice");
+        if(iceMode && !iceEnabled) throw std::invalid_argument("--ice requires Ice enabled");
         if(snowSeconds && !snowSite) throw std::invalid_argument("--snow-seconds requires --snow");
         const double duration=waterSeconds.value_or(weatherSeconds.value_or(0))+snowSeconds.value_or(0);
         planet::World world(config);world.modules().set(planet::Module::Phenomena,phenomenaEnabled);world.modules().set(planet::Module::GlobalWeather,globalEnabled);
-        world.modules().set(planet::Module::Sound,soundEnabled);
+        world.modules().set(planet::Module::Sound,soundEnabled);world.modules().set(planet::Module::Ice,iceEnabled);
         world.modules().set(planet::Module::Fauna,faunaEnabled);world.modules().set(planet::Module::Snow,snowEnabled);
         world.modules().set(planet::Module::Rivers,riversEnabled);world.modules().set(planet::Module::InlandWaters,inlandEnabled);
         if(floraOutput && !sample && !coast && !landmark) {
@@ -188,6 +196,10 @@ int main(int argc, char** argv) {
             const auto site=planet::findPhenomenon(world,*phenomenon,day*86400);
             lat=planet::degrees(planet::latitude(site.position));lon=planet::degrees(planet::longitude(site.position));day=site.seconds/86400;sample=true;
         }
+        if(iceMode && !sample && !coast && !riverSite) {
+            const auto p=world.landscape()->patch(world.findLandmark(planet::Landform::Pond,world.findLand()).position)->anchor;
+            lat=planet::degrees(planet::latitude(p));lon=planet::degrees(planet::longitude(p));sample=true;
+        }
         auto location=planet::direction(planet::radians(lat),planet::radians(lon));
         if(snowSite) {
             location=planet::findSnowfield(world,sample ? location : world.findLand(),day*86400);
@@ -203,19 +215,21 @@ int main(int argc, char** argv) {
         }
         std::optional<planet::Simulation> model;
         double previewSeconds=0;
-        if(phenomenon || !phenomenaEnabled || weatherSeconds || waterSeconds || waterWind || coast || globalOutput || snowSite || !audioPath.empty()) {
+        if(iceMode || phenomenon || !phenomenaEnabled || weatherSeconds || waterSeconds || waterWind || coast || globalOutput || snowSite || !audioPath.empty()) {
             model.emplace(world,location,day*86400,waterWind,globalHours);previewSeconds=model->global.elapsed();
             if(storm) {
                 if(!model->global.strongest(*storm)) throw std::runtime_error("No active storm of the requested kind on this planet");
                 location=model->global.observation(*storm);lat=planet::degrees(planet::latitude(location));lon=planet::degrees(planet::longitude(location));
                 model->advance(world,location,0);
             }
+            if(iceMode) model->water.setIceExperiment(*iceMode);
             if(snowSite) model->water.snow.setExperiment(*snowSite);
             model->setRainExperiment(rainMmH);
             for(double remaining=duration;remaining>1e-9;) {
                 const double step=std::min(60.0,remaining);model->advance(world,location,step);remaining-=step;
             }
         }
+        if(model && iceHours>0) model->water.previewIce(world,model->weather,iceHours*3600);
         std::uint64_t audioFrames=0,thunderEvents=0;unsigned audioPeak=0;
         if(!audioPath.empty()) {
             planet::Explorer listener(world);listener.teleport(world,location,&model->water);
@@ -247,7 +261,7 @@ int main(int argc, char** argv) {
                       << ",\n  \"water_depth_m\": " << s.waterDepth
                       << ",\n  \"wetness\": " << s.wetness
                       << ",\n  \"biome\": \"" << planet::biomeName(s.biome) << '"';
-            if(phenomenon || !phenomenaEnabled) {
+            if(iceMode || phenomenon || !phenomenaEnabled) {
                 const double altitude=world.surface(location)+1.75;
                 const auto forcing=planet::phenomenaForcing(world,*model,location,altitude,finalTime,phenomenon.value_or(planet::Phenomenon::Natural),totalDuration);
                 const auto state=planet::atmosphericPhenomena(config,location,finalTime,forcing);
@@ -287,6 +301,12 @@ int main(int argc, char** argv) {
                         << ", \"speed_m_s\": " << a.speed << ", \"male\": " << (a.male ? "true" : "false") << '}';
                 }
                 std::cout << "]}";
+            }
+            if(iceMode && model) {
+                const auto ice=planet::liquidAt(world,&model->water,&model->motion,location).ice;const auto b=model->water.iceBudget();
+                std::cout << ",\n  \"ice\": {\"experiment\": \"" << planet::iceExperimentName(*iceMode) << "\", \"thermal_preview_hours\": " << iceHours
+                    << ", \"thickness_m\": " << ice.thickness << ", \"coverage\": " << ice.cover << ", \"supports\": " << (ice.supports ? "true" : "false")
+                    << ", \"stored_m3\": " << b.storedM3 << ", \"frozen_m3\": " << b.frozenM3 << ", \"melted_m3\": " << b.meltedM3 << ", \"residual_m3\": " << b.residual() << '}';
             }
             if(riverOutput) {
                 const auto atlas=world.waterNetwork();const auto river=riversEnabled ? atlas->sample(location) : planet::RiverSample{};

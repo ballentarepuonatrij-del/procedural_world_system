@@ -24,8 +24,11 @@ RunoffGrid::RunoffGrid(int size,double spacing,double gravity)
     eastFlow.resize(static_cast<std::size_t>((size+1)*size)); northFlow.resize(eastFlow.size());
 }
 double RunoffGrid::waterVolume() const {
-    double sum=0; for(const auto& c:cells) if(!c.sea && !c.reservoir && !c.masked) sum+=c.water+c.soilWater;
+    double sum=0; for(const auto& c:cells) if(!c.sea && !c.reservoir && !c.masked) sum+=c.water+c.soilWater+c.ice.frozen;
     return sum*spacing_*spacing_;
+}
+double RunoffGrid::frozenVolume() const {
+    double sum=0;for(const auto& c:cells) if(!c.masked) sum+=c.ice.frozen;return sum*spacing_*spacing_;
 }
 double RunoffGrid::solidMass() const {
     double sum=0; for(const auto& c:cells) if(!c.sea && !c.reservoir && !c.masked) sum+=soilDensity*c.soil+c.sediment;
@@ -51,7 +54,7 @@ RunoffExchange RunoffGrid::advance(double seconds,std::span<const double> rain,d
            !std::isfinite(c.soil) || c.soil<0 || !std::isfinite(c.water) || c.water<0 ||
            !std::isfinite(c.soilWater) || c.soilWater<0 || !std::isfinite(c.sediment) || c.sediment<0 ||
            !std::isfinite(c.roughness) || c.roughness<=0 || !std::isfinite(c.conductivity) || c.conductivity<0 ||
-           !std::isfinite(c.vegetation) || c.vegetation<0 || c.vegetation>1)
+           !std::isfinite(c.vegetation) || c.vegetation<0 || c.vegetation>1 || !std::isfinite(c.ice.frozen) || c.ice.frozen<0)
             throw std::invalid_argument("Invalid runoff cell");
     }
     for(double q:eastFlow) if(!std::isfinite(q)) throw std::invalid_argument("Nonfinite discharge");
@@ -90,8 +93,9 @@ RunoffExchange RunoffGrid::advance(double seconds,std::span<const double> rain,d
             const double saturation=capacity>0 ? clamp(c.soilWater/capacity,0.0,1.0) : 0;
             const double drained=std::min(c.soilWater,0.2*c.conductivity*std::pow(saturation,3)*dt);
             c.soilWater-=drained; result.drainedM3+=drained*area;
-            const double surfaceEvap=std::min(c.water,evaporation*dt); c.water-=surfaceEvap;
-            const double soilEvap=std::min(c.soilWater,(evaporation*dt-surfaceEvap)*saturation);
+            const double evaporativeDemand=evaporation*dt*(1-iceCoverage(c.ice.frozen));
+            const double surfaceEvap=std::min(c.water,evaporativeDemand); c.water-=surfaceEvap;
+            const double soilEvap=std::min(c.soilWater,(evaporativeDemand-surfaceEvap)*saturation);
             c.soilWater-=soilEvap; result.evaporatedM3+=(surfaceEvap+soilEvap)*area;
         }
         faces([&](int a,int b,double& q,double forcing) {
@@ -103,7 +107,10 @@ RunoffExchange RunoffGrid::advance(double seconds,std::span<const double> rain,d
             const auto& cb=cells[static_cast<std::size_t>(b>=0 ? b : a)];
             const double ha=a<0 ? 0 : (ca.sea || ca.reservoir ? std::max(0.0,(ca.reservoir ? ca.reservoirLevel : seaLevel)-ca.bed()) : ca.water);
             const double hb=b<0 ? 0 : (cb.sea || cb.reservoir ? std::max(0.0,(cb.reservoir ? cb.reservoirLevel : seaLevel)-cb.bed()) : cb.water);
-            q=inertialDischarge(q,ca.bed(),cb.bed(),ha,hb,(ca.roughness+cb.roughness)/2,spacing_,dt,gravity_,forcing);
+            const double iceA=iceCoverage(ca.ice.frozen,ca.sea ? 35 : 0),iceB=iceCoverage(cb.ice.frozen,cb.sea ? 35 : 0);
+            q=inertialDischarge(q,ca.bed()+ca.ice.frozen,cb.bed()+cb.ice.frozen,
+                std::max(0.,ha-((ca.sea || ca.reservoir) ? ca.ice.frozen : 0)),std::max(0.,hb-((cb.sea || cb.reservoir) ? cb.ice.frozen : 0)),
+                (ca.roughness+cb.roughness)/2+.04*std::max(iceA,iceB),spacing_,dt,gravity_,forcing*(1-iceA)*(1-iceB));
             // Dry open edges permit outflow only. The coast may exchange both ways.
             if(a<0) q=std::min(0.0,q);
             if(b<0) q=std::max(0.0,q);
@@ -156,13 +163,14 @@ Hydrology::Hydrology(const World& world,Vec3 observer,double solarSeconds) : sno
     east_(east(anchor_)),north_(north(anchor_)),grid_(resolution,spacing,config_.gravity) {
     geometryMask_=(world.modules().enabled(Module::Landforms) ? 1U : 0U)|(world.modules().enabled(Module::Caves) ? 2U : 0U)|(world.modules().enabled(Module::Rivers) ? 4U : 0U)|(world.modules().enabled(Module::InlandWaters) ? 8U : 0U);
     const auto climate=world.climatology(anchor_);
+    iceReferenceAir_=world.sample(anchor_,solarSeconds).temperature;if(!std::isfinite(iceReferenceAir_)) iceReferenceAir_=273.15;iceReferenceLevel_=std::max(config_.seaLevel,world.elevation(anchor_));
     climateWetness_=clamp(climate.precipitation/1800,0.0,1.0);
     vegetation_=forestBiome(climate.biome) ? 0.8 :
                 (climate.biome==Biome::Grassland ? 0.5 : 0.1);
     World relief=world; relief.modules().set(Module::Terrain,true);
     for(int z=0;z<resolution;++z) for(int x=0;x<resolution;++x)
         grid_.cells[static_cast<std::size_t>(z*resolution+x)]=makeCell(relief,originX_+x,originZ_+z);
-    totals_.initialWaterM3=grid_.waterVolume(); totals_.initialSolidKg=grid_.solidMass();
+    totals_.initialWaterM3=grid_.waterVolume(); totals_.initialSolidKg=grid_.solidMass();iceTotals_.initialM3=grid_.frozenVolume();
     for(std::uint64_t i=0;i<320;++i) tracers_.push_back({0,0,0,1,hash64(config_.seed^i^0x57eaULL)});
     synchronize(world,observer);
 }
@@ -172,21 +180,29 @@ GroundCell Hydrology::makeCell(const World& world,int x,int z) const {
     const auto terrain=world.relief(p);const double height=terrain.elevation;
     const double soil=0.5+0.9*(0.5+0.5*Noise(config_.seed^0x5011ULL).value(p*(config_.radius/170)));
     c.rock=height-soil; c.soil=c.initialSoil=soil; c.sea=height<config_.seaLevel;
-    if(world.modules().enabled(Module::Rivers)) {const auto r=world.waterNetwork()->sample(p);c.reservoir=r.wet && r.level>config_.seaLevel+.02;c.reservoirLevel=r.level;if(c.reservoir) c.sea=false;}
-    if(terrain.inland && terrain.waterLevel>height) {c.reservoir=true;c.reservoirLevel=terrain.waterLevel;c.sea=false;}
+    if(world.modules().enabled(Module::Rivers)) {const auto r=world.waterNetwork()->sample(p);c.reservoir=r.wet && r.level>config_.seaLevel+.02;c.reservoirLevel=r.level;if(c.reservoir) {c.sea=false;c.flowSpeed=r.speed;}}
+    if(terrain.inland && terrain.waterLevel>height) {c.reservoir=true;c.reservoirLevel=terrain.waterLevel;c.sea=false;c.flowSpeed=0;}
     c.vegetation=std::max(vegetation_,terrain.wetness); c.roughness=0.025+0.04*vegetation_+.08*terrain.wetness;
     c.conductivity=(1e-6+3e-6*vegetation_)*(1-.8*terrain.wetness);
     c.soilWater=RunoffGrid::porosity*soil*std::max(0.2+0.55*climateWetness_,terrain.wetness*.98);
     if(const auto site=world.caveSite(p)) c.masked=site->protectedGround(p);
+    const double level=c.sea ? config_.seaLevel : c.reservoir ? c.reservoirLevel : height;
+    const double air=iceReferenceAir_-.0065*(level-iceReferenceLevel_),salinity=c.sea ? 35 : 0;
+    if(!c.masked && iceExperiment_==IceExperiment::Natural && world.modules().enabled(Module::Ice) &&
+       ((c.sea && world.modules().enabled(Module::Ocean)) || c.reservoir))
+        c.ice.frozen=referenceIce(air,std::max(0.,level-height),salinity,c.flowSpeed);
+    c.ice.temperature=c.ice.frozen>0 ? freezingPoint(salinity) : std::max(freezingPoint(salinity),air);
     return c;
 }
 Vec3 Hydrology::directionAt(double x,double z) const { return normalized(anchor_+(east_*x+north_*z)/config_.radius); }
 Vec3 Hydrology::position(double x,double z,double altitude) const { return directionAt(x,z)*(config_.radius+altitude); }
 void Hydrology::move(const World& world,Vec3 observer,int x,int z,bool resetChart) {
-    const double oldWater=grid_.waterVolume(),oldSolid=grid_.solidMass();
+    const double oldWater=grid_.waterVolume(),oldSolid=grid_.solidMass(),oldIce=grid_.frozenVolume();
     if(resetChart) {
         cache_.clear(); cacheOrder_.clear(); anchor_=normalized(observer); east_=east(anchor_); north_=north(anchor_);
         const auto climate=world.climatology(anchor_);
+        iceReferenceAir_=world.sample(anchor_,snow.solarSeconds()).temperature;if(!std::isfinite(iceReferenceAir_)) iceReferenceAir_=273.15;
+        iceReferenceLevel_=std::max(config_.seaLevel,world.elevation(anchor_));
         climateWetness_=clamp(climate.precipitation/1800,0.0,1.0);
         vegetation_=forestBiome(climate.biome) ? 0.8 :
                     (climate.biome==Biome::Grassland ? 0.5 : 0.1);
@@ -205,6 +221,7 @@ void Hydrology::move(const World& world,Vec3 observer,int x,int z,bool resetChar
     while(cache_.size()>65536) { cache_.erase(cacheOrder_.front()); cacheOrder_.pop_front(); }
     std::fill(grid_.eastFlow.begin(),grid_.eastFlow.end(),0); std::fill(grid_.northFlow.begin(),grid_.northFlow.end(),0);
     totals_.domainWaterM3+=grid_.waterVolume()-oldWater; totals_.domainSolidKg+=grid_.solidMass()-oldSolid;
+    iceTotals_.domainM3+=grid_.frozenVolume()-oldIce;
     ++revision_;
 }
 void Hydrology::synchronize(const World& world,Vec3 observer) {
@@ -214,19 +231,33 @@ void Hydrology::synchronize(const World& world,Vec3 observer) {
     const bool next=world.modules().enabled(Module::Hydrology);
     if(next!=enabled_) ++revision_;
     enabled_=next; erosion_=world.modules().enabled(Module::Erosion);
-    if(!enabled_) return;
+    const bool nextIce=world.modules().enabled(Module::Ice);
+    if(nextIce!=iceEnabled_) {
+        if(!nextIce) {
+            const auto thaw=[](GroundCell& c) {if(!c.sea && !c.reservoir) c.water+=c.ice.frozen;c.ice.frozen=0;c.ice.temperature=std::max(c.ice.temperature,freezingPoint(c.sea ? 35 : 0));};
+            for(auto& c:grid_.cells) {
+                if(!c.masked) iceTotals_.meltedM3+=c.ice.frozen*spacing*spacing;
+                thaw(c);
+            }
+            for(auto& [key,c]:cache_) {(void)key;thaw(c);}
+        }
+        iceEnabled_=nextIce;++revision_;
+    }
+    if(!enabled_ && !iceEnabled_) return;
     const unsigned geometry=(world.modules().enabled(Module::Landforms) ? 1U : 0U)|(world.modules().enabled(Module::Caves) ? 2U : 0U)|(world.modules().enabled(Module::Rivers) ? 4U : 0U)|(world.modules().enabled(Module::InlandWaters) ? 8U : 0U);
     if(geometry!=geometryMask_) {
-        const double beforeWater=grid_.waterVolume(),beforeSolid=grid_.solidMass();
+        const double beforeWater=grid_.waterVolume(),beforeSolid=grid_.solidMass(),beforeIce=grid_.frozenVolume();
         for(int z=0;z<resolution;++z) for(int x=0;x<resolution;++x) {
             auto& c=grid_.cells[static_cast<std::size_t>(z*resolution+x)]; const auto p=directionAt(cellX(x),cellZ(z));
             const auto terrain=world.relief(p);const double h=terrain.elevation; c.rock=h-c.initialSoil; c.sea=h<config_.seaLevel;
             const auto river=world.modules().enabled(Module::Rivers) ? world.waterNetwork()->sample(p) : RiverSample{};
-            c.reservoir=river.wet && river.level>config_.seaLevel+.02;c.reservoirLevel=river.level;if(c.reservoir) c.sea=false;
-            if(terrain.inland && terrain.waterLevel>h) {c.reservoir=true;c.reservoirLevel=terrain.waterLevel;c.sea=false;}
+            c.reservoir=river.wet && river.level>config_.seaLevel+.02;c.reservoirLevel=river.level;c.flowSpeed=c.reservoir ? river.speed : 0;if(c.reservoir) c.sea=false;
+            if(terrain.inland && terrain.waterLevel>h) {c.reservoir=true;c.reservoirLevel=terrain.waterLevel;c.sea=false;c.flowSpeed=0;}
             const auto site=world.caveSite(p); c.masked=site && site->protectedGround(p);
+            if(c.masked) c.ice.frozen=0;
         }
         totals_.domainWaterM3+=grid_.waterVolume()-beforeWater; totals_.domainSolidKg+=grid_.solidMass()-beforeSolid;
+        iceTotals_.domainM3+=grid_.frozenVolume()-beforeIce;
         cache_.clear(); cacheOrder_.clear();
         std::fill(grid_.eastFlow.begin(),grid_.eastFlow.end(),0); std::fill(grid_.northFlow.begin(),grid_.northFlow.end(),0);
         geometryMask_=geometry; ++revision_;
@@ -246,7 +277,18 @@ void Hydrology::step(const World& world,const Weather& weather,double seconds,do
     if(!std::isfinite(seconds) || seconds<0 || seconds>120 || !std::isfinite(experimentRain) || experimentRain<0 || experimentRain>200)
         throw std::invalid_argument("Invalid hydrology step or rain experiment");
     snow.step(world,weather,seconds);
-    if(!enabled_ || seconds==0) return;
+    if(seconds==0 || (!enabled_ && !iceEnabled_)) return;
+    if(iceEnabled_) {
+        std::vector<IceForcing> forcing(grid_.cells.size());const auto sun=orbit(config_,weather.seconds());
+        for(int z=0;z<resolution;++z) for(int x=0;x<resolution;++x)
+            forcing[static_cast<std::size_t>(z*resolution+x)]=iceForcing(world,weather,x,z,sun);
+        const auto& center=grid_.cells[resolution*resolution/2+resolution/2];
+        iceReferenceLevel_=center.sea ? config_.seaLevel : center.reservoir ? center.reservoirLevel : center.bed();
+        const auto naturalAir=weather.sample(directionAt(cellX(resolution/2),cellZ(resolution/2)));
+        iceReferenceAir_=clamp(naturalAir.temperature+.0065*(weather.layerAltitude()-iceReferenceLevel_),180.,330.);
+        advanceIceField(world,seconds,forcing);
+    }
+    if(!enabled_) {++steps_;return;}
     std::vector<double> rain(grid_.cells.size());
     std::vector<Wind2> stress(grid_.cells.size());
     double meltVolume=0;
@@ -301,7 +343,7 @@ GroundSample Hydrology::sampleLocal(double x,double z) const {
         const auto& c=grid_.cells[static_cast<std::size_t>((iz+dz)*resolution+ix+dx)];
         if(c.sea || c.reservoir || c.masked) return {};
         const double w=(dx ? tx : 1-tx)*(dz ? tz : 1-tz);
-        s.bed+=c.bed()*w; s.depth+=c.water*w;
+        s.bed+=c.bed()*w; s.depth+=c.water*w;s.frozenDepth+=c.ice.frozen*w;
         s.saturation+=(c.soil>0 ? c.soilWater/(RunoffGrid::porosity*c.soil) : 0)*w;
         s.sedimentKgM3+=(c.water>1e-7 ? c.sediment/c.water : 0)*w;
         s.bedChange+=(c.soil-c.initialSoil)*w;
@@ -332,7 +374,7 @@ void Simulation::setRainExperiment(double rain) {
     experimentRain_=rain;
 }
 void Simulation::advance(const World& world,Vec3 observer,double seconds) {
-    const bool active=world.modules().enabled(Module::Wind) || world.modules().enabled(Module::Hydrology) || world.modules().enabled(Module::WaterMotion) || world.modules().enabled(Module::Snow);
+    const bool active=world.modules().enabled(Module::Wind) || world.modules().enabled(Module::Hydrology) || world.modules().enabled(Module::WaterMotion) || world.modules().enabled(Module::Snow) || world.modules().enabled(Module::Ice);
     if(!std::isfinite(seconds) || seconds<0 || seconds>(active ? 120 : 86400))
         throw std::invalid_argument("Simulation timestep exceeds its supported range");
     global.advance(world,0);global.advanceEffects(seconds);

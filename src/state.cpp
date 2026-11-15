@@ -27,7 +27,7 @@ class StateCodec {
 public:
     class Archive {
     public:
-        bool reading=false;std::span<const std::byte> input;std::vector<std::byte> output;
+        bool reading=false;std::uint32_t version=2;std::span<const std::byte> input;std::vector<std::byte> output;
         std::size_t cursor=0,allocated=0;
         Archive()=default;
         explicit Archive(std::span<const std::byte> bytes):reading(true),input(bytes) {}
@@ -45,7 +45,7 @@ public:
                 using U=std::make_unsigned_t<T>;std::uint64_t n=static_cast<U>(v);integer(n,sizeof(T));if(reading) v=std::bit_cast<T>(static_cast<U>(n));
             } else if constexpr(std::is_enum_v<T>) {
                 std::uint32_t n=static_cast<std::uint32_t>(v);value(n);
-                constexpr unsigned limit=[] {if constexpr(std::is_same_v<T,Species>)return speciesCount;else if constexpr(std::is_same_v<T,Phenomenon>)return 8U;else if constexpr(std::is_same_v<T,DeerActivity>)return 5U;else if constexpr(std::is_same_v<T,StormKind>)return 3U;else if constexpr(std::is_same_v<T,DetailKind> || std::is_same_v<T,FlowerPhase>)return 4U;else return 6U;}();
+                constexpr unsigned limit=[] {if constexpr(std::is_same_v<T,Species>)return speciesCount;else if constexpr(std::is_same_v<T,Phenomenon>)return 8U;else if constexpr(std::is_same_v<T,DeerActivity>)return 5U;else if constexpr(std::is_same_v<T,StormKind> || std::is_same_v<T,IceExperiment>)return 3U;else if constexpr(std::is_same_v<T,DetailKind> || std::is_same_v<T,FlowerPhase>)return 4U;else return 6U;}();
                 check(n<limit,"Unknown saved enum value");if(reading)v=static_cast<T>(n);
             } else if constexpr(requires {v.has_value();v.emplace();}) {
                 bool present=v.has_value();value(present);if(reading) {if(present)v.emplace();else v.reset();}if(present)value(*v);
@@ -68,7 +68,7 @@ public:
     static void fields(Archive& a,Color& v) {a(v.r,v.g,v.b);}
     static void fields(Archive& a,Wind2& v) {a(v.east,v.north);}
     static void fields(Archive& a,Config& v) {a(v.seed,v.radius,v.gravity,v.solarConstant,v.obliquity,v.eccentricity,v.day,v.year,v.seaLevel,v.emissivity,v.albedo);}
-    static void fields(Archive& a,Modules& v) {for(unsigned i=0;i<moduleCount;++i) {auto m=static_cast<Module>(i);bool on=v.requested(m);a(on);if(a.reading)v.set(m,on);}}
+    static void fields(Archive& a,Modules& v) {for(unsigned i=0;i<(a.version==1 ? 21U : moduleCount);++i) {auto m=static_cast<Module>(i);bool on=v.requested(m);a(on);if(a.reading)v.set(m,on);}}
     static void fields(Archive& a,SaveMetadata& v) {a(v.savedAt,v.seed,v.latitude,v.longitude,v.seconds);check(v.savedAt<=32503680000ULL,"Invalid saved timestamp");check(std::abs(v.latitude)<=90 && std::abs(v.longitude)<=180 && std::abs(v.seconds)<=1e12,"Invalid saved location or time");}
     static void fields(Archive& a,SessionState& v) {
         a(v.seconds,v.timeScale,v.phenomenonEpoch,v.paused,v.globe,v.help,v.headlamp,v.windTracers,v.waterTracers,v.floraInfo,v.faunaInfo,v.weatherLayer,v.phenomenon,v.globeOutward,v.globeUp);
@@ -99,7 +99,13 @@ public:
         a(v.config_,v.habitat_,v.cells_,v.storms_,v.elapsed_,v.pending_,v.effects_,v.solarTime_,v.initialWater_,v.evaporation_,v.precipitation_,v.steps_,v.geometry_,v.enabled_,v.cloudsEnabled_);
         check(v.cells_.size()==GlobalWeather::columns*GlobalWeather::rows && v.habitat_.size()==v.cells_.size() && v.pending_>=0 && v.pending_<GlobalWeather::fixedStep+1e-6 && v.storms_.size()<=64,"Invalid saved global weather");
     }
-    static void fields(Archive& a,GroundCell& v) {a(v.rock,v.soil,v.initialSoil,v.water,v.soilWater,v.sediment,v.roughness,v.conductivity,v.vegetation,v.sea,v.reservoir,v.reservoirLevel,v.masked);check(v.water>=0 && v.soil>=0 && v.soilWater>=0 && v.sediment>=0,"Invalid saved soil reservoir");}
+    static void fields(Archive& a,IceColumn& v) {a(v.frozen,v.temperature);check(v.frozen>=0 && v.frozen<=100000 && v.temperature>=100 && v.temperature<=400,"Invalid saved ice column");}
+    static void fields(Archive& a,IceBudget& v) {a(v.initialM3,v.storedM3,v.frozenM3,v.meltedM3,v.domainM3,v.heatJ);check(v.initialM3>=0 && v.storedM3>=0 && v.frozenM3>=0 && v.meltedM3>=0,"Invalid saved ice budget");}
+    static void fields(Archive& a,GroundCell& v) {
+        a(v.rock,v.soil,v.initialSoil,v.water,v.soilWater,v.sediment,v.roughness,v.conductivity,v.vegetation,v.sea,v.reservoir,v.reservoirLevel,v.masked);
+        if(a.version>=2) a(v.ice,v.flowSpeed);else if(a.reading) {v.ice={};v.flowSpeed=0;}
+        check(v.water>=0 && v.soil>=0 && v.soilWater>=0 && v.sediment>=0 && v.flowSpeed>=0 && v.flowSpeed<=50,"Invalid saved soil reservoir");
+    }
     static void fields(Archive& a,RunoffBudget& v) {a(v.initialWaterM3,v.storedWaterM3,v.rainM3,v.meltM3,v.evaporatedM3,v.drainedM3,v.boundaryM3,v.domainWaterM3,v.initialSolidKg,v.storedSolidKg,v.sedimentOutKg,v.domainSolidKg,v.erodedKg,v.depositedKg);}
     static void fields(Archive& a,RunoffGrid& v) {a(v.cells,v.eastFlow,v.northFlow);check(v.cells.size()==4096 && v.eastFlow.size()==4160 && v.northFlow.size()==4160,"Invalid saved runoff dimensions");}
     static void fields(Archive& a,SnowCell& v) {a(v.bed,v.swe,v.depth,v.airborne,v.vegetation,v.meltRate,v.solid);check(v.swe>=0 && v.depth>=0 && v.airborne>=0,"Invalid saved snow reservoir");}
@@ -112,6 +118,7 @@ public:
     }
     static void fields(Archive& a,Hydrology& v) {
         a(v.snow,v.config_,v.anchor_,v.east_,v.north_,v.originX_,v.originZ_,v.grid_,v.cache_,v.cacheOrder_,v.tracers_,v.totals_,v.climateWetness_,v.vegetation_,v.revision_,v.steps_,v.enabled_,v.erosion_,v.geometryMask_);
+        if(a.version>=2) a(v.iceEnabled_,v.iceExperiment_,v.iceTotals_,v.iceReferenceAir_,v.iceReferenceLevel_);
         check(v.cache_.size()<=65536 && std::abs(static_cast<long long>(v.originX_))<100000000 && std::abs(static_cast<long long>(v.originZ_))<100000000,"Invalid saved water cache");cacheBounds(v.cache_);unit(v.anchor_);unit(v.east_);unit(v.north_);
     }
     static void fields(Archive& a,WaterMotion::Component& v) {a(v.direction,v.k,v.omega,v.phase,v.variance);}
@@ -125,28 +132,29 @@ public:
     static void fields(Archive& a,DeerHerd& v) {a(v.habitat,v.members,v.obstacles,v.obstacleCenter,v.activity,v.remaining,v.thirst,v.alarm,v.decisions,v.lastSeen,v.active);check(v.members.size()>=3 && v.members.size()<=7,"Invalid saved herd size");}
     static void fields(Archive& a,Fauna& v) {a(v.herds_,v.config_,v.surveyed_,v.pending_,v.elapsed_,v.steps_,v.visit_,v.geometry_,v.initialized_,v.enabled_);check(v.herds_.size()<=Fauna::cacheLimit && v.pending_>=0 && v.pending_<Fauna::fixedStep+1e-6,"Invalid saved fauna");}
     static void fields(Archive& a,Simulation& v) {a(v.global,v.weather,v.water,v.motion,v.flora,v.fauna,v.pending_,v.experimentRain_);check(v.pending_>=0 && v.pending_<Weather::fixedStep+1e-6 && v.experimentRain_>=0 && v.experimentRain_<=200,"Invalid saved simulation clock");}
-    static std::span<const std::byte> payload(std::span<const std::byte> bytes) {
+    static std::span<const std::byte> payload(std::span<const std::byte> bytes,std::uint32_t* format=nullptr) {
         check(bytes.size()>=headerSize && bytes.size()<=maximumFile,"Invalid saved file size");
         check(std::memcmp(bytes.data(),magic.data(),magic.size())==0,"Unknown saved file signature");
         Archive h(bytes.subspan(8,headerSize-8));std::uint32_t version=0;std::uint64_t size=0,hash=0;h(version,size,hash);
-        check(version==1,"Unsupported saved state version");check(size==bytes.size()-headerSize,"Truncated saved file");
+        check(version==1 || version==2,"Unsupported saved state version");check(size==bytes.size()-headerSize,"Truncated saved file");if(format)*format=version;
         auto data=bytes.subspan(headerSize);check(checksum(data)==hash,"Saved state checksum mismatch");return data;
     }
     static std::vector<std::byte> encode(const World& w,const Explorer& explorer,const Simulation& sim,const SessionState& session,std::uint64_t savedAt) {
         SaveMetadata meta{savedAt,w.config().seed,degrees(latitude(explorer.up())),degrees(longitude(explorer.up())),session.seconds};
         auto config=w.config();auto modules=w.modules();auto e=explorer;auto simulation=sim;auto v=session;
         Archive body;body(meta,config,modules,v,e,simulation);
-        Archive header;std::uint32_t version=1;std::uint64_t size=body.output.size(),hash=checksum(body.output);header(version,size,hash);
+        Archive header;std::uint32_t version=2;std::uint64_t size=body.output.size(),hash=checksum(body.output);header(version,size,hash);
         std::vector<std::byte> bytes;for(auto b:magic)bytes.push_back(static_cast<std::byte>(b));bytes.insert(bytes.end(),header.output.begin(),header.output.end());bytes.insert(bytes.end(),body.output.begin(),body.output.end());
         check(bytes.size()<=maximumFile,"Saved file exceeds size limit");return bytes;
     }
     static std::unique_ptr<LoadedState> decode(std::span<const std::byte> bytes) {
-        Archive a(payload(bytes));SaveMetadata meta;Config config;Modules modules;SessionState session;a(meta,config,modules,session);
+        std::uint32_t format=0;const auto data=payload(bytes,&format);Archive a(data);a.version=format;SaveMetadata meta;Config config;Modules modules;SessionState session;a(meta,config,modules,session);
         check(meta.seed==config.seed && meta.seconds==session.seconds,"Inconsistent saved header");
         auto state=std::make_unique<LoadedState>(config,modules,direction(radians(meta.latitude),radians(meta.longitude)),session.seconds);
         state->session=session;state->metadata=meta;a(state->explorer,state->simulation);check(a.cursor==a.input.size(),"Unexpected trailing save data");
         const auto p=state->explorer.up();check(std::abs(degrees(latitude(p))-meta.latitude)<1e-7 && std::abs(degrees(longitude(p))-meta.longitude)<1e-7,"Inconsistent saved observer");
         state->simulation.motion.circulation_=state->simulation.motion.globalFlow_ ? state->world.waterNetwork() : nullptr;
+        if(format==1) state->simulation.water.restoreLegacyIce(state->world);
         return state;
     }
 };
@@ -178,7 +186,7 @@ std::optional<SaveMetadata> readSaveMetadata(const std::filesystem::path& path) 
             std::array<std::byte,headerSize+40> bytes{};std::ifstream in(p,std::ios::binary);in.read(reinterpret_cast<char*>(bytes.data()),bytes.size());
             if(!in || std::memcmp(bytes.data(),magic.data(),8)!=0)return {};
             StateCodec::Archive h(std::span<const std::byte>(bytes).subspan(8,20));std::uint32_t version=0;std::uint64_t size=0,hash=0;h(version,size,hash);
-            if(version!=1 || size!=std::filesystem::file_size(p)-headerSize)return {};
+            if((version!=1 && version!=2) || size!=std::filesystem::file_size(p)-headerSize)return {};
             StateCodec::Archive a(std::span<const std::byte>(bytes).subspan(headerSize));SaveMetadata meta;a(meta);return meta;
         } catch(const std::exception&) {return {};}
     };

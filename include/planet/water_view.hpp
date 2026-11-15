@@ -17,6 +17,7 @@ struct WaterSurfacePoint {
     GroundSample ground;
     double depth=0;
     bool ocean=false;
+    IceSample ice;
 };
 // Only hydrostatic data is cached. Waves, camera-dependent reflection and
 // visibility remain live. Invalidate when adopting a mesh or loading a world,

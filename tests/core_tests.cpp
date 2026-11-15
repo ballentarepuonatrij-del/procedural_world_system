@@ -11,6 +11,7 @@
 #include "planet/rivers.hpp"
 #include "planet/terrain_mesh.hpp"
 #include "planet/water_view.hpp"
+#include "planet/caustics.hpp"
 #include "planet/landscape.hpp"
 #include <future>
 #include <chrono>
@@ -56,7 +57,11 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
 #include "material_tests.hpp"
 #include "grass_tests.hpp"
 #include "water_view_tests.hpp"
+#include "ice_tests.hpp"
+#include "caustic_tests.hpp"
 void registerTests() {
+    registerIceTests();
+    registerCausticTests();
     registerWaterViewTests();
     registerGrassTests();
     registerMaterialTests();
@@ -1177,6 +1182,7 @@ void registerTests() {
             const auto s=w.sample(direction(0.5,0.3),100*86400);
             require(std::isfinite(s.elevation) && std::isfinite(s.pressure) && std::isfinite(s.precipitation),"Finite sample");
             require(w.modules().enabled(Module::Phenomena)==(w.modules().requested(Module::Phenomena) && w.modules().enabled(Module::Atmosphere)),"Phenomena dependency in every mask");
+            require(w.modules().enabled(Module::Ice)==(w.modules().requested(Module::Ice) && w.modules().enabled(Module::Climate) && (w.modules().enabled(Module::Ocean) || w.modules().enabled(Module::Hydrology) || w.modules().enabled(Module::Rivers) || w.modules().enabled(Module::InlandWaters))),"Ice dependency in every mask");
         }
     });
     test("navigation","Latitude longitude coordinate roundtrip",[] {

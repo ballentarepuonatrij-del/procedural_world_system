@@ -13,6 +13,7 @@ void Explorer::teleport(const World& world, Vec3 position,const Hydrology* water
     const auto liquid=liquidAt(world,water,nullptr,up_);
     swimming_=liquid.present && liquid.depth>eyeHeight; underwater_=false; swimVelocity_={};
     if(swimming_) { altitude_=liquid.level+0.22; grounded_=false; }
+    if(liquid.ice.supports) {altitude_=liquid.surfaceLevel+eyeHeight;swimming_=false;grounded_=true;}
     obstacleAnchor_={};
 }
 void Explorer::dive(const World& world,Vec3 direction,double depth,const Hydrology* water,const WaterMotion* motion) {
@@ -53,6 +54,7 @@ void Explorer::refreshObstacles(const World& world,const Hydrology* water,const 
 void Explorer::step(const World& world, const Input& input, double dt,const Hydrology* water,const WaterMotion* motion,const Flora* flora) {
     if(!flying) refreshObstacles(world,water,flora);
     auto liquid=liquidAt(world,water,motion,up_);
+    const bool onIce=liquid.ice.supports && altitude_-eyeHeight>=liquid.surfaceLevel-.08;
     const double immersed=liquid.present ? clamp((liquid.level-altitude_+eyeHeight)/eyeHeight,0.0,1.0) : 0;
     swimming_=!flying && liquid.depth>1.1 && immersed>0.55;
     const double diveForward=swimming_ && underwater_ ? std::sin(pitch_)*input.forward : 0;
@@ -62,10 +64,10 @@ void Explorer::step(const World& world, const Input& input, double dt,const Hydr
     if (magnitude > 1) tangent = tangent/magnitude;
     const double snowDepth=water && !underground_ ? water->snow.sample(up_).depth : 0;
     const double speed = flying ? std::min(flightSpeed*(input.sprint ? 8 : 1),cave_ ? 30.0 : 160000.0) :
-        (swimming_ ? (input.sprint ? 2.6 : 1.6) : (input.sprint ? 8.0 : 2.5)/std::max(1.0,1+2*liquid.depth+2.5*snowDepth));
+        (swimming_ ? (input.sprint ? 2.6 : 1.6) : (input.sprint ? 8.0 : 2.5)/std::max(1.0,1+2*(onIce ? 0 : liquid.depth)+2.5*snowDepth));
     Vec3 velocity=tangent*speed;
     if(swimming_) {
-        if(liquid.ocean && motion) liquid.current=motion->current(up_,std::max(0.0,liquid.level-altitude_));
+        if(liquid.ocean && motion) liquid.current=motion->current(up_,std::max(0.0,liquid.level-altitude_))*(1-.85*liquid.ice.cover);
         const auto target=velocity+liquid.current;
         swimVelocity_=swimVelocity_+(target-swimVelocity_)*(1-std::exp(-dt/0.7));
         swimVelocity_=swimVelocity_-up_*dot(swimVelocity_,up_); velocity=swimVelocity_;
@@ -92,6 +94,8 @@ void Explorer::step(const World& world, const Input& input, double dt,const Hydr
             }
         }
     }
+    const auto advancedLiquid=angle>0 ? liquidAt(world,water,motion,up_) : liquid;
+    const auto liquidFor=[&](Vec3 p)->const LiquidSample& {return length(p-previous)<1e-15 ? liquid : advancedLiquid;};
     struct Space { double floor,ceiling; bool roof; };
     const auto column=[&](Vec3 p) {
         const double surface=water ? water->ground(world,p) : world.elevation(p);
@@ -107,6 +111,15 @@ void Explorer::step(const World& world, const Input& input, double dt,const Hydr
     };
     const auto spaceAt=[&](Vec3 p) {
         auto space=column(p);
+        if(!flying && !space.roof) {
+            const auto& wet=liquidFor(p);
+            if(wet.ice.supports) {
+                if(altitude_-eyeHeight>=wet.surfaceLevel-.08) space.floor=std::max(space.floor,wet.surfaceLevel);
+                else if(altitude_<=wet.level+.03) space.ceiling=std::min(space.ceiling,wet.level);
+                // A body already intersecting a newly formed lid may leave it;
+                // phase change must not teleport or trap the observer in a slab.
+            }
+        }
         if(cave_) for(const auto offset:{east(p)*0.28,-east(p)*0.28,north(p)*0.28,-north(p)*0.28}) {
             const auto other=column(normalized(p+offset/world.config().radius));
             space.floor=std::max(space.floor,other.floor); space.ceiling=std::min(space.ceiling,other.ceiling); space.roof=space.roof || other.roof;
@@ -149,7 +162,7 @@ void Explorer::step(const World& world, const Input& input, double dt,const Hydr
     }
     if(altitude_>space.ceiling-0.20) { altitude_=std::max(floor,space.ceiling-0.20); verticalSpeed_=std::min(0.0,verticalSpeed_); }
     underground_=space.roof && altitude_<world.surface(up_);
-    liquid=liquidAt(world,water,motion,up_);
+    liquid=liquidFor(up_);
     if(!liquid.present || altitude_>liquid.level+0.04) underwater_=false;
     else if(altitude_<liquid.level-0.04) underwater_=true;
 }

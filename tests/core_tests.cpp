@@ -56,10 +56,12 @@ void walkTo(Explorer& explorer,const World& world,Vec3 target,const Hydrology* w
 #include "state_tests.hpp"
 #include "material_tests.hpp"
 #include "grass_tests.hpp"
+#include "foliage_tests.hpp"
 #include "water_view_tests.hpp"
 #include "ice_tests.hpp"
 #include "caustic_tests.hpp"
 void registerTests() {
+    registerFoliageTests();
     registerIceTests();
     registerCausticTests();
     registerWaterViewTests();

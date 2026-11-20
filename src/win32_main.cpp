@@ -22,7 +22,7 @@ struct Options {
     bool resumeExplicit=false,noResume=false,noAutosave=false,worldOptions=false;
     std::string settingsWarning;
     int frames=0;
-    bool proceduralMaterials=true,grassShaders=true,caustics=true;
+    bool proceduralMaterials=true,grassShaders=true,caustics=true,foliageShaders=true,foliage=true;
     bool ice=true;double iceHours=0;std::optional<IceExperiment> iceMode;
     bool globe=false, detail=true, wind=true, clouds=true, water=true, erosion=true, paused=false, windTracers=false;
     double weatherSeconds=0, rainMmH=0,walkSeconds=0;
@@ -78,7 +78,7 @@ Options parseOptions() {
         options.ice=modules.requested(Module::Ice);options.rivers=modules.requested(Module::Rivers);options.inlandWaters=modules.requested(Module::InlandWaters);options.fauna=modules.requested(Module::Fauna);options.snow=modules.requested(Module::Snow);options.phenomenaEnabled=modules.requested(Module::Phenomena);
         for(int i=1;i<argc;++i) {
             const std::wstring arg=argv[i];
-            constexpr std::array neutral{L"--settings",L"--save-dir",L"--resume",L"--no-resume",L"--no-autosave",L"--frames",L"--capture",L"--report",L"--paused",L"--audio-capture",L"--volume",L"--surface-style",L"--basic-materials",L"--basic-grass",L"--no-caustics",L"--no-sky",L"--no-shadows",L"--no-sound"};
+            constexpr std::array neutral{L"--settings",L"--save-dir",L"--resume",L"--no-resume",L"--no-autosave",L"--frames",L"--capture",L"--report",L"--paused",L"--audio-capture",L"--volume",L"--surface-style",L"--basic-materials",L"--basic-grass",L"--basic-foliage",L"--no-foliage-motion",L"--no-caustics",L"--no-sky",L"--no-shadows",L"--no-sound"};
             if(std::none_of(neutral.begin(),neutral.end(),[&](auto value){return arg==value;})) options.worldOptions=true;
             const auto next=[&]() -> std::wstring {
                 if(++i>=argc) throw std::invalid_argument("Missing command-line value");
@@ -228,6 +228,8 @@ Options parseOptions() {
             }
             else if(arg==L"--basic-materials") options.proceduralMaterials=false;
             else if(arg==L"--basic-grass") options.grassShaders=false;
+            else if(arg==L"--basic-foliage") options.foliageShaders=false;
+            else if(arg==L"--no-foliage-motion") options.foliage=false;
             else if(arg==L"--surface-style") {
                 const auto value=next();
                 if(value==L"natural") options.surfaceStyle=SurfaceStyle::Natural;
@@ -262,7 +264,7 @@ public:
         view_.seconds+=simulation_.global.elapsed();view_.weatherLayer=options_.weatherLayer;view_.surfaceStyle=options_.surfaceStyle;
         view_.volume=options_.volume;view_.gamma=options_.preferences.gamma;view_.brightness=options_.preferences.brightness;
         view_.interfaceVisible=options_.preferences.interfaceVisible;
-        view_.causticsEnabled=options_.caustics;view_.skyEnabled=options_.sky;view_.shadowsEnabled=options_.shadows;
+        view_.foliageEnabled=options_.foliage;view_.causticsEnabled=options_.caustics;view_.skyEnabled=options_.sky;view_.shadowsEnabled=options_.shadows;
         view_.paused=options_.paused; view_.windTracers=options_.windTracers; view_.headlamp=options_.headlamp;
         simulation_.flora.setYoung(options_.youngFlora);simulation_.flora.setRate(options_.growthRate);
         if(options_.floraDay) simulation_.flora.setCalendarDay(*options_.floraDay);
@@ -346,7 +348,7 @@ public:
         if(!chosen || !SetPixelFormat(dc_,chosen,&format)) throw std::runtime_error("Cannot select OpenGL pixel format");
         context_=wglCreateContext(dc_);
         if(!context_ || !wglMakeCurrent(dc_,context_)) throw std::runtime_error("Cannot create OpenGL context");
-        renderer_=std::make_unique<Renderer>(dc_,options_.proceduralMaterials,options_.grassShaders);
+        renderer_=std::make_unique<Renderer>(dc_,options_.proceduralMaterials,options_.grassShaders,options_.foliageShaders);
         audio_=std::make_unique<WavePlayer>(!options_.audioCapture.empty());
         audio_->update(soundScene(world_,simulation_,explorer_,view_.volume,view_.paused,view_.globe));
         RAWINPUTDEVICE mouse{0x01,0x02,0,window_};
@@ -359,8 +361,8 @@ public:
         auto last=Clock::now();
         int frames=0;
         double renderTime=0, longestRender=0;
-        constexpr std::array<const char*,19> phaseNames{"navigation","simulation","audio","render","swap","terrain_build","plants_build","shadow_build","shadows","water","rivers","weather","sky","fauna","snow","phenomena","grass","optics","frame_work"};
-        std::array<double,19> phaseTotals{},steadyTotals{},phasePeaks{};
+        constexpr std::array<const char*,20> phaseNames{"navigation","simulation","audio","render","swap","terrain_build","plants_build","shadow_build","shadows","water","rivers","weather","sky","fauna","snow","phenomena","grass","optics","foliage","frame_work"};
+        std::array<double,20> phaseTotals{},steadyTotals{},phasePeaks{};
         std::vector<double> steadyFrames;
         unsigned steadyCount=0;
         const auto milliseconds=[](Clock::time_point a,Clock::time_point b) {return std::chrono::duration<double,std::milli>(b-a).count();};
@@ -418,7 +420,7 @@ public:
             if(!SwapBuffers(dc_)) throw std::runtime_error("SwapBuffers failed");
             if(!options_.report.empty()) {
                 const auto& r=renderer_->timings();
-                std::array<double,19> sample{milliseconds(navigationStart,simulationStart),milliseconds(simulationStart,audioStart),milliseconds(audioStart,renderStart),renderMs,milliseconds(swapStart,Clock::now()),r.terrain,r.plants,r.shadowBuild,r.shadows,r.water,r.rivers,r.weather,r.sky,r.fauna,r.snow,r.phenomena,r.grass,r.optics,0};
+                std::array<double,20> sample{milliseconds(navigationStart,simulationStart),milliseconds(simulationStart,audioStart),milliseconds(audioStart,renderStart),renderMs,milliseconds(swapStart,Clock::now()),r.terrain,r.plants,r.shadowBuild,r.shadows,r.water,r.rivers,r.weather,r.sky,r.fauna,r.snow,r.phenomena,r.grass,r.optics,r.foliage,0};
                 for(unsigned i=0;i<5;++i) sample.back()+=sample[i];
                 for(std::size_t i=0;i<sample.size();++i) {
                     phaseTotals[i]+=sample[i];if(frames>5) {steadyTotals[i]+=sample[i];phasePeaks[i]=std::max(phasePeaks[i],sample[i]);}
@@ -471,6 +473,10 @@ public:
                 << "\ngrass_short_clumps=" << renderer_->grassRenderer().shortCount() << "\ngrass_tall_clumps=" << renderer_->grassRenderer().tallCount()
                 << "\ngrass_vertices=" << renderer_->grassRenderer().vertices() << "\ngrass_contact_cells=" << renderer_->grassField().activeCells()
                 << "\ngrass_contact_bend=" << renderer_->grassField().maximumBend() << "\ngrass_wind_bend=" << renderer_->grassWindBend() << '\n';
+            out << "foliage_backend=" << renderer_->foliageRenderer().backend()
+                << "\nfoliage_plants=" << renderer_->foliageField().roots().size() << "\nfoliage_leaf_vertices=" << renderer_->foliageRenderer().leafVertices()
+                << "\nfoliage_animated_vertices=" << renderer_->foliageRenderer().animatedVertices() << "\nfoliage_contacts=" << renderer_->foliageField().contacts()
+                << "\nfoliage_contact_bend=" << renderer_->foliageField().maximumContact() << "\nfoliage_maximum_bend=" << renderer_->foliageField().maximumBend() << "\nfoliage_motion=" << view_.foliageEnabled << '\n';
             const auto iceHere=liquidAt(world_,&simulation_.water,&simulation_.motion,explorer_.up()).ice;
             const auto iceBudget=simulation_.water.iceBudget();
             out << "ice_backend=" << renderer_->iceBackend() << "\nice_experiment=" << iceExperimentName(simulation_.water.iceExperiment())

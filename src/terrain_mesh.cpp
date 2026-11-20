@@ -6,19 +6,41 @@ namespace planet {
 PlantMesh makePlantMesh(std::span<const PlantSite> sites,Vec3 anchor,Vec3 eastAxis,Vec3 northAxis,double radius,const Flora& flora) {
     PlantMesh result;std::array<bool,speciesCount> species{};double nearest=1e30;
     const auto local=[&](Vec3 p){return Vec3{dot(p,eastAxis),dot(p,anchor),dot(p,northAxis)};};
-    for(const auto& site:sites) {
+    std::vector<const PlantSite*> ordered;ordered.reserve(sites.size());
+    for(const auto& site:sites) ordered.push_back(&site);
+    std::stable_sort(ordered.begin(),ordered.end(),[&](const auto a,const auto b){return length(a->object.up-anchor)<length(b->object.up-anchor);});
+    for(const auto* entry:ordered) {
+        const auto& site=*entry;
         const auto object=grownObject(site.object,&flora);if(object.height<.015) continue;
         const double distance=length(object.up-anchor)*radius;
         const auto up=local(object.up);
         const bool simple=distance>(object.kind==DetailKind::Grass || object.kind==DetailKind::Shrub ? 24 : 60);
         const bool shadow=distance<=std::max(160.,std::min(240.,object.height*4)) && object.castsSurfaceShadow();
-        for(const auto& face:detailMesh(object,site.base,up,local(east(object.up)),simple)) {
+        const bool flexible=flexiblePlant(object) && distance<foliageMotionRadius && result.foliage.size()<maximumFoliagePlants;
+        const int slot=flexible ? static_cast<int>(result.foliage.size()) : -1;
+        if(flexible) result.foliage.push_back(foliageRoot(object,radius));
+        auto& vertices=flexible ? result.moving : result.vertices;
+        FoliageRange range{vertices.size(),0,slot};
+        const bool leaves=flexible && distance<36 && result.leafVertices+4096<=maximumLeafVertices;
+        for(const auto& face:detailMesh(object,site.base,up,local(east(object.up)),simple,leaves)) {
+            if(face.microFoliage && result.leafVertices+3>maximumLeafVertices) continue;
             const auto& t=face.triangle;const auto n=normalized(cross(t.b-t.a,t.c-t.a));
             const double cover=smoothstep(0.,.08,site.snowDepth)*smoothstep(.15,.6,dot(n,up));
             const Color color{static_cast<float>(mix(face.color.r,.88,cover)),static_cast<float>(mix(face.color.g,.93,cover)),static_cast<float>(mix(face.color.b,.97,cover))};
-            for(const auto p:{t.a,t.b,t.c}) result.vertices.push_back({p,n,color,0,0});
-            if(shadow) result.casters.push_back(t);
+            unsigned corner=0;const std::array flutter{face.flutter.x,face.flutter.y,face.flutter.z};
+            for(const auto p:{t.a,t.b,t.c}) {
+                const double vertical=clamp(dot(p-site.base,up)/object.height,0.,1.);
+                const double flex=flexible ? std::pow(clamp((vertical-.1)/.9,0.,1.),2) : 0;
+                vertices.push_back({p,n,color,static_cast<float>(flex),static_cast<float>(object.height),
+                    flexible ? static_cast<float>(result.foliage.back().phase) : 0.f,
+                    static_cast<float>(flutter[corner++]),static_cast<float>(face.leafPhase),static_cast<float>(slot)});
+            }
+            // Cached crown volumes approximate the canopy shadow. Fine leaves
+            // do not multiply the stencil geometry or force per-frame rebuilds.
+            if(face.microFoliage) result.leafVertices+=3;
+            else if(shadow) result.casters.push_back(t);
         }
+        range.count=vertices.size()-range.first;if(flexible) result.ranges.push_back(range);
         ++result.objects;
         if(object.species==Species::None) continue;
         ++result.plants;species[static_cast<unsigned>(object.species)]=true;result.heightSum+=object.height;

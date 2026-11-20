@@ -104,10 +104,14 @@ void registerBiomeTests() {
         Flora flora;const auto expected=makePlantMesh(sites,p,e,n,radius,flora);
         auto job=std::async(std::launch::async,[sites,p,e,n,radius,flora]{return makePlantMesh(sites,p,e,n,radius,flora);});
         sites.clear();flora.setYoung(true);flora.advanceDays(w,20000);const auto actual=job.get();
-        require(actual.vertices.size()==expected.vertices.size() && actual.casters.size()==expected.casters.size(),"Snapshot owns both solid and shadow geometry");
+        require(actual.vertices.size()==expected.vertices.size() && actual.moving.size()==expected.moving.size() && actual.foliage.size()==expected.foliage.size() && actual.casters.size()==expected.casters.size(),"Snapshot owns static, moving and shadow geometry");
         near(actual.heightSum,expected.heightSum,0,"Telemetry describes the displayed snapshot");
         require(actual.trees>30 && actual.lianaHosts>0,"Dense tropical mesh includes its canopy");
         for(std::size_t i=0;i<actual.vertices.size();++i) near(length(actual.vertices[i].position-expected.vertices[i].position),0,0,"Background mesh matches the reference");
+        for(std::size_t i=0;i<actual.moving.size();++i) {
+            near(length(actual.moving[i].position-expected.moving[i].position),0,0,"Moving geometry belongs to the same snapshot");
+            near(actual.moving[i].slot,expected.moving[i].slot,0,"Spring indices match the uploaded geometry");
+        }
     });
     test("biomes","Forest navigation honours disabled modules",[] {
         World w;w.modules().set(Module::SurfaceDetail,false);bool rejected=false;

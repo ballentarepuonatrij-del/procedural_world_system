@@ -10,6 +10,7 @@
 #include "planet/win32_tone.hpp"
 #include "planet/win32_materials.hpp"
 #include "planet/win32_grass.hpp"
+#include "planet/win32_foliage.hpp"
 #include "planet/win32_water.hpp"
 #include "planet/water_view.hpp"
 #include <windows.h>
@@ -45,7 +46,7 @@ struct ViewState {
     double volume=.55;
     bool audioAvailable=false;
     bool interfaceVisible=true;
-    bool skyEnabled=true,shadowsEnabled=true,causticsEnabled=true;
+    bool skyEnabled=true,shadowsEnabled=true,causticsEnabled=true,foliageEnabled=true;
     unsigned gamma=100,brightness=100;
     std::string notice;
     Phenomenon phenomenon=Phenomenon::Natural;
@@ -54,15 +55,15 @@ struct ViewState {
 };
 bool globeHudHit(const ViewState& view,int x,int y);
 struct RenderTimings {
-    double terrain=0,plants=0,shadowBuild=0,shadows=0,water=0,rivers=0,weather=0,sky=0,fauna=0,snow=0,phenomena=0,grass=0,optics=0;
+    double terrain=0,plants=0,shadowBuild=0,shadows=0,water=0,rivers=0,weather=0,sky=0,fauna=0,snow=0,phenomena=0,grass=0,optics=0,foliage=0;
 };
 class Renderer {
 public:
-    explicit Renderer(HDC dc,bool proceduralMaterials=true,bool grassShaders=true);
+    explicit Renderer(HDC dc,bool proceduralMaterials=true,bool grassShaders=true,bool foliageShaders=true);
     ~Renderer();
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
-    void invalidate() { dirty_=true;globeDirty_=true;weatherDirty_=true;waterMapDirty_=true;materials_.invalidate();waterSurface_.invalidate();grassField_.clear();grassActors_.clear();grassPlayer_.reset();grassWindShort_={};grassWindTall_={};++terrainEpoch_; }
+    void invalidate() { dirty_=true;globeDirty_=true;weatherDirty_=true;waterMapDirty_=true;materials_.invalidate();waterSurface_.invalidate();grassField_.clear();foliageField_.clear();grassActors_.clear();grassPlayer_.reset();grassWindShort_={};grassWindTall_={};++terrainEpoch_; }
     void draw(const World& world, const Explorer& explorer, const Simulation& simulation,const ViewState& view);
     void capture(const std::filesystem::path& path, int width, int height) const;
     std::string device() const;
@@ -112,6 +113,8 @@ public:
     const GrassRenderer& grassRenderer() const {return grassPainter_;}
     const GrassField& grassField() const {return grassField_;}
     double grassWindBend() const {return length(grassWindTall_.bend);}
+    const FoliageRenderer& foliageRenderer() const {return foliagePainter_;}
+    const FoliageField& foliageField() const {return foliageField_;}
     const PhenomenaState& phenomena() const {return phenomena_;}
     std::size_t opticalTriangles() const {return opticalTriangles_;}
     std::size_t dustCount() const {return dustCount_;}
@@ -120,6 +123,8 @@ private:
     ToneMapper tone_;
     TerrainMaterials materials_;
     GrassRenderer grassPainter_;
+    FoliageRenderer foliagePainter_;
+    FoliageField foliageField_;
     GrassField grassField_;
     GrassSpring grassWindShort_,grassWindTall_;
     GrassDraw grassDraw_;
@@ -132,7 +137,7 @@ private:
     void uploadTerrain(TerrainMesh mesh);
     void adoptTerrain(TerrainMesh mesh);
     struct SceneMesh {TerrainMesh terrain;PlantMesh plants;GrassMesh grass;Flora flora;Vec3 sun;std::vector<Triangle> shadows;bool hasShadows=false;};
-    struct MeshUpload {SceneMesh scene;GLuint lists=0;std::array<std::size_t,6> chunks{};std::size_t next=0;std::uint64_t epoch=0;};
+    struct MeshUpload {SceneMesh scene;GLuint lists=0;std::array<std::size_t,7> chunks{};std::size_t next=0;std::uint64_t epoch=0;};
     void beginUpload(SceneMesh scene);
     void advanceUpload(const Flora& flora);
     void discardUpload();
@@ -155,7 +160,7 @@ private:
     void drawHud(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view);
     void text(float x,float y,const std::string& value,Color color,bool large=false);
     GLuint terrain_=0, terrainGrid_=0, globe_=0, font_=0, headingFont_=0, detailTexture_=0;
-    GLuint objects_=0,caves_=0,grass_=0;
+    GLuint objects_=0,caves_=0,grass_=0,foliage_=0;
     std::size_t caveCount_=0;
     std::size_t detailCount_=0;
     std::vector<PlantSite> objectSites_;

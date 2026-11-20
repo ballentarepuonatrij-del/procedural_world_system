@@ -1,14 +1,14 @@
 #include "planet/shadows.hpp"
 
 namespace planet {
-std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up,Vec3 right,bool simple) {
+std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up,Vec3 right,bool simple,bool leafDetail) {
     std::vector<MeshFace> faces;bool sheets=false;
     right=rotate(right,up,object.angle);
     const Vec3 back=cross(right,up);
     const auto transform=[&](Vec3 p) { return origin+right*p.x+up*p.y+back*p.z; };
-    const auto triangle=[&](Vec3 a,Vec3 b,Vec3 c,Color color) {
+    const auto triangle=[&](Vec3 a,Vec3 b,Vec3 c,Color color,Vec3 flutter=Vec3{},double phase=0.,bool micro=false) {
         a=transform(a); b=transform(b); c=transform(c);
-        if(length(cross(b-a,c-a))>1e-10) faces.push_back({{a,b,c,sheets},color});
+        if(length(cross(b-a,c-a))>1e-10) faces.push_back({{a,b,c,sheets},color,flutter,phase,micro});
     };
     const auto tube=[&](Vec3 a,Vec3 b,double base,double tip,Color color) {
         const bool wasSheet=sheets;sheets=false;
@@ -31,8 +31,9 @@ std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up
             column%=sides;
             const double lat=-pi/2+pi*row/rings, angle=tau*column/sides;
             const double rough=0.82+0.30*randomUnit(object.id+salt+static_cast<std::uint64_t>(row*17+column));
+            const double core=leafDetail && object.kind!=DetailKind::Rock ? .82 : 1.;
             return center+Vec3{std::cos(lat)*std::cos(angle)*scale.x*rough,
-                               std::sin(lat)*scale.y,std::cos(lat)*std::sin(angle)*scale.z*rough};
+                               std::sin(lat)*scale.y,std::cos(lat)*std::sin(angle)*scale.z*rough}*core;
         };
         for(int row=0;row<rings;++row) for(int column=0;column<sides;++column) {
             const float tint=static_cast<float>(0.83+0.22*randomUnit(object.id+salt+static_cast<std::uint64_t>(row*31+column)));
@@ -40,6 +41,32 @@ std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up
             const auto a=vertex(row,column),b=vertex(row,column+1),c=vertex(row+1,column),d=vertex(row+1,column+1);
             if(row>0) triangle(a,c,b,shaded);
             if(row+1<rings) triangle(b,c,d,shaded);
+        }
+        if(leafDetail && object.kind!=DetailKind::Rock && object.plant.stage!=GrowthStage::Dead) {
+            // Folded leaf clusters break the crown silhouette nearby. Their
+            // stems share the branch deformation; only the free tips flutter.
+            const bool previous=sheets;sheets=true;
+            const int count=object.kind==DetailKind::Shrub ? 72 : 96;
+            const double size=clamp(scale.x*.22,.065,.55);
+            for(int i=0;i<count;++i) {
+                const auto key=object.id+salt+static_cast<std::uint64_t>(i*71+4100);
+                const int row=static_cast<int>(randomUnit(key)*rings),column=static_cast<int>(randomUnit(key+1)*sides);
+                auto a=vertex(row,column),b=vertex(row+1,column),c=vertex(row,column+1);
+                if(row==0 || (row+1<rings && randomUnit(key+3)>.5)) {a=vertex(row,column+1);b=vertex(row+1,column);c=vertex(row+1,column+1);}
+                const double u=std::sqrt(randomUnit(key+4)),v=randomUnit(key+5);
+                const auto base=a*(1-u)+b*(u*(1-v))+c*(u*v);
+                const auto outward=normalized(base-center);
+                const auto direction=normalized(outward+Vec3{.2,.45,.1}),side=normalized(cross(direction,Vec3{.2,1,.3}));
+                const auto mid=base+direction*(size*.6),tip=base+direction*(size*1.5);
+                const auto ridge=mid+cross(side,direction)*(size*.15);
+                const Color tint{color.r*1.06f,color.g*1.08f,color.b*.92f};
+                const double phase=tau*randomUnit(key+2),amplitude=size*.16;
+                triangle(base,mid+side*(size*.42),ridge,tint,{0,amplitude*.7,amplitude*.5},phase,true);
+                triangle(base,ridge,mid-side*(size*.42),color,{0,amplitude*.5,amplitude*.7},phase,true);
+                triangle(ridge,mid+side*(size*.42),tip,tint,{amplitude*.5,amplitude*.7,amplitude},phase,true);
+                triangle(ridge,tip,mid-side*(size*.42),color,{amplitude*.5,amplitude,amplitude*.7},phase,true);
+            }
+            sheets=previous;
         }
     };
     const double h=object.height,r=object.radius;
@@ -119,8 +146,9 @@ std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up
             for(int j=0;j<segments;++j) {
                 const double a=static_cast<double>(j)/segments,b=static_cast<double>(j+1)/segments;
                 const double width=r*(palm ? .12 : .18)*std::sin(pi*(a+b)/2);
-                triangle(point(a),point(b)+side*width,point(b),leaves);
-                triangle(point(a),point(b),point(b)-side*width,leaves);
+                const double flutter=r*.025,phase=tau*randomUnit(object.id+static_cast<unsigned>(leaf)+192);
+                triangle(point(a),point(b)+side*width,point(b),leaves,{flutter*a*a,flutter*b*b,flutter*b*b},phase);
+                triangle(point(a),point(b),point(b)-side*width,leaves,{flutter*a*a,flutter*b*b,flutter*b*b},phase);
             }
         }
         return faces;
@@ -235,6 +263,17 @@ std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up
                         const Vec3 b{width*std::cos(tau*(i+1)/8),base,width*std::sin(tau*(i+1)/8)};
                         triangle(a,{0,std::min(h,base+h*.32),0},b,leaves);
                         triangle({0,base,0},a,b,{0.13f,0.29f,0.18f});
+                        if(leafDetail) {
+                            const bool previous=sheets;sheets=true;
+                            const auto dir=normalized(Vec3{a.x,0,a.z}),side=Vec3{-dir.z,0,dir.x};
+                            const double size=clamp(width*.15,.08,.4),phase=tau*randomUnit(object.id+static_cast<unsigned>(layer*8+i)+3800);
+                            for(int twig=0;twig<3;++twig) {
+                                const auto joint=a+side*(size*(twig-1)*.5);
+                                triangle(joint,joint+dir*size+side*(size*.3)+Vec3{0,size*.2,0},joint+dir*(size*1.8),leaves,{0,size*.05,size*.12},phase,true);
+                                triangle(joint,joint+dir*(size*1.8),joint+dir*size-side*(size*.3)+Vec3{0,size*.2,0},leaves,{0,size*.12,size*.05},phase,true);
+                            }
+                            sheets=previous;
+                        }
                     }
                 }
             } else {

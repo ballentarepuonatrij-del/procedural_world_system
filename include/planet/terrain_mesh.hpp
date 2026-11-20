@@ -3,6 +3,7 @@
 #include "planet/shadows.hpp"
 #include "planet/materials.hpp"
 #include "planet/grass.hpp"
+#include "planet/foliage.hpp"
 
 namespace planet {
 // CPU-only scene data. A worker owns copies of World/Hydrology; OpenGL upload
@@ -12,7 +13,10 @@ struct GridVertex {Vec3 position;float alpha;};
 struct SurfaceWaterVertex {Vec3 up,position;double altitude;bool available,river;double spacing;bool inland=false,wetland=false;double level=0;};
 struct PlantSite {SurfaceObject object;Vec3 base;double snowDepth=0;};
 struct PlantMesh {
-    std::vector<TerrainVertex> vertices;
+    std::vector<FoliageVertex> vertices,moving;
+    std::vector<FoliageRoot> foliage;
+    std::vector<FoliageRange> ranges;
+    std::size_t leafVertices=0;
     std::vector<Triangle> casters;
     std::optional<SurfaceObject> focus;
     std::size_t objects=0,plants=0,marine=0,freshwater=0,species=0,flowering=0,budding=0,seedHeads=0,trees=0,lianaHosts=0;

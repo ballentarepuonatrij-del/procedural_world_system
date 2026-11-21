@@ -3,6 +3,80 @@ SurfaceObject foliageTestPlant(Species species,DetailKind kind,double height=2) 
     o.plant={1000,1,1,GrowthStage::Mature,0};o.evergreen=coniferSpecies(species);return o;
 }
 void registerFoliageTests() {
+    test("foliage","Cutout shoots have a rooted stem, porous leaf silhouettes and a solid material tile",[] {
+        const auto atlas=makeLeafAtlas();
+        require(atlas.size()==leafAtlasSize*leafAtlasSize,"Complete atlas");
+        std::array<unsigned,3> coverage{};
+        for(const auto kind:{LeafSpray::Broad,LeafSpray::Narrow,LeafSpray::Needles}) {
+            const auto uv=leafCoordinates(kind,0,0);
+            const int x0=static_cast<int>(uv.u*leafAtlasSize),y0=static_cast<int>(uv.v*leafAtlasSize);
+            auto alpha=[&](int x,int y){return atlas[(y0+y)*leafAtlasSize+x0+x][3];};
+            require(alpha(leafTileSize/2,0)>86,"Stem reaches its attachment");
+            for(int y=0;y<leafTileSize;++y) {
+                int solid=0;for(int x=0;x<leafTileSize;++x) solid+=alpha(x,y)>86;
+                if(y>4 && y<leafTileSize*.85) require(solid>0 && solid<leafTileSize-2,"Sky is visible between leaf edges");
+                coverage[static_cast<unsigned>(kind)]+=static_cast<unsigned>(solid);
+            }
+        }
+        require(coverage[0]!=coverage[1] && coverage[1]!=coverage[2] && coverage[0]!=coverage[2],"Three distinct shoot silhouettes");
+        for(int y=leafTileSize;y<leafAtlasSize;++y) for(int x=leafTileSize;x<leafAtlasSize;++x)
+            require(atlas[y*leafAtlasSize+x]==LeafPixel{255,255,255,255},"Bark and other materials remain opaque");
+    });
+    test("foliage","Every tree detail level carries its leaves on branching wood",[] {
+        for(const auto species:{Species::Oak,Species::Willow,Species::Birch,Species::Acacia,Species::Beech,Species::Alder,
+                                Species::TropicalTree,Species::Kapok,Species::StranglerFig,Species::Pine,Species::Spruce,Species::Fir,Species::Redwood}) {
+            const auto o=foliageTestPlant(species,DetailKind::Tree,10);
+            for(const auto detail:{0,1,2}) {
+                std::vector<Triangle> shadows,wood;std::vector<Vec3> roots;
+                bool lowBranch=false,highBranch=false;
+                for(const auto& face:detailMesh(o,{},o.up,{1,0,0},detail==0,detail==2,&shadows)) {
+                    const auto& t=face.triangle;
+                    if(face.uv[0].u<.5f || face.uv[0].v<.5f) {
+                        require(t.twoSided && !face.castsShadow && face.flutter.x==0 && length(face.flutter)>0,
+                            "Two-sided masked foliage flutters around a fixed attachment");
+                        if(roots.empty() || length(t.a-roots.back())>1e-9) roots.push_back(t.a);
+                    } else {
+                        require(face.color.r>=face.color.g,"All green canopy surfaces use a leaf mask");
+                        wood.push_back(t);
+                        for(const auto p:{t.a,t.b,t.c}) if(std::hypot(p.x,p.z)>o.radius*.21) {
+                            lowBranch|=p.y<o.height*.78;highBranch|=p.y>=o.height*.78;
+                        }
+                    }
+                }
+                require(roots.size()>8 && lowBranch && highBranch && !shadows.empty(),"Wood and foliage span multiple crown heights");
+                for(const auto root:roots) {
+                    double nearest=1e9;
+                    for(const auto& t:wood) {
+                        const std::array corners{t.a,t.b,t.c};
+                        for(std::size_t i=0;i<3;++i) {
+                            const auto a=corners[i],edge=corners[(i+1)%3]-a;
+                            const double k=clamp(dot(root-a,edge)/dot(edge,edge),0.,1.);
+                            nearest=std::min(nearest,length(root-a-edge*k));
+                        }
+                    }
+                    require(nearest<o.height*.044,"Each visible shoot starts on a woody limb");
+                }
+            }
+            auto dead=o;dead.plant.stage=GrowthStage::Dead;std::vector<Triangle> shadows;
+            const auto bare=detailMesh(dead,{},dead.up,{1,0,0},false,true,&shadows);
+            require(!bare.empty() && shadows.empty(),"Dead wood has no canopy shadow");
+            for(const auto& f:bare) require(f.uv[0].u>.5f && f.uv[0].v>.5f,"Dead trees retain only bare wood");
+        }
+    });
+    test("foliage","Visibility bounds include every bent triangle on chunk boundaries",[] {
+        std::vector<FoliageVertex> vertices(foliageBatchVertices+6);
+        for(std::size_t i=0;i<vertices.size();++i) {
+            auto& v=vertices[i];v.position={i<foliageBatchVertices ? 8. : -32.,static_cast<double>(i%13),4};
+            v.height=20;v.flex=static_cast<float>(i%13)/12;v.flutter=.13f;v.leafPhase=static_cast<float>(i%7);
+        }
+        const auto batches=foliageBatches(vertices);
+        require(batches.size()==2 && batches[0].count==foliageBatchVertices && batches[1].count==6,"Complete triangle blocks");
+        for(std::size_t i=0;i<vertices.size();++i) for(double force:{0.,.13,.65}) {
+            const auto& b=batches[i/foliageBatchVertices];
+            const auto p=bendFoliagePosition(vertices[i],normalized(Vec3{-1,.1,1})*force,1.,1.);
+            require(length(p-b.center)<=b.sweptRadius(force,1.),"Wind and contact stay inside the conservative bound");
+        }
+    });
     test("foliage","Leaf clusters and needle sprays are deterministic attached geometry",[] {
         for(auto species:{Species::Oak,Species::Willow,Species::Pine,Species::Heather,Species::Palm}) {
             const auto o=foliageTestPlant(species,species==Species::Heather ? DetailKind::Shrub : DetailKind::Tree);

@@ -1,5 +1,6 @@
 #pragma once
 #include "planet/grass.hpp"
+#include "planet/leaf_spray.hpp"
 
 namespace planet {
 struct SurfaceObject;
@@ -13,8 +14,17 @@ struct FoliageRoot {
 struct FoliageVertex {
     Vec3 position,normal;Color color;
     float flex=0,height=0,phase=0,flutter=0,leafPhase=0,slot=-1;
+    LeafUV uv{};
 };
 struct FoliageRange {std::size_t first=0,count=0;int slot=-1;};
+constexpr std::size_t foliageBatchVertices=1536;
+struct FoliageBatch {
+    Vec3 center;
+    double radius=0,flexHeight=0,flutter=0;
+    std::size_t count=0;
+    double sweptRadius(double bend,double windStrength) const;
+};
+std::vector<FoliageBatch> foliageBatches(std::span<const FoliageVertex> vertices);
 bool flexiblePlant(const SurfaceObject& object);
 FoliageRoot foliageRoot(const SurfaceObject& object,double radius);
 Vec3 foliageWindTarget(const FoliageRoot& root,Vec3 wind);

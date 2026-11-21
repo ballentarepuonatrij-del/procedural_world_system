@@ -1,7 +1,8 @@
-#include "planet/shadows.hpp"
+#include "tree_mesh.hpp"
 
 namespace planet {
-std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up,Vec3 right,bool simple,bool leafDetail) {
+std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up,Vec3 right,bool simple,bool leafDetail,
+                                 std::vector<Triangle>* sprayShadows) {
     std::vector<MeshFace> faces;bool sheets=false;
     right=rotate(right,up,object.angle);
     const Vec3 back=cross(right,up);
@@ -31,7 +32,7 @@ std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up
             column%=sides;
             const double lat=-pi/2+pi*row/rings, angle=tau*column/sides;
             const double rough=0.82+0.30*randomUnit(object.id+salt+static_cast<std::uint64_t>(row*17+column));
-            const double core=leafDetail && object.kind!=DetailKind::Rock ? .82 : 1.;
+            const double core=leafDetail && object.kind==DetailKind::Shrub ? .82 : 1.;
             return center+Vec3{std::cos(lat)*std::cos(angle)*scale.x*rough,
                                std::sin(lat)*scale.y,std::cos(lat)*std::sin(angle)*scale.z*rough}*core;
         };
@@ -42,11 +43,11 @@ std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up
             if(row>0) triangle(a,c,b,shaded);
             if(row+1<rings) triangle(b,c,d,shaded);
         }
-        if(leafDetail && object.kind!=DetailKind::Rock && object.plant.stage!=GrowthStage::Dead) {
+        if(leafDetail && object.kind==DetailKind::Shrub && object.plant.stage!=GrowthStage::Dead) {
             // Folded leaf clusters break the crown silhouette nearby. Their
             // stems share the branch deformation; only the free tips flutter.
             const bool previous=sheets;sheets=true;
-            const int count=object.kind==DetailKind::Shrub ? 72 : 96;
+            constexpr int count=72;
             const double size=clamp(scale.x*.22,.065,.55);
             for(int i=0;i<count;++i) {
                 const auto key=object.id+salt+static_cast<std::uint64_t>(i*71+4100);
@@ -247,51 +248,18 @@ std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up
             break;
         case DetailKind::Tree: {
             const Color bark=object.species==Species::Birch ? Color{.78f,.77f,.69f} : Color{.27f,.19f,.12f};
-            tube({0,-0.4,0},{0,h*0.72,0},object.collisionRadius(),h*0.008,bark);
-            if(object.plant.stage==GrowthStage::Dead) {
-                for(int i=0;i<3;++i) tube({0,h*.4,0},{r*std::cos(tau*i/3),h*.75,r*std::sin(tau*i/3)},h*.014,h*.003,bark);
-                break;
-            }
-            if(object.evergreen) {
-                const int layers=simple ? 3 : 5;
-                const bool giant=object.species==Species::Redwood;
-                for(int layer=0;layer<layers;++layer) {
-                    const double t=static_cast<double>(layer)/layers;
-                    const double base=h*((giant ? .42 : .16)+t*(giant ? .45 : .64)),width=r*(1-t*.82);
-                    for(int i=0;i<8;++i) {
-                        const Vec3 a{width*std::cos(tau*i/8),base,width*std::sin(tau*i/8)};
-                        const Vec3 b{width*std::cos(tau*(i+1)/8),base,width*std::sin(tau*(i+1)/8)};
-                        triangle(a,{0,std::min(h,base+h*.32),0},b,leaves);
-                        triangle({0,base,0},a,b,{0.13f,0.29f,0.18f});
-                        if(leafDetail) {
-                            const bool previous=sheets;sheets=true;
-                            const auto dir=normalized(Vec3{a.x,0,a.z}),side=Vec3{-dir.z,0,dir.x};
-                            const double size=clamp(width*.15,.08,.4),phase=tau*randomUnit(object.id+static_cast<unsigned>(layer*8+i)+3800);
-                            for(int twig=0;twig<3;++twig) {
-                                const auto joint=a+side*(size*(twig-1)*.5);
-                                triangle(joint,joint+dir*size+side*(size*.3)+Vec3{0,size*.2,0},joint+dir*(size*1.8),leaves,{0,size*.05,size*.12},phase,true);
-                                triangle(joint,joint+dir*(size*1.8),joint+dir*size-side*(size*.3)+Vec3{0,size*.2,0},leaves,{0,size*.12,size*.05},phase,true);
-                            }
-                            sheets=previous;
-                        }
-                    }
-                }
-            } else {
-                const bool flat=object.species==Species::Acacia;
-                crown({0,h*(flat ? .86 : .73),0},{r,h*(flat ? .14 : .27),r},leaves,200);
-                if(object.species==Species::Willow) {
-                    for(int i=0;i<(simple ? 5 : 8);++i) {
-                        const double angle=tau*i/(simple ? 5 : 8);const Vec3 edge{std::cos(angle)*r*.75,h*.72,std::sin(angle)*r*.75};
-                        crown(edge-Vec3{0,h*.19,0},{r*.28,h*.29,r*.28},leaves,static_cast<unsigned>(1400+i*51));
-                    }
-                }
-                if(!simple) for(int i=0;i<3;++i) {
-                    const double angle=tau*i/3+0.4;
-                    const Vec3 branch{std::cos(angle)*r*0.65,h*(0.56+i*0.055),std::sin(angle)*r*0.65};
-                    tube({0,h*0.38,0},branch,h*0.012,h*0.004,bark);
-                    crown(branch,{r*0.62,h*0.17,r*0.62},leaves,static_cast<std::uint64_t>(300+i*80));
-                }
-            }
+            const auto firstShadow=sprayShadows ? sprayShadows->size() : 0;
+            const auto joints=buildTreeBranches(object,bark,leaves,simple,leafDetail,faces,sprayShadows);
+            const auto toScene=[&](Triangle& t) {
+                t.a=transform(t.a);t.b=transform(t.b);t.c=transform(t.c);
+            };
+            for(auto& face:faces) toScene(face.triangle);
+            std::erase_if(faces,[](const MeshFace& face) {
+                const auto& t=face.triangle;
+                return length(cross(t.b-t.a,t.c-t.a))<=1e-10;
+            });
+            if(sprayShadows) for(auto i=firstShadow;i<sprayShadows->size();++i) toScene((*sprayShadows)[i]);
+            if(object.plant.stage==GrowthStage::Dead) break;
             if(!simple && object.height>12 && (tropicalCanopy(object.species) || object.species==Species::Redwood)) {
                 // Buttress wedges and branch-rooted hanging lianas. These scale
                 // with their host; they have no separate ecological reservoir.
@@ -301,23 +269,18 @@ std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up
                     const auto left=base+side*(h*.008),rightRoot=base-side*(h*.008);
                     triangle(left,tip,top,bark);triangle(tip,rightRoot,top,bark);triangle(rightRoot,left,top,bark);triangle(left,rightRoot,tip,bark);
                 }
-                for(unsigned vine=0;vine<object.lianas();++vine) {
-                    const double a=tau*vine/object.lianas()+.4,radius=r*(.45+.3*randomUnit(object.id+vine+1910));
-                    const Vec3 start{std::cos(a)*radius,h*.75,std::sin(a)*radius};
-                    const double drop=h*(.38+.22*randomUnit(object.id+vine+1920));
+                const auto vines=joints.vineAnchors.empty() ? 0U : object.lianas();
+                for(unsigned vine=0;vine<vines;++vine) {
+                    const auto start=joints.vineAnchors[vine*joints.vineAnchors.size()/vines];
+                    const double drop=start.y*(.52+.28*randomUnit(object.id+vine+1920));
                     const auto point=[&](double t){return start+Vec3{std::sin(t*pi)*r*.10,-drop*t,std::sin(t*pi*2+vine)*r*.05};};
                     for(int segment=0;segment<6;++segment) tube(point(segment/6.),point((segment+1)/6.),h*.0008,h*.0007,{.22f,.28f,.10f});
                     if(object.species==Species::StranglerFig) tube(point(1),{start.x,0,start.z},h*.0014,h*.0017,bark);
                 }
             }
             if(floral.form!=FlowerForm::None) {
-                const bool flat=object.species==Species::Acacia;const int sides=simple ? 6 : 8;
-                for(int row=1;row<3;++row) for(int i=0;i<sides;++i) {
-                    const double lat=-pi/2+pi*row/(simple ? 3 : 4),angle=tau*i/sides;
-                    const double rough=.82+.30*randomUnit(object.id+200+static_cast<std::uint64_t>(row*17+i));
-                    const Vec3 tip{std::cos(lat)*std::cos(angle)*r*rough,h*(flat ? .86 : .73)+std::sin(lat)*h*(flat ? .14 : .27),std::cos(lat)*std::sin(angle)*r*rough};
-                    flower(tip,floral.radius,static_cast<unsigned>(1200+row*17+i));
-                }
+                for(std::size_t i=0;i<joints.floweringTips.size();++i)
+                    flower(joints.floweringTips[i],floral.radius,1200+i);
             }
             break;
         }

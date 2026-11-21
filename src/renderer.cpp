@@ -60,9 +60,9 @@ Renderer::Renderer(HDC dc,bool proceduralMaterials,bool grassShaders,bool foliag
     grassPainter_.initialize(grassShaders);
     foliagePainter_.initialize(foliageShaders);
     font_=makeFont(dc,15,FW_NORMAL); headingFont_=makeFont(dc,28,FW_BOLD);
-    terrain_=glGenLists(1); terrainGrid_=glGenLists(1); globe_=glGenLists(1); objects_=glGenLists(1); caves_=glGenLists(1);weatherMap_=glGenLists(1);shadows_=glGenLists(1);
-    waterMap_=glGenLists(1);grass_=glGenLists(1);foliage_=glGenLists(1);
-    if (!terrain_ || !terrainGrid_ || !globe_ || !objects_ || !caves_ || !weatherMap_ || !shadows_ || !waterMap_ || !grass_ || !foliage_) throw std::runtime_error("Cannot allocate terrain display lists");
+    terrain_=glGenLists(1); terrainGrid_=glGenLists(1); globe_=glGenLists(1); caves_=glGenLists(1);weatherMap_=glGenLists(1);shadows_=glGenLists(1);
+    waterMap_=glGenLists(1);grass_=glGenLists(1);
+    if (!terrain_ || !terrainGrid_ || !globe_ || !caves_ || !weatherMap_ || !shadows_ || !waterMap_ || !grass_) throw std::runtime_error("Cannot allocate terrain display lists");
     glGetIntegerv(GL_STENCIL_BITS,&stencilBits_);
     glPixelStorei(GL_UNPACK_ALIGNMENT,1);
     glGenTextures(1,&riverTexture_);glBindTexture(GL_TEXTURE_2D,riverTexture_);
@@ -80,6 +80,12 @@ Renderer::Renderer(HDC dc,bool proceduralMaterials,bool grassShaders,bool foliag
     const auto* extensions=reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
     const auto* version=reinterpret_cast<const char*>(glGetString(GL_VERSION));
     stencilWrap_=(version && std::atof(version)>=1.4) || (extensions && std::strstr(extensions,"GL_EXT_stencil_wrap"));
+    if(version && std::atof(version)>=2.) {
+        const auto proc=wglGetProcAddress("glStencilOpSeparate");
+        const auto address=reinterpret_cast<std::uintptr_t>(proc);
+        static_assert(sizeof(stencilOpSeparate_)==sizeof(proc));
+        if(address>3 && address!=~std::uintptr_t{}) std::memcpy(&stencilOpSeparate_,&proc,sizeof(proc));
+    }
     glEnable(GL_DEPTH_TEST); glEnable(GL_NORMALIZE);
     glEnable(GL_COLOR_MATERIAL); glColorMaterial(GL_FRONT_AND_BACK,GL_AMBIENT_AND_DIFFUSE);
     glEnable(GL_LIGHT0);
@@ -139,7 +145,8 @@ Renderer::~Renderer() {
     discardUpload();if(terrainChunks_) glDeleteLists(terrainChunks_,terrainChunksCount_);
     glDeleteLists(terrain_,1); glDeleteLists(globe_,1);
     glDeleteLists(terrainGrid_,1);
-    glDeleteLists(objects_,1); glDeleteLists(caves_,1);glDeleteLists(grass_,1);glDeleteLists(foliage_,1);
+    if(localPlantLists_) glDeleteLists(localPlantLists_,localPlantListCount_);
+    glDeleteLists(caves_,1);glDeleteLists(grass_,1);
     glDeleteLists(weatherMap_,1);
     glDeleteLists(shadows_,1);
     glDeleteLists(waterMap_,1);
@@ -195,7 +202,10 @@ void Renderer::beginUpload(SceneMesh scene) {
     const auto& mesh=upload.scene.terrain;
     const std::array sizes{mesh.terrain.size(),mesh.caves.size(),mesh.grid.size(),upload.scene.shadows.size()*3,upload.scene.plants.vertices.size(),upload.scene.grass.vertices.size(),upload.scene.plants.moving.size()};
     std::size_t count=0;
-    for(std::size_t i=0;i<sizes.size();++i) {upload.chunks[i]=(sizes[i]+chunk-1)/chunk;count+=upload.chunks[i];}
+    for(std::size_t i=0;i<sizes.size();++i) {
+        const auto block=i==4 || i==6 ? foliageBatchVertices : chunk;
+        upload.chunks[i]=(sizes[i]+block-1)/block;count+=upload.chunks[i];
+    }
     upload.lists=glGenLists(static_cast<GLsizei>(count));
     if(!upload.lists) throw std::runtime_error("Cannot allocate streamed terrain display lists");
     meshUpload_=std::move(upload);
@@ -212,7 +222,8 @@ void Renderer::advanceUpload(const Flora& flora) {
     do {
         std::size_t section=0,part=upload.next;
         while(section<6 && part>=upload.chunks[section]) part-=upload.chunks[section++];
-        const auto first=part*chunk;
+        const auto block=section==4 || section==6 ? foliageBatchVertices : chunk;
+        const auto first=part*block;
         glNewList(upload.lists+static_cast<GLuint>(upload.next),GL_COMPILE);glBegin(section==2 ? GL_LINES : GL_TRIANGLES);
         if(section<2) {
             const auto& vertices=section==0 ? mesh.terrain : mesh.caves;
@@ -220,11 +231,10 @@ void Renderer::advanceUpload(const Flora& flora) {
                 materials_.vertex(v);
             }
         } else if(section==4) {
-            for(std::size_t i=first;i<std::min(first+chunk,scene.plants.vertices.size());++i) {const auto& v=scene.plants.vertices[i];
-                glColor3f(v.color.r,v.color.g,v.color.b);glNormal3d(v.normal.x,v.normal.y,v.normal.z);glVertex3d(v.position.x,v.position.y,v.position.z);
-            }
+            for(std::size_t i=first;i<std::min(first+block,scene.plants.vertices.size());++i)
+                foliagePainter_.vertex(scene.plants.vertices[i],false);
         } else if(section==6) {
-            for(std::size_t i=first;i<std::min(first+chunk,scene.plants.moving.size());++i) foliagePainter_.vertex(scene.plants.moving[i]);
+            for(std::size_t i=first;i<std::min(first+block,scene.plants.moving.size());++i) foliagePainter_.vertex(scene.plants.moving[i]);
         } else if(section==2) {
             for(std::size_t i=first;i<std::min(first+chunk,mesh.grid.size());++i) {const auto& v=mesh.grid[i];
                 glColor4f(.20f,.82f,1.f,v.alpha);glVertex3d(v.position.x,v.position.y,v.position.z);
@@ -237,11 +247,16 @@ void Renderer::advanceUpload(const Flora& flora) {
         glEnd();glEndList();++upload.next;
     } while(upload.next<count && std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()<3);
     if(upload.next<count) return;
-    const std::array<GLuint,7> parents{terrain_,caves_,terrainGrid_,shadows_,objects_,grass_,foliage_};std::size_t offset=0;
+    const std::array<GLuint,7> parents{terrain_,caves_,terrainGrid_,shadows_,0,grass_,0};
+    std::array<GLuint,7> firstList{};std::size_t offset=0;
     for(std::size_t section=0;section<parents.size();++section) {
-        glNewList(parents[section],GL_COMPILE);
-        for(std::size_t i=0;i<upload.chunks[section];++i) glCallList(upload.lists+static_cast<GLuint>(offset+i));
-        glEndList();offset+=upload.chunks[section];
+        firstList[section]=upload.lists+static_cast<GLuint>(offset);
+        if(parents[section]) {
+            glNewList(parents[section],GL_COMPILE);
+            for(std::size_t i=0;i<upload.chunks[section];++i) glCallList(firstList[section]+static_cast<GLuint>(i));
+            glEndList();
+        }
+        offset+=upload.chunks[section];
     }
     if(terrainChunks_) glDeleteLists(terrainChunks_,terrainChunksCount_);
     terrainChunks_=upload.lists;terrainChunksCount_=static_cast<GLsizei>(count);upload.lists=0;
@@ -251,28 +266,38 @@ void Renderer::advanceUpload(const Flora& flora) {
     // A changed sun direction can be refreshed asynchronously after adopting
     // geometrically matching shadows. Never stall adoption for the solar clock.
     const bool validShadow=sameFlora && scene.hasShadows;
-    adoptTerrain(std::move(mesh));adoptObjects(std::move(scene.plants),scene.flora);shadowDirty_=!validShadow;
+    if(localPlantLists_) glDeleteLists(localPlantLists_,localPlantListCount_);
+    localPlantLists_=0;localPlantListCount_=0;
+    adoptTerrain(std::move(mesh));adoptObjects(std::move(scene.plants),scene.flora,firstList[4],firstList[6]);shadowDirty_=!validShadow;
     grassPainter_.adopt(std::move(scene.grass));
     meshUpload_.reset();++terrainUploads_;
 }
 void Renderer::buildObjects(const World& world,const Flora& flora) {
     DrawTimer timer{timings_.plants};
     auto mesh=makePlantMesh(objectSites_,anchor_,east_,north_,world.config().radius,flora);
-    glNewList(objects_,GL_COMPILE);glBegin(GL_TRIANGLES);
-    for(const auto& v:mesh.vertices) {
-        glColor3f(v.color.r,v.color.g,v.color.b);glNormal3d(v.normal.x,v.normal.y,v.normal.z);glVertex3d(v.position.x,v.position.y,v.position.z);
-    }
-    glEnd();glEndList();glNewList(foliage_,GL_COMPILE);glBegin(GL_TRIANGLES);
-    for(const auto& v:mesh.moving) foliagePainter_.vertex(v);
-    glEnd();glEndList();adoptObjects(std::move(mesh),flora);
+    const auto count=static_cast<GLsizei>(mesh.staticBatches.size()+mesh.movingBatches.size());
+    const auto lists=count ? glGenLists(count) : 0;
+    if(count && !lists) throw std::runtime_error("Cannot allocate plant display lists");
+    GLuint next=lists;
+    const auto compile=[&](const auto& vertices,bool animated) {
+        for(std::size_t i=0;i<vertices.size();i+=foliageBatchVertices) {
+            glNewList(next++,GL_COMPILE);glBegin(GL_TRIANGLES);
+            for(std::size_t j=i;j<std::min(vertices.size(),i+foliageBatchVertices);++j) foliagePainter_.vertex(vertices[j],animated);
+            glEnd();glEndList();
+        }
+    };
+    compile(mesh.vertices,false);const auto movingFirst=next;compile(mesh.moving,true);
+    if(localPlantLists_) glDeleteLists(localPlantLists_,localPlantListCount_);
+    localPlantLists_=lists;localPlantListCount_=count;
+    adoptObjects(std::move(mesh),flora,lists,movingFirst);
     auto grass=makeGrassMesh(grassRoots_,anchor_,world.config().radius,flora);
     glNewList(grass_,GL_COMPILE);glBegin(GL_TRIANGLES);
     for(const auto& v:grass.vertices) grassPainter_.vertex(v);
     glEnd();glEndList();grassPainter_.adopt(std::move(grass));
 }
-void Renderer::adoptObjects(PlantMesh mesh,const Flora& flora) {
+void Renderer::adoptObjects(PlantMesh mesh,const Flora& flora,GLuint staticFirst,GLuint movingFirst) {
     foliageField_.synchronize(mesh.foliage);
-    foliagePainter_.adopt(std::move(mesh.moving),std::move(mesh.ranges),mesh.leafVertices);
+    foliagePainter_.adopt(mesh,staticFirst,movingFirst);
     ++shadowRevision_;discardSunUpload();
     if(sunChunks_) glDeleteLists(sunChunks_,sunChunksCount_);
     sunChunks_=0;sunChunksCount_=0;
@@ -429,7 +454,9 @@ void Renderer::prepareGrass(const World& world,const Explorer& explorer,const Si
         DrawTimer timer{timings_.foliage};
         const bool enabled=view.foliageEnabled && !explorer.underground() && world.modules().enabled(Module::SurfaceDetail);
         if(enabled) foliageField_.advance(modelDt,contactDt,velocity,explorer.up()*(radius+explorer.altitude()),contacts);
-        foliagePainter_.prepare(foliageField_,{east_,anchor_,north_,std::remainder(view.seconds*.8,tau),clamp(length(velocity)/12,0.,1.),enabled});
+        const ViewFrustum frustum(eye,local(explorer.forward()),local(explorer.up()),radians(72),
+            static_cast<double>(view.width)/view.height,explorer.underground() || explorer.underwater() ? .08 : .25,400000);
+        foliagePainter_.prepare(foliageField_,{east_,anchor_,north_,std::remainder(view.seconds*.8,tau),clamp(length(velocity)/12,0.,1.),enabled},frustum);
     }
     if(grassDraw_.visibility<=0) return;
     DrawTimer timer{timings_.grass};
@@ -505,18 +532,32 @@ void Renderer::drawShadows(Vec3 sun,bool textured) {
     glEnable(GL_POLYGON_OFFSET_FILL);glPolygonOffset(1,2);
     glColorMask(GL_FALSE,GL_FALSE,GL_FALSE,GL_FALSE);glDepthMask(GL_FALSE);glDepthFunc(GL_LESS);
     glEnable(GL_STENCIL_TEST);glStencilMask(255);glClearStencil(0);glClear(GL_STENCIL_BUFFER_BIT);glStencilFunc(GL_ALWAYS,0,255);
-    glEnable(GL_CULL_FACE);glFrontFace(GL_CCW);
+    glFrontFace(GL_CCW);
     // Closed-volume depth-fail counting also works with the eye inside a shadow.
-    const auto dynamicVolumes=[&] {glBegin(GL_TRIANGLES);for(const auto& t:deerShadows_) for(const auto p:{t.a,t.b,t.c}) glVertex3d(p.x,p.y,p.z);glEnd();};
-    glCullFace(GL_FRONT);glStencilOp(GL_KEEP,stencilWrap_ ? 0x8507 : GL_INCR,GL_KEEP);glCallList(shadows_);dynamicVolumes();
-    glCullFace(GL_BACK);glStencilOp(GL_KEEP,stencilWrap_ ? 0x8508 : GL_DECR,GL_KEEP);glCallList(shadows_);dynamicVolumes();
+    const auto volumes=[&] {
+        glCallList(shadows_);glBegin(GL_TRIANGLES);
+        for(const auto& t:deerShadows_) for(const auto p:{t.a,t.b,t.c}) glVertex3d(p.x,p.y,p.z);
+        glEnd();
+    };
+    if(stencilOpSeparate_ && stencilWrap_) {
+        // Wrapped addition and subtraction commute. Count both faces in one
+        // pass without transforming every branch shadow volume twice.
+        glDisable(GL_CULL_FACE);
+        stencilOpSeparate_(GL_BACK,GL_KEEP,0x8507,GL_KEEP);
+        stencilOpSeparate_(GL_FRONT,GL_KEEP,0x8508,GL_KEEP);
+        volumes();
+    } else {
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_FRONT);glStencilOp(GL_KEEP,stencilWrap_ ? 0x8507 : GL_INCR,GL_KEEP);volumes();
+        glCullFace(GL_BACK);glStencilOp(GL_KEEP,stencilWrap_ ? 0x8508 : GL_DECR,GL_KEEP);volumes();
+    }
     glPopAttrib();
     glPushAttrib(GL_ALL_ATTRIB_BITS);
     glEnable(GL_STENCIL_TEST);glStencilMask(0);glStencilFunc(GL_NOTEQUAL,0,255);glStencilOp(GL_KEEP,GL_KEEP,GL_KEEP);
     glDepthMask(GL_FALSE);glDepthFunc(GL_LEQUAL);glDisable(GL_BLEND);glEnable(GL_LIGHTING);glDisable(GL_LIGHT0);
     if(textured) {glEnable(GL_TEXTURE_2D);glBindTexture(GL_TEXTURE_2D,detailTexture_);}
     materials_.begin(textured);glCallList(terrain_);materials_.end();glDisable(GL_TEXTURE_2D);
-    glLightModeli(GL_LIGHT_MODEL_TWO_SIDE,GL_TRUE);glCallList(objects_);foliagePainter_.draw(foliage_,grassDraw_.wireframe ? 1 : 0);emitFauna();
+    glLightModeli(GL_LIGHT_MODEL_TWO_SIDE,GL_TRUE);foliagePainter_.draw(grassDraw_.wireframe ? 1 : 0);emitFauna();
     grassPainter_.draw(grass_,grassField_,grassDraw_);
     glPopAttrib();
 }
@@ -684,8 +725,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
         // Leaves and marine blades are thin sheets, lit from either side.
         glLightModeli(GL_LIGHT_MODEL_TWO_SIDE,GL_TRUE);
         prepareGrass(world,explorer,simulation,view,travelSpeed,eye);
-        glCallList(objects_);
-        {DrawTimer timer{timings_.foliage};foliagePainter_.draw(foliage_,wireframe ? 1 : 0);}
+        {DrawTimer timer{timings_.foliage};foliagePainter_.draw(wireframe ? 1 : 0);}
         prepareFauna(world,explorer,simulation.fauna,view.shadowsEnabled && shadowSupport() && !submerged && lighting_.direct>.002,sun.sunDirection);
         emitFauna();
         {DrawTimer timer{timings_.grass};grassPainter_.draw(grass_,grassField_,grassDraw_);}
@@ -720,7 +760,7 @@ void Renderer::draw(const World& world,const Explorer& explorer,const Simulation
                 glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT_AND_DIFFUSE,black);
                 glMaterialfv(GL_FRONT_AND_BACK,GL_EMISSION,cyan);
                 glPolygonMode(GL_FRONT_AND_BACK,GL_LINE);
-                if(wireframe) {glCallList(objects_);foliagePainter_.draw(foliage_,2);}
+                if(wireframe) foliagePainter_.draw(2);
                 glCallList(caves_);
                 glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
                 glMaterialfv(GL_FRONT_AND_BACK,GL_EMISSION,black);

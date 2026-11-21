@@ -6,39 +6,63 @@ namespace planet {
 PlantMesh makePlantMesh(std::span<const PlantSite> sites,Vec3 anchor,Vec3 eastAxis,Vec3 northAxis,double radius,const Flora& flora) {
     PlantMesh result;std::array<bool,speciesCount> species{};double nearest=1e30;
     const auto local=[&](Vec3 p){return Vec3{dot(p,eastAxis),dot(p,anchor),dot(p,northAxis)};};
-    std::vector<const PlantSite*> ordered;ordered.reserve(sites.size());
-    for(const auto& site:sites) ordered.push_back(&site);
-    std::stable_sort(ordered.begin(),ordered.end(),[&](const auto a,const auto b){return length(a->object.up-anchor)<length(b->object.up-anchor);});
-    for(const auto* entry:ordered) {
-        const auto& site=*entry;
+    struct Placed {const PlantSite* site;SurfaceObject object;double distance;std::pair<int,int> cell;int slot=-1;};
+    std::vector<Placed> ordered;ordered.reserve(sites.size());
+    for(const auto& site:sites) {
         const auto object=grownObject(site.object,&flora);if(object.height<.015) continue;
-        const double distance=length(object.up-anchor)*radius;
+        ordered.push_back({&site,object,length(object.up-anchor)*radius,
+            {static_cast<int>(std::floor(site.base.x/32)),static_cast<int>(std::floor(site.base.z/32))}});
+    }
+    std::stable_sort(ordered.begin(),ordered.end(),[](const auto& a,const auto& b){return a.distance<b.distance;});
+    for(auto& entry:ordered) {
+        if(entry.distance>=foliageMotionRadius || result.foliage.size()>=maximumFoliagePlants) break;
+        if(flexiblePlant(entry.object)) {
+            entry.slot=static_cast<int>(result.foliage.size());
+            result.foliage.push_back(foliageRoot(entry.object,radius));
+        }
+    }
+    // Near detail and springs have nearest-first priority. Pack the remaining
+    // geometry by map cell so a display list behind the camera can be skipped.
+    const auto distant=std::find_if(ordered.begin(),ordered.end(),[](const auto& p){return p.distance>=36;});
+    std::stable_sort(distant,ordered.end(),[](const auto& a,const auto& b){return a.cell<b.cell;});
+    for(const auto& entry:ordered) {
+        const auto& site=*entry.site;const auto& object=entry.object;const double distance=entry.distance;
         const auto up=local(object.up);
-        const bool simple=distance>(object.kind==DetailKind::Grass || object.kind==DetailKind::Shrub ? 24 : 60);
+        const double treeDetail=clamp(object.height*3.4,30.,60.);
+        const bool simple=distance>(object.kind==DetailKind::Tree ? treeDetail :
+            object.kind==DetailKind::Grass || object.kind==DetailKind::Shrub ? 24 : 60);
         const bool shadow=distance<=std::max(160.,std::min(240.,object.height*4)) && object.castsSurfaceShadow();
-        const bool flexible=flexiblePlant(object) && distance<foliageMotionRadius && result.foliage.size()<maximumFoliagePlants;
-        const int slot=flexible ? static_cast<int>(result.foliage.size()) : -1;
-        if(flexible) result.foliage.push_back(foliageRoot(object,radius));
+        const int slot=entry.slot;const bool flexible=slot>=0;
         auto& vertices=flexible ? result.moving : result.vertices;
         FoliageRange range{vertices.size(),0,slot};
+        double lowestShoot=object.height,highestShoot=0,shootRadius2=0;
         const bool leaves=flexible && distance<36 && result.leafVertices+4096<=maximumLeafVertices;
-        for(const auto& face:detailMesh(object,site.base,up,local(east(object.up)),simple,leaves)) {
+        for(const auto& face:detailMesh(object,site.base,up,local(east(object.up)),simple,leaves,shadow ? &result.casters : nullptr)) {
             if(face.microFoliage && result.leafVertices+3>maximumLeafVertices) continue;
             const auto& t=face.triangle;const auto n=normalized(cross(t.b-t.a,t.c-t.a));
             const double cover=smoothstep(0.,.08,site.snowDepth)*smoothstep(.15,.6,dot(n,up));
             const Color color{static_cast<float>(mix(face.color.r,.88,cover)),static_cast<float>(mix(face.color.g,.93,cover)),static_cast<float>(mix(face.color.b,.97,cover))};
             unsigned corner=0;const std::array flutter{face.flutter.x,face.flutter.y,face.flutter.z};
             for(const auto p:{t.a,t.b,t.c}) {
-                const double vertical=clamp(dot(p-site.base,up)/object.height,0.,1.);
+                const auto relative=p-site.base;const double above=dot(relative,up);
+                if(flexible && face.uv[0].cutout()) {
+                    lowestShoot=std::min(lowestShoot,above);highestShoot=std::max(highestShoot,above);
+                    shootRadius2=std::max(shootRadius2,dot(relative,relative)-above*above);
+                }
+                const double vertical=clamp(above/object.height,0.,1.);
                 const double flex=flexible ? std::pow(clamp((vertical-.1)/.9,0.,1.),2) : 0;
                 vertices.push_back({p,n,color,static_cast<float>(flex),static_cast<float>(object.height),
-                    flexible ? static_cast<float>(result.foliage.back().phase) : 0.f,
-                    static_cast<float>(flutter[corner++]),static_cast<float>(face.leafPhase),static_cast<float>(slot)});
+                    flexible ? static_cast<float>(result.foliage[static_cast<std::size_t>(slot)].phase) : 0.f,
+                    static_cast<float>(flutter[corner]),static_cast<float>(face.leafPhase),static_cast<float>(slot),face.uv[corner]});
+                ++corner;
             }
-            // Cached crown volumes approximate the canopy shadow. Fine leaves
-            // do not multiply the stencil geometry or force per-frame rebuilds.
+            // Textured shoots supply porous shadow silhouettes separately.
             if(face.microFoliage) result.leafVertices+=3;
-            else if(shadow) result.casters.push_back(t);
+            else if(shadow && face.castsShadow) result.casters.push_back(t);
+        }
+        if(shootRadius2>0) {
+            auto& root=result.foliage[static_cast<std::size_t>(slot)];
+            root.lower=std::max(0.,lowestShoot);root.height=highestShoot;root.radius=std::sqrt(shootRadius2);
         }
         range.count=vertices.size()-range.first;if(flexible) result.ranges.push_back(range);
         ++result.objects;
@@ -53,6 +77,7 @@ PlantMesh makePlantMesh(std::span<const PlantSite> sites,Vec3 anchor,Vec3 eastAx
         if(object.flowers.seeds>.02) ++result.seedHeads;
         if(distance<nearest) {nearest=distance;result.focus=object;}
     }
+    result.staticBatches=foliageBatches(result.vertices);result.movingBatches=foliageBatches(result.moving);
     result.species=static_cast<std::size_t>(std::count(species.begin(),species.end(),true));return result;
 }
 namespace {

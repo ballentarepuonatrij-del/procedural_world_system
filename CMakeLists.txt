@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(PlanetLab VERSION 0.26.0 LANGUAGES CXX)
+project(PlanetLab VERSION 0.27.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,7 +9,7 @@ option(PLANET_BUILD_DESKTOP "Build the Win32 explorer" ${WIN32})
 option(PLANET_SANITIZERS "Enable address and undefined behavior sanitizers" OFF)
 
 add_library(planet_core src/model.cpp src/landforms.cpp src/surface_detail.cpp src/flora.cpp src/navigation.cpp src/weather.cpp src/global_weather.cpp src/hydrology.cpp src/water_motion.cpp src/sound.cpp src/preferences.cpp src/globe_camera.cpp src/lighting.cpp src/shadows.cpp src/detail_mesh.cpp src/rivers.cpp src/terrain_mesh.cpp src/landscape.cpp src/fauna.cpp src/deer_mesh.cpp src/snow.cpp)
-target_sources(planet_core PRIVATE src/phenomena.cpp src/file_io.cpp src/state.cpp src/materials.cpp src/grass.cpp src/water_view.cpp src/ice.cpp src/ice_hydrology.cpp src/caustics.cpp src/foliage.cpp)
+target_sources(planet_core PRIVATE src/phenomena.cpp src/file_io.cpp src/state.cpp src/materials.cpp src/grass.cpp src/water_view.cpp src/ice.cpp src/ice_hydrology.cpp src/caustics.cpp src/foliage.cpp src/tree_mesh.cpp src/leaf_spray.cpp)
 find_package(Threads REQUIRED)
 target_link_libraries(planet_core PUBLIC Threads::Threads)
 target_include_directories(planet_core PUBLIC include)

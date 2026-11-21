@@ -143,7 +143,7 @@ private:
     void discardUpload();
     void buildGlobe(const World& world,double seconds);
     void buildObjects(const World& world,const Flora& flora);
-    void adoptObjects(PlantMesh mesh,const Flora& flora);
+    void adoptObjects(PlantMesh mesh,const Flora& flora,GLuint staticFirst,GLuint movingFirst);
     void drawSky(const World& world,const Explorer& explorer,const ViewState& view);
     void drawAtmosphericSky(const World& world,const Explorer& explorer,const ViewState& view);
     void drawDust(const World& world,const Explorer& explorer);
@@ -160,7 +160,8 @@ private:
     void drawHud(const World& world,const Explorer& explorer,const Simulation& simulation,const ViewState& view);
     void text(float x,float y,const std::string& value,Color color,bool large=false);
     GLuint terrain_=0, terrainGrid_=0, globe_=0, font_=0, headingFont_=0, detailTexture_=0;
-    GLuint objects_=0,caves_=0,grass_=0,foliage_=0;
+    GLuint caves_=0,grass_=0,localPlantLists_=0;
+    GLsizei localPlantListCount_=0;
     std::size_t caveCount_=0;
     std::size_t detailCount_=0;
     std::vector<PlantSite> objectSites_;
@@ -215,6 +216,8 @@ private:
     GLuint shadows_=0;
     Vec3 shadowSun_{};
     bool shadowDirty_=true,shadowsUsed_=false,stencilWrap_=false;
+    using StencilOpSeparate=void(APIENTRY*)(GLenum,GLenum,GLenum,GLenum);
+    StencilOpSeparate stencilOpSeparate_=nullptr;
     GLint stencilBits_=0;
     std::size_t starCount_=0,shadowCount_=0;
     struct SunShadow {Vec3 sun;std::vector<Triangle> volume;std::uint64_t revision=0;};

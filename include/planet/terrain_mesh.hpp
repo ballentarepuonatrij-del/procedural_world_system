@@ -14,6 +14,7 @@ struct SurfaceWaterVertex {Vec3 up,position;double altitude;bool available,river
 struct PlantSite {SurfaceObject object;Vec3 base;double snowDepth=0;};
 struct PlantMesh {
     std::vector<FoliageVertex> vertices,moving;
+    std::vector<FoliageBatch> staticBatches,movingBatches;
     std::vector<FoliageRoot> foliage;
     std::vector<FoliageRange> ranges;
     std::size_t leafVertices=0;

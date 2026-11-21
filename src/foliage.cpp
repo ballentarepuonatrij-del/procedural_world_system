@@ -4,6 +4,29 @@
 #include <unordered_map>
 
 namespace planet {
+double FoliageBatch::sweptRadius(double bend,double windStrength) const {
+    // Includes the quadratic vertical deflection, RGBA16 bend quantization,
+    // and the length of the (0.3, 1, 0.2) flutter direction in both backends.
+    return radius+(bend+.5*bend*bend+.00006)*flexHeight+1.07*windStrength*flutter;
+}
+std::vector<FoliageBatch> foliageBatches(std::span<const FoliageVertex> vertices) {
+    std::vector<FoliageBatch> batches;
+    for(std::size_t i=0;i<vertices.size();i+=foliageBatchVertices) {
+        const auto block=vertices.subspan(i,std::min(foliageBatchVertices,vertices.size()-i));
+        auto low=block.front().position,high=low;
+        FoliageBatch batch;batch.count=block.size();
+        for(const auto& v:block) {
+            const auto p=v.position;
+            low={std::min(low.x,p.x),std::min(low.y,p.y),std::min(low.z,p.z)};
+            high={std::max(high.x,p.x),std::max(high.y,p.y),std::max(high.z,p.z)};
+            batch.flexHeight=std::max(batch.flexHeight,static_cast<double>(v.flex)*v.height);
+            batch.flutter=std::max(batch.flutter,static_cast<double>(v.flutter));
+        }
+        batch.center=(low+high)*.5;batch.radius=length(high-low)*.5;
+        batches.push_back(batch);
+    }
+    return batches;
+}
 bool flexiblePlant(const SurfaceObject& o) {
     return (o.kind==DetailKind::Tree || o.kind==DetailKind::Shrub) && o.height>.03 &&
         o.plant.stage!=GrowthStage::Dead && !plantTraits(o.species).aquatic;

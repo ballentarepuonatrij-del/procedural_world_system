@@ -7,9 +7,9 @@ std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up
     right=rotate(right,up,object.angle);
     const Vec3 back=cross(right,up);
     const auto transform=[&](Vec3 p) { return origin+right*p.x+up*p.y+back*p.z; };
-    const auto triangle=[&](Vec3 a,Vec3 b,Vec3 c,Color color,Vec3 flutter=Vec3{},double phase=0.,bool micro=false) {
+    const auto triangle=[&](Vec3 a,Vec3 b,Vec3 c,Color color,Vec3 flutter=Vec3{},double phase=0.) {
         a=transform(a); b=transform(b); c=transform(c);
-        if(length(cross(b-a,c-a))>1e-10) faces.push_back({{a,b,c,sheets},color,flutter,phase,micro});
+        if(length(cross(b-a,c-a))>1e-10) faces.push_back({{a,b,c,sheets},color,flutter,phase});
     };
     const auto tube=[&](Vec3 a,Vec3 b,double base,double tip,Color color) {
         const bool wasSheet=sheets;sheets=false;
@@ -26,15 +26,14 @@ std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up
         }
         sheets=wasSheet;
     };
-    const auto crown=[&](Vec3 center,Vec3 scale,Color color,std::uint64_t salt) {
+    const auto mound=[&](Vec3 center,Vec3 scale,Color color,std::uint64_t salt) {
         const int rings=simple ? 3 : 4, sides=simple ? 6 : 8;
         const auto vertex=[&](int row,int column) {
             column%=sides;
             const double lat=-pi/2+pi*row/rings, angle=tau*column/sides;
             const double rough=0.82+0.30*randomUnit(object.id+salt+static_cast<std::uint64_t>(row*17+column));
-            const double core=leafDetail && object.kind==DetailKind::Shrub ? .82 : 1.;
             return center+Vec3{std::cos(lat)*std::cos(angle)*scale.x*rough,
-                               std::sin(lat)*scale.y,std::cos(lat)*std::sin(angle)*scale.z*rough}*core;
+                               std::sin(lat)*scale.y,std::cos(lat)*std::sin(angle)*scale.z*rough};
         };
         for(int row=0;row<rings;++row) for(int column=0;column<sides;++column) {
             const float tint=static_cast<float>(0.83+0.22*randomUnit(object.id+salt+static_cast<std::uint64_t>(row*31+column)));
@@ -42,32 +41,6 @@ std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up
             const auto a=vertex(row,column),b=vertex(row,column+1),c=vertex(row+1,column),d=vertex(row+1,column+1);
             if(row>0) triangle(a,c,b,shaded);
             if(row+1<rings) triangle(b,c,d,shaded);
-        }
-        if(leafDetail && object.kind==DetailKind::Shrub && object.plant.stage!=GrowthStage::Dead) {
-            // Folded leaf clusters break the crown silhouette nearby. Their
-            // stems share the branch deformation; only the free tips flutter.
-            const bool previous=sheets;sheets=true;
-            constexpr int count=72;
-            const double size=clamp(scale.x*.22,.065,.55);
-            for(int i=0;i<count;++i) {
-                const auto key=object.id+salt+static_cast<std::uint64_t>(i*71+4100);
-                const int row=static_cast<int>(randomUnit(key)*rings),column=static_cast<int>(randomUnit(key+1)*sides);
-                auto a=vertex(row,column),b=vertex(row+1,column),c=vertex(row,column+1);
-                if(row==0 || (row+1<rings && randomUnit(key+3)>.5)) {a=vertex(row,column+1);b=vertex(row+1,column);c=vertex(row+1,column+1);}
-                const double u=std::sqrt(randomUnit(key+4)),v=randomUnit(key+5);
-                const auto base=a*(1-u)+b*(u*(1-v))+c*(u*v);
-                const auto outward=normalized(base-center);
-                const auto direction=normalized(outward+Vec3{.2,.45,.1}),side=normalized(cross(direction,Vec3{.2,1,.3}));
-                const auto mid=base+direction*(size*.6),tip=base+direction*(size*1.5);
-                const auto ridge=mid+cross(side,direction)*(size*.15);
-                const Color tint{color.r*1.06f,color.g*1.08f,color.b*.92f};
-                const double phase=tau*randomUnit(key+2),amplitude=size*.16;
-                triangle(base,mid+side*(size*.42),ridge,tint,{0,amplitude*.7,amplitude*.5},phase,true);
-                triangle(base,ridge,mid-side*(size*.42),color,{0,amplitude*.5,amplitude*.7},phase,true);
-                triangle(ridge,mid+side*(size*.42),tip,tint,{amplitude*.5,amplitude*.7,amplitude},phase,true);
-                triangle(ridge,tip,mid-side*(size*.42),color,{amplitude*.5,amplitude,amplitude*.7},phase,true);
-            }
-            sheets=previous;
         }
     };
     const double h=object.height,r=object.radius;
@@ -94,6 +67,26 @@ std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up
         if(flowers.bloom<.015) {bead(center,size*.35,size*.55,flowers.seeds>flowers.buds ? seedColor : green);return;}
         const float open=static_cast<float>(flowers.bloom);
         const Color color{floral.petals.r*open+green.r*(1-open),floral.petals.g*open+green.g*(1-open),floral.petals.b*open+green.b*(1-open)};
+        if(object.species==Species::Heather) {
+            // A short pedicel supports a nodding four-lobed bell at its neck.
+            const auto angle=tau*randomUnit(object.id+salt);
+            const Vec3 outward{std::cos(angle),0,std::sin(angle)},side{-outward.z,0,outward.x};
+            const auto neck=center+outward*(size*.60)+Vec3{0,size*.17,0};
+            const auto axis=normalized(outward*.5-Vec3{0,1,0}),across=cross(axis,side);
+            const auto shoulder=neck+axis*(size*.62),mouth=neck+axis*(size*1.19);
+            const bool previous=sheets;sheets=true;
+            triangle(center-side*(size*.08),center+side*(size*.08),neck,green);
+            const int sides=simple ? 3 : 4;
+            for(int i=0;i<sides;++i) {
+                const double a=tau*i/sides,b=tau*(i+1)/sides;
+                const auto u=side*std::cos(a)+across*std::sin(a),v=side*std::cos(b)+across*std::sin(b);
+                const auto left=shoulder+u*(size*.59),rightRim=shoulder+v*(size*.59);
+                const auto lip=mouth+u*(size*.37),nextLip=mouth+v*(size*.37);
+                triangle(neck,rightRim,left,color);triangle(left,rightRim,lip,color);triangle(rightRim,nextLip,lip,color);
+                if(!simple) triangle(lip,nextLip,mouth+(u+v)*(size*.28)+axis*(size*.20),color);
+            }
+            sheets=previous;return;
+        }
         if(floral.form==FlowerForm::Ball) {
             bead(center,size,size*.8,color);
             if(!simple) for(int i=0;i<6;++i) bead(center+Vec3{size*.65*std::cos(tau*i/6),size*.25,size*.65*std::sin(tau*i/6)},size*.35,size*.45,color);
@@ -134,7 +127,7 @@ std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up
         return faces;
     }
     if(object.species==Species::Sphagnum || object.species==Species::ForestMoss) {
-        crown({0,h*.35,0},{r,h*.65,r*.85},leaves,880);return faces;
+        mound({0,h*.35,0},{r,h*.65,r*.85},leaves,880);return faces;
     }
     if(object.species==Species::Palm || object.species==Species::TreeFern) {
         const bool palm=object.species==Species::Palm;
@@ -244,12 +237,14 @@ std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up
     }
     switch(object.kind) {
         case DetailKind::Rock:
-            crown({0,h*0.32,0},{r,h*0.68,r*0.82},{0.46f*variation,0.43f*variation,0.36f*variation},101);
+            mound({0,h*0.32,0},{r,h*0.68,r*0.82},{0.46f*variation,0.43f*variation,0.36f*variation},101);
             break;
+        case DetailKind::Shrub:
         case DetailKind::Tree: {
-            const Color bark=object.species==Species::Birch ? Color{.78f,.77f,.69f} : Color{.27f,.19f,.12f};
+            const Color bark=object.species==Species::Birch ? Color{.78f,.77f,.69f} :
+                object.kind==DetailKind::Shrub ? Color{.37f,.255f,.16f} : Color{.27f,.19f,.12f};
             const auto firstShadow=sprayShadows ? sprayShadows->size() : 0;
-            const auto joints=buildTreeBranches(object,bark,leaves,simple,leafDetail,faces,sprayShadows);
+            const auto joints=buildBranches(object,bark,leaves,simple,leafDetail,faces,sprayShadows);
             const auto toScene=[&](Triangle& t) {
                 t.a=transform(t.a);t.b=transform(t.b);t.c=transform(t.c);
             };
@@ -279,21 +274,16 @@ std::vector<MeshFace> detailMesh(const SurfaceObject& object,Vec3 origin,Vec3 up
                 }
             }
             if(floral.form!=FlowerForm::None) {
+                const auto firstFlower=faces.size();
                 for(std::size_t i=0;i<joints.floweringTips.size();++i)
                     flower(joints.floweringTips[i],floral.radius,1200+i);
+                // The neighbouring heather spray already casts a porous shadow
+                // for the raceme, including its centimetre-scale bells.
+                if(object.species==Species::Heather)
+                    for(std::size_t i=firstFlower;i<faces.size();++i) faces[i].castsShadow=false;
             }
             break;
         }
-        case DetailKind::Shrub:
-            crown({0,h*0.43,0},{r,h*0.57,r},leaves,500);
-            if(object.species==Species::Heather) for(int i=0;i<(simple ? 6 : 16);++i) {
-                const int sides=simple ? 6 : 8,row=simple ? 2 : 2+i/8,column=i%sides;
-                const double lat=-pi/2+pi*row/(simple ? 3 : 4),angle=tau*column/sides;
-                const double rough=.82+.30*randomUnit(object.id+500+static_cast<std::uint64_t>(row*17+column));
-                const Vec3 tip{std::cos(lat)*std::cos(angle)*r*rough*1.02,h*(.43+.57*std::sin(lat)),std::cos(lat)*std::sin(angle)*r*rough*1.02};
-                flower(tip,floral.radius,static_cast<unsigned>(700+i));
-            }
-            break;
         case DetailKind::Grass:
             sheets=true;
             if(object.species>=Species::Daisy) {

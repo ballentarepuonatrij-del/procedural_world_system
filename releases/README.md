@@ -1,10 +1,16 @@
-# Скачать PlanetLab 0.27.0
+# Скачать PlanetLab 0.28.0
 
-- [Сборка для Windows 10/11 x64](https://github.com/ballentarepuonatrij-del/procedural_world_system/raw/refs/heads/main/releases/PlanetLab-0.27.0-win64.zip)
-- [Исходники C++20 для Visual Studio 2026](https://github.com/ballentarepuonatrij-del/procedural_world_system/raw/refs/heads/main/releases/PlanetLab-0.27.0-source.zip)
+- [Сборка для Windows 10/11 x64](https://github.com/ballentarepuonatrij-del/procedural_world_system/raw/refs/heads/main/releases/PlanetLab-0.28.0-win64.zip)
+- [Исходники C++20 для Visual Studio 2026](https://github.com/ballentarepuonatrij-del/procedural_world_system/raw/refs/heads/main/releases/PlanetLab-0.28.0-source.zip)
 - [Контрольные суммы SHA-256](SHA256SUMS.txt)
 
-Размер загрузки для Windows составляет около 2,6 МБ. Распакуйте архив и запустите `PlanetLab/PlanetLab.exe`. Осмотреть лиственные деревья можно командой `PlanetLab.exe --grove --solar-hour 12`, хвойный лес — командой `PlanetLab.exe --forest taiga`. Клавиша **X** переключает леса, **P** ставит время на паузу.
+Распакуйте архив и запустите `PlanetLab/PlanetLab.exe`. Клавиша **F8** переносит на луг с кустарниками. Туда также можно попасть командой `PlanetLab.exe --meadow`. Клавиша **P** ставит время на паузу.
+
+## Ветвистые кустарники 0.28.0
+
+У можжевельника видны расходящиеся от земли стебли с хвоей. У вереска отдельные восходящие побеги в сезон цветения покрываются колокольчиками. Оба вида раскачиваются на ветру и отклоняются при проходе. На сравнении каждый куст снят с одной точки в одинаковых условиях.
+
+![Можжевельник и цветущий вереск до и после обновления](PlanetLab-0.28.0-shrubs.png)
 
 ## Ветвистые деревья 0.27.0
 
@@ -16,7 +22,7 @@
 
 [Проверки сборки](../docs/VALIDATION.md) · [Замеры производительности](../docs/PERFORMANCE.md) · [Модель деревьев](../docs/SCIENCE.md)
 
-Предыдущие версии доступны в архиве. [Windows 0.26.0](PlanetLab-0.26.0-win64.zip) · [Исходники 0.26.0](PlanetLab-0.26.0-source.zip) · [Windows 0.25.0](PlanetLab-0.25.0-win64.zip) · [Исходники 0.25.0](PlanetLab-0.25.0-source.zip) · [Windows 0.24.0](PlanetLab-0.24.0-win64.zip) · [Исходники 0.24.0](PlanetLab-0.24.0-source.zip)
+Предыдущие версии доступны в архиве. [Windows 0.27.0](PlanetLab-0.27.0-win64.zip) · [Исходники 0.27.0](PlanetLab-0.27.0-source.zip) · [Windows 0.26.0](PlanetLab-0.26.0-win64.zip) · [Исходники 0.26.0](PlanetLab-0.26.0-source.zip) · [Windows 0.25.0](PlanetLab-0.25.0-win64.zip) · [Исходники 0.25.0](PlanetLab-0.25.0-source.zip) · [Windows 0.24.0](PlanetLab-0.24.0-win64.zip) · [Исходники 0.24.0](PlanetLab-0.24.0-source.zip)
 
 ## Листва 0.26.0
 

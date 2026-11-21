@@ -2,6 +2,18 @@ SurfaceObject foliageTestPlant(Species species,DetailKind kind,double height=2) 
     SurfaceObject o;o.id=490;o.species=species;o.kind=kind;o.up={0,1,0};o.height=height;o.radius=height*.35;o.elevation=200;
     o.plant={1000,1,1,GrowthStage::Mature,0};o.evergreen=coniferSpecies(species);return o;
 }
+double distanceToWood(Vec3 point,std::span<const Triangle> wood) {
+    double nearest=1e9;
+    for(const auto& t:wood) {
+        const std::array corners{t.a,t.b,t.c};
+        for(std::size_t i=0;i<3;++i) {
+            const auto a=corners[i],edge=corners[(i+1)%3]-a;
+            const double k=clamp(dot(point-a,edge)/dot(edge,edge),0.,1.);
+            nearest=std::min(nearest,length(point-a-edge*k));
+        }
+    }
+    return nearest;
+}
 void registerFoliageTests() {
     test("foliage","Cutout shoots have a rooted stem, porous leaf silhouettes and a solid material tile",[] {
         const auto atlas=makeLeafAtlas();
@@ -44,23 +56,89 @@ void registerFoliageTests() {
                     }
                 }
                 require(roots.size()>8 && lowBranch && highBranch && !shadows.empty(),"Wood and foliage span multiple crown heights");
-                for(const auto root:roots) {
-                    double nearest=1e9;
-                    for(const auto& t:wood) {
-                        const std::array corners{t.a,t.b,t.c};
-                        for(std::size_t i=0;i<3;++i) {
-                            const auto a=corners[i],edge=corners[(i+1)%3]-a;
-                            const double k=clamp(dot(root-a,edge)/dot(edge,edge),0.,1.);
-                            nearest=std::min(nearest,length(root-a-edge*k));
-                        }
-                    }
-                    require(nearest<o.height*.044,"Each visible shoot starts on a woody limb");
-                }
+                for(const auto root:roots)
+                    require(distanceToWood(root,wood)<o.height*.044,"Each visible shoot starts on a woody limb");
             }
             auto dead=o;dead.plant.stage=GrowthStage::Dead;std::vector<Triangle> shadows;
             const auto bare=detailMesh(dead,{},dead.up,{1,0,0},false,true,&shadows);
             require(!bare.empty() && shadows.empty(),"Dead wood has no canopy shadow");
             for(const auto& f:bare) require(f.uv[0].u>.5f && f.uv[0].v>.5f,"Dead trees retain only bare wood");
+        }
+    });
+    test("foliage","Shrub detail levels retain rooted stems and the same leaf attachments",[] {
+        for(auto species:{Species::Juniper,Species::Heather}) {
+            auto o=foliageTestPlant(species,DetailKind::Shrub,plantTraits(species).height);
+            o.radius=o.height*plantTraits(species).widthRatio;o.angle=.73;
+            const auto uv=leafCoordinates(species==Species::Juniper ? LeafSpray::Needles : LeafSpray::Narrow,.5f,0);
+            std::vector<Vec3> nearShoots;
+            for(int level:{2,1,0}) {
+                std::vector<Triangle> shade,wood;std::vector<Vec3> shoots,feet;
+                const auto faces=detailMesh(o,{},o.up,{1,0,0},level==0,level==2,&shade);
+                for(const auto& f:faces) {
+                    const auto& t=f.triangle;
+                    require(length(cross(t.b-t.a,t.c-t.a))>1e-10,"Nondegenerate shrub surface");
+                    if(f.uv[0].cutout()) {
+                        require(f.uv[0].u==uv.u && f.uv[0].v==uv.v && t.twoSided && !f.castsShadow,"Porous species-specific shoot");
+                        require(f.flutter.x==0 && length(f.flutter)>0,"Stem attachment anchored, leaf tips free");
+                        if(shoots.empty() || length(shoots.back()-t.a)>1e-10) shoots.push_back(t.a);
+                    } else {
+                        require(f.color.r>f.color.g,"Opaque shrub material is wood");
+                        wood.push_back(t);
+                        for(auto p:{t.a,t.b,t.c}) if(p.y<0 &&
+                            std::none_of(feet.begin(),feet.end(),[&](Vec3 v){return length(p-v)<o.radius*.055;})) feet.push_back(p);
+                    }
+                }
+                require(feet.size()>=3 && shoots.size()>=8 && !shade.empty(),"Multiple basal stems carry foliage and cast shadows");
+                require(faces.size()<(level==0 ? 88u : 600u),"Close and distant meshes fit the shrub budget");
+                for(auto joint:shoots) {
+                    require(distanceToWood(joint,wood)<o.height*.026,"Shoot grows on wood");
+                    if(level<2) require(std::any_of(nearShoots.begin(),nearShoots.end(),[&](Vec3 v){return length(v-joint)<1e-10;}),
+                        "LOD reuses existing attachment positions");
+                }
+                if(level==2) nearShoots=std::move(shoots);
+            }
+            o.plant.stage=GrowthStage::Dead;std::vector<Triangle> shade;
+            const auto bare=detailMesh(o,{},o.up,{1,0,0},false,true,&shade);
+            require(!bare.empty() && shade.empty(),"Dead shrubs retain wood and lose shoot shadows");
+            for(const auto& f:bare) require(!f.uv[0].cutout() && length(f.flutter)==0,"Dead shrub has no flexible foliage");
+        }
+    });
+    test("foliage","Heather buds, bells and seed heads attach to the seasonal stems",[] {
+        auto o=foliageTestPlant(Species::Heather,DetailKind::Shrub,.85);o.radius=o.height*.8;
+        for(bool simple:{false,true}) {
+            o.flowers={};const auto rest=detailMesh(o,{},o.up,{1,0,0},simple,true);
+            std::vector<Triangle> wood;for(const auto& f:rest) if(!f.uv[0].cutout()) wood.push_back(f.triangle);
+            for(auto phase:{FlowerState{1,0,0},FlowerState{0,1,0},FlowerState{0,0,1}}) {
+                o.flowers=phase;const auto flowering=detailMesh(o,{},o.up,{1,0,0},simple,true);
+                require(flowering.size()>rest.size(),"Phenology produces flower heads in each LOD");
+                for(std::size_t i=rest.size();i<flowering.size();++i) {
+                    const auto& f=flowering[i];require(!f.castsShadow,"Raceme uses the adjacent spray shadow");
+                    for(auto p:{f.triangle.a,f.triangle.b,f.triangle.c})
+                        require(distanceToWood(p,wood)<2*flowerTraits(o.species).radius,"Blooms stay on flowering branches");
+                }
+            }
+        }
+    });
+    test("foliage","Contacts follow the rendered shrub envelope",[] {
+        for(auto species:{Species::Juniper,Species::Heather}) {
+            auto o=foliageTestPlant(species,DetailKind::Shrub,plantTraits(species).height);
+            o.id=species==Species::Juniper ? 7385385504303938652ULL : 5272359285524125687ULL;
+            o.suitability=1;o.radius=o.height*plantTraits(species).widthRatio;o.elevation=0;
+            const PlantSite site{o,{}};Flora flora;
+            const auto mesh=makePlantMesh(std::span(&site,1),o.up,{1,0,0},{0,0,1},1000,flora);
+            require(mesh.foliage.size()==1 && !mesh.moving.empty(),"Live shrub enters the dynamic mesh");
+            const auto& r=mesh.foliage.front();
+            for(const auto& v:mesh.moving) if(v.uv.cutout()) {
+                require(v.position.y>=r.lower-1e-8 && v.position.y<=r.height+1e-8 &&
+                    std::hypot(v.position.x,v.position.z)<=r.radius+1e-8,"Contact bounds enclose all leaf tips");
+            }
+            const auto foot=r.position+Vec3{r.radius*.60,r.lower,0};
+            FoliageField field;field.synchronize(mesh.foliage);
+            const std::array pass{GrassCollider{foot-Vec3{0,0,1},foot+Vec3{0,0,1},.45,1.8}};
+            field.advance(0,.2,{},foot,pass);require(field.contacts()==1,"Swept body reaches shrub at shoot height");
+            const auto high=r.position+r.up*(r.height+1);
+            field.clear();field.synchronize(mesh.foliage);const std::array over{GrassCollider{high,high,.45,1.8}};
+            field.advance(0,.2,{},high,over);require(field.contacts()==0,"Body above the shrub misses its shoots");
         }
     });
     test("foliage","Visibility bounds include every bent triangle on chunk boundaries",[] {

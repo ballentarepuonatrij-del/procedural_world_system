@@ -2,10 +2,10 @@
 #include "planet/shadows.hpp"
 
 namespace planet {
-// Branch attachments in tree-local metres for flowers and hanging vines.
-struct TreeJoints {
+// Attachments in plant-local metres for flowers and hanging vines.
+struct BranchJoints {
     std::vector<Vec3> floweringTips,vineAnchors;
 };
-TreeJoints buildTreeBranches(const SurfaceObject& object,Color bark,Color leaves,bool simple,bool fine,
-                             std::vector<MeshFace>& faces,std::vector<Triangle>* sprayShadows);
+BranchJoints buildBranches(const SurfaceObject& object,Color bark,Color leaves,bool simple,bool fine,
+                           std::vector<MeshFace>& faces,std::vector<Triangle>* sprayShadows);
 } // namespace planet

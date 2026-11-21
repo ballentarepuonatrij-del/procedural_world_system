@@ -17,19 +17,22 @@ struct Limb {
     }
 };
 
-class TreeBuilder {
+class BranchBuilder {
 public:
-    TreeBuilder(const SurfaceObject& object,Color bark,Color leaves,bool simple,bool fine,
+    BranchBuilder(const SurfaceObject& object,Color bark,Color leaves,bool simple,bool fine,
                 std::vector<MeshFace>& faces,std::vector<Triangle>* shadows)
         : plant(object),wood(bark),green(leaves),far(simple),extra(fine && !simple),
           mesh(faces),shade(shadows),h(object.height),r(object.radius),
           seed(hash64(object.id)^hash64(object.plant.generation)) {}
-    TreeJoints grow() {
-        const auto lean=radial(tau*randomUnit(seed))*r*(.05+.10*randomUnit(seed+1));
-        const Limb trunk{{0,-std::min(.16,.024*h),0},lean*.30+vertical*(h*.44),lean+vertical*(h*.95)};
-        limbMesh(trunk,plant.collisionRadius(),far ? 3 : 6,true);
-        if(plant.evergreen) conifer(trunk);
-        else broadleaf(trunk);
+    BranchJoints grow() {
+        if(plant.kind==DetailKind::Shrub) shrub();
+        else {
+            const auto lean=radial(tau*randomUnit(seed))*r*(.05+.10*randomUnit(seed+1));
+            const Limb trunk{{0,-std::min(.16,.024*h),0},lean*.30+vertical*(h*.44),lean+vertical*(h*.95)};
+            limbMesh(trunk,plant.collisionRadius(),far ? 3 : 6,true);
+            if(plant.evergreen) conifer(trunk);
+            else broadleaf(trunk);
+        }
         return std::move(joints);
     }
 private:
@@ -40,7 +43,7 @@ private:
     std::vector<Triangle>* shade;
     double h,r;
     std::uint64_t seed;
-    TreeJoints joints;
+    BranchJoints joints;
 
     void woodFace(Vec3 a,Vec3 b,Vec3 c,bool casts,bool sheet=false) {
         mesh.push_back({{a,b,c,sheet},wood,{},0,false,casts});
@@ -68,13 +71,13 @@ private:
             woodFace(middle[j],middle[k],limb.tip,casts);
         }
     }
-    void twigMesh(const Limb& twig,double radius) {
+    void twigMesh(const Limb& twig,double radius,bool casts=false) {
         // A continuous, tapered strip for subpixel forks. At the elbow both
         // segments share an edge, including when the branch droops.
         const auto axis=normalized(twig.tip-twig.root);
         const auto side=normalized(vertical-axis*axis.y)*radius;
         const auto a=twig.root-side,b=twig.root+side,c=twig.bend+side*.57,d=twig.bend-side*.57;
-        woodFace(a,b,c,false,true);woodFace(a,c,d,false,true);woodFace(d,c,twig.tip,false,true);
+        woodFace(a,b,c,casts,true);woodFace(a,c,d,casts,true);woodFace(d,c,twig.tip,casts,true);
     }
 
     void spray(Vec3 joint,Vec3 extent,double width,LeafSpray kind,std::uint64_t key,bool detail,bool caster) {
@@ -95,14 +98,105 @@ private:
         const auto uv=[&](float u,float v){return leafCoordinates(kind,u,v);};
         const auto rootUV=uv(.5f,0),leftUV=uv(0,.15f),rightUV=uv(1,.15f);
         const auto leftTipUV=uv(0,1),rightTipUV=uv(1,1);
-        mesh.push_back({{joint,left,leftEnd,true},color,{0,0,flutter},phase,detail,false,{rootUV,leftUV,leftTipUV}});
-        mesh.push_back({{joint,leftEnd,rightEnd,true},color,{0,flutter,flutter},phase,detail,false,{rootUV,leftTipUV,rightTipUV}});
-        mesh.push_back({{joint,rightEnd,right,true},color,{0,flutter,0},phase,detail,false,{rootUV,rightTipUV,rightUV}});
+        if(far && plant.kind==DetailKind::Shrub) {
+            // A folded pair follows the outer leaves of a distant shoot. Keep
+            // its attachment, centre line and leaf texture at the same scale.
+            const auto middle=joint+extent*.4;
+            const auto tipUV=uv(.5f,1);
+            mesh.push_back({{joint,middle-side+fold,tip,true},color,{0,flutter*.4,flutter},phase,detail,false,{rootUV,uv(0,.4f),tipUV}});
+            mesh.push_back({{joint,tip,middle+side+fold,true},color,{0,flutter,flutter*.4},phase,detail,false,{rootUV,tipUV,uv(1,.4f)}});
+        } else {
+            mesh.push_back({{joint,left,leftEnd,true},color,{0,0,flutter},phase,detail,false,{rootUV,leftUV,leftTipUV}});
+            mesh.push_back({{joint,leftEnd,rightEnd,true},color,{0,flutter,flutter},phase,detail,false,{rootUV,leftTipUV,rightTipUV}});
+            mesh.push_back({{joint,rightEnd,right,true},color,{0,flutter,0},phase,detail,false,{rootUV,rightTipUV,rightUV}});
+        }
         if(shade && caster) {
-            // Use an attached, pointed cluster for the cached stencil volume.
-            const auto base=joint+extent*.17,end=tip-extent*.11,mid=joint+extent*.53;
-            shade->push_back({base,mid-side*.56,end,true});
-            shade->push_back({base,end,mid+side*.53,true});
+            const auto end=tip-extent*.11,mid=joint+extent*.53;
+            if(plant.kind==DetailKind::Shrub) {
+                // Let light through the spray. Add the smaller side shadow up close.
+                shade->push_back({joint,mid-side*.28,end,true});
+                if(!far) shade->push_back({joint+extent*.31,mid+side*.39,tip-extent*.24,true});
+            } else {
+                const auto base=joint+extent*.17;
+                shade->push_back({base,mid-side*.56,end,true});
+                shade->push_back({base,end,mid+side*.53,true});
+            }
+        }
+    }
+
+    void heatherSpike(Vec3 base,Vec3 reach,double girth,bool flowering) {
+        // The flower-bearing end of the shoot extends past the last leaves.
+        const Limb stalk{base,base+reach*.5-vertical*(length(reach)*.035),base+reach};
+        twigMesh(stalk,girth);
+        if(!flowering) return;
+        if(!far) for(double t:{.61,.74,.87}) joints.floweringTips.push_back(stalk.at(t));
+        joints.floweringTips.push_back(stalk.tip);
+    }
+
+    void shrub() {
+        const bool heather=plant.species==Species::Heather;
+        const auto kind=heather ? LeafSpray::Narrow : LeafSpray::Needles;
+        const auto& flowers=plant.flowers;
+        const bool flowering=heather && plant.plant.foliage>0 && plant.plant.stage!=GrowthStage::Dead &&
+            std::max({flowers.buds,flowers.bloom,flowers.seeds})>=.015;
+        const int stems=plant.plant.stage==GrowthStage::Seedling ? 4 : heather ? 11 : 9;
+        const double rotation=tau*randomUnit(seed+19);
+        for(int i=0;i<stems;i+=far ? 2 : 1) {
+            const auto key=hash64(seed+static_cast<unsigned>(i)+201);
+            const double angle=rotation+goldenAngle*i+(randomUnit(key)-.5)*.63;
+            const auto out=radial(angle),side=radial(angle+pi/2);
+            const bool inner=i%3==0;
+            const double reach=r*((inner ? .22 : .56)+.22*randomUnit(key+1));
+            const double rise=h*((inner ? .68 : .40)+.13*randomUnit(key+2));
+            const auto base=out*(r*(.035+.12*randomUnit(key+3)))-vertical*std::min(.055,h*.045);
+            const auto bend=base+out*(reach*(heather ? .64 : .43))+vertical*(rise*(heather ? .30 : .41));
+            const auto top=base+out*reach+side*(r*.22*(randomUnit(key+4)-.5))+vertical*rise;
+            const Limb stem{base,bend,top};
+            const double girth=h*(heather ? .012 : .021)*(.8+.35*randomUnit(key+5));
+            if(far) {
+                twigMesh(stem,girth);
+                if(shade && i%4==0) shade->push_back({base-side*girth,base+side*girth,top,true});
+            } else limbMesh(stem,girth,3,i%3==0);
+
+            // Heather tips turn upwards from low spreading stems. Juniper
+            // carries wider, outward-facing sprays along each ascending limb.
+            const auto terminal=normalized(out*(inner ? .27 : .66)+vertical*(heather ? 1.6 : .86));
+            const double terminalLength=h*((heather ? .23 : .28)+.10*randomUnit(key+6));
+            const double tipLength=terminalLength*(far ? 1.16 : 1.);
+            // The leafy upper length overlaps the basal wood and the terminal
+            // spray. This also provides foliage through the middle of the bush.
+            spray(bend,top-bend+terminal*(tipLength*.20),h*(heather ? .13 : .15),kind,key+10,false,i%4==0);
+            const bool terminalSpike=heather && i%3!=2;
+            spray(top,terminal*(tipLength*(terminalSpike ? .78 : 1.)),tipLength*(heather ? .29 : .49),kind,key+7,false,i%2==0);
+            if(terminalSpike) heatherSpike(top,terminal*(terminalLength*1.38),girth*.29,flowering);
+
+            for(int fork=0;fork<(far ? 1 : 2);++fork) {
+                const auto twigKey=hash64(key+static_cast<unsigned>(fork)+110);
+                const double sign=(i+fork)%2 ? -1. : 1.;
+                const double turn=angle+sign*(.70+.75*randomUnit(twigKey));
+                const auto dir=radial(turn);
+                const auto joint=stem.at(.36+.36*fork+.09*randomUnit(twigKey+1));
+                const double span=r*(.26+.15*randomUnit(twigKey+2))*(1-.20*fork);
+                const double lift=h*((heather ? .22 : .12)+.07*randomUnit(twigKey+3));
+                const auto elbow=joint+dir*(span*.53)+vertical*(lift*.31);
+                const auto end=elbow+radial(turn+sign*.22)*(span*.47)+vertical*(lift*.69);
+                const Limb twig{joint,elbow,end};
+                twigMesh(twig,girth*.42,!far && fork==0 && i%2==0);
+                const double size=h*(heather ? .28 : .35)*(.84+.30*randomUnit(twigKey+4))*(far ? 1.19 : 1.);
+                const auto shoot=normalized(dir+vertical*(heather ? 1.85 : .30+.55*randomUnit(twigKey+5)));
+                const bool lateralSpike=heather && fork==1 && i%3!=0;
+                spray(end,shoot*(size*(lateralSpike ? .73 : 1.)),size*(heather ? .33 : .48),kind,twigKey+6,false,!far && fork==0);
+                if(!far && randomUnit(twigKey+7)<plant.plant.foliage) {
+                    const auto lateral=normalized(radial(turn-sign*.93)+vertical*(heather ? 1.35 : .32));
+                    spray(twig.at(.51),lateral*(size*.93),size*(heather ? .26 : .37),kind,twigKey+8,false,false);
+                }
+                if(lateralSpike) heatherSpike(end,shoot*(size*1.28),girth*.24,flowering);
+                if(extra) {
+                    const auto lower=stem.at(.23+.41*fork);
+                    const auto diverge=normalized(radial(angle-sign*.88)+vertical*(heather ? 1.27 : .50));
+                    spray(lower,diverge*(size*.87),size*(heather ? .18 : .30),kind,twigKey+9,true,false);
+                }
+            }
         }
     }
 
@@ -222,8 +316,8 @@ private:
     }
 };
 }
-TreeJoints buildTreeBranches(const SurfaceObject& plant,Color bark,Color leaves,bool simple,bool fine,
-                             std::vector<MeshFace>& faces,std::vector<Triangle>* sprayShadows) {
-    return TreeBuilder(plant,bark,leaves,simple,fine,faces,sprayShadows).grow();
+BranchJoints buildBranches(const SurfaceObject& plant,Color bark,Color leaves,bool simple,bool fine,
+                           std::vector<MeshFace>& faces,std::vector<Triangle>* sprayShadows) {
+    return BranchBuilder(plant,bark,leaves,simple,fine,faces,sprayShadows).grow();
 }
 } // namespace planet
